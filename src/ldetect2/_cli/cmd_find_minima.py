@@ -1,0 +1,54 @@
+"""CLI: find-minima subcommand."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+
+def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    p = subparsers.add_parser(
+        "find-minima",
+        help="Detect LD block breakpoints via Hanning filter + local search.",
+    )
+    p.add_argument("--input", required=True, type=Path, metavar="PATH",
+                   help="Gzipped vector file from matrix-to-vector.")
+    p.add_argument("--chr-name", required=True, metavar="TEXT",
+                   help="Chromosome name (e.g. chr2).")
+    p.add_argument("--dataset-path", required=True, type=Path, metavar="PATH",
+                   help="Root directory of the covariance matrix dataset.")
+    p.add_argument("--n-snps-bw-bpoints", required=True, type=int, metavar="N",
+                   help="Target mean SNPs between breakpoints (e.g. 50).")
+    p.add_argument("--output", required=True, type=Path, metavar="PATH",
+                   help="JSON output file.")
+    p.add_argument("--snp-first", type=int, default=-1, metavar="INT",
+                   help="First SNP position (auto-detected if omitted).")
+    p.add_argument("--snp-last", type=int, default=-1, metavar="INT",
+                   help="Last SNP position (auto-detected if omitted).")
+    p.add_argument("--trackback-delta", type=int, default=200, metavar="INT",
+                   help="Coarse trackback search range (default: 200).")
+    p.add_argument("--trackback-step", type=int, default=20, metavar="INT",
+                   help="Coarse trackback step size (default: 20).")
+    p.add_argument("--init-search-loc", type=int, default=1000, metavar="INT",
+                   help="Starting width for exponential search (default: 1000).")
+    p.set_defaults(func=_run)
+
+
+def _run(args: argparse.Namespace) -> int:
+    from ldetect2.io.partitions import CovarianceStore
+    from ldetect2.pipeline import find_breakpoints
+
+    store = CovarianceStore(root=args.dataset_path)
+    find_breakpoints(
+        input_path=args.input,
+        chr_name=args.chr_name,
+        store=store,
+        n_snps_bw_bpoints=args.n_snps_bw_bpoints,
+        output_path=args.output,
+        snp_first=args.snp_first,
+        snp_last=args.snp_last,
+        trackback_delta=args.trackback_delta,
+        trackback_step=args.trackback_step,
+        init_search_location=args.init_search_loc,
+    )
+    return 0
