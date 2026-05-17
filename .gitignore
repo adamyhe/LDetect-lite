@@ -2,6 +2,13 @@
 **/.vscode
 _reference
 tests/data/
+data/
+**/.snakemake/
+examples/*/results/
+examples/*/data/
+examples/*/ref/
+examples/*/resources/
+examples/*/work/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

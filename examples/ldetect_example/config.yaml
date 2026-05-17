@@ -1,0 +1,15 @@
+chromosome: "chr2"
+region_start: 39967768
+region_end: 40067768
+
+n_individuals: 379    # EUR Phase 1 individuals in eurinds.txt
+ne: 11418.0
+cov_cutoff: 1.0e-7
+n_snps_bw_bpoints: 50
+subset: fourier_ls
+
+bitbucket_base: "https://bitbucket.org/nygcresearch/ldetect/raw/master/ldetect/examples/example_data"
+
+ref_dir: "ref"
+work_dir: "work"
+results_dir: "results"

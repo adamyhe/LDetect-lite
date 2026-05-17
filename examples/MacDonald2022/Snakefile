@@ -1,0 +1,445 @@
+"""Snakemake workflow: Reproduce MacDonald et al. (2022) GRCh38 LD blocks.
+
+Reproduces the EUR / deCODE analysis and the published pyrho superpopulation
+analyses from:
+    MacDonald et al. (2022), https://github.com/jmacdon/LDblocks_GRCh38
+
+Pipeline steps:
+    0  Data download (VCFs, deCODE map, pyrho maps, centromeres)
+    1  VCF filtering with bcftools (MAF ≥ 0.01, SNPs only)
+    2  Individual list preparation (1000G population dirs ∩ VCF samples)
+    2a deCODE map conversion (5-col → 3-col per chromosome)
+    2b SNP position extraction from filtered VCFs
+    2c Genetic map selection (deCODE interpolation or published pyrho map)
+    3  LD block detection per chromosome (ldetect2 run)
+    4  Post-processing: centromere removal + small block merging
+    5  Genome-wide BED assembly (cat all chromosomes)
+
+Usage:
+    cd examples/MacDonald2022/
+    snakemake -n                         # dry-run, all chromosomes
+    snakemake --cores 8                  # run with 8 parallel jobs
+    snakemake --config chromosomes=[22]  # smoke-test on chr22 only
+"""
+
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+configfile: "config.yaml"
+
+
+CHROMS = config["chromosomes"]
+BLOCK_SETS = list(config["block_sets"].keys())
+RAW_DIR = Path(config["raw_vcf_dir"])
+FILT_DIR = Path(config["filtered_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+
+
+wildcard_constraints:
+    reference_bed=r"(deCODE_EUR|pyrho_(AFR|EAS|EUR|SAS))_LD_blocks\.bed"
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def block_set_population(block_set):
+    return config["block_sets"][block_set]["population"]
+
+
+def block_set_ne(block_set):
+    return pop_ne(block_set_population(block_set))
+
+
+def block_set_reference_bed(block_set):
+    return config["block_sets"][block_set]["reference_bed"]
+
+
+def block_set_genetic_map(wc):
+    block_config = config["block_sets"][wc.block_set]
+    if block_config["map_source"] == "decode":
+        return str(MAPS_DIR / "interpolated" / f"chr{wc.chrom}.tab.gz")
+    if block_config["map_source"] == "pyrho":
+        return str(
+            MAPS_DIR
+            / "pyrho_interpolated_maps"
+            / block_config["map_pop"]
+            / f"chr{wc.chrom}.tab.gz"
+        )
+    raise ValueError(f"Unknown map source: {block_config['map_source']}")
+
+
+def expected_individual_count_param(population):
+    expected = config["populations"][population].get("expected_count")
+    if expected is None:
+        return ""
+    return f"--expected-count {expected}"
+
+
+# ---------------------------------------------------------------------------
+# Target rule
+# ---------------------------------------------------------------------------
+
+
+rule all:
+    input:
+        expand(str(RESULTS / "{block_set}_LD_blocks.bed"), block_set=BLOCK_SETS),
+        expand(
+            str(RESULTS / "compare" / "{block_set}_block_comparison.tsv"),
+            block_set=BLOCK_SETS,
+        ),
+        str(RESULTS / "compare" / "map_summary.tsv"),
+        str(RESULTS / "compare" / "map_ref_comparison.tsv"),
+
+
+# ---------------------------------------------------------------------------
+# Step 0: Download
+# ---------------------------------------------------------------------------
+
+
+rule download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule download_decode_map:
+    output:
+        str(MAPS_DIR / "decode_raw" / "aau1043_datas3.gz"),
+    params:
+        url=config["decode_map_url"],
+    shell:
+        """
+        mkdir -p {MAPS_DIR}/decode_raw
+        wget -q -O {output} '{params.url}' || {{
+            echo "ERROR: Could not download deCODE map."
+            echo "Download manually from: {params.url}"
+            echo "Place at: {output}"
+            exit 1
+        }}
+        """
+
+
+rule download_centromeres:
+    output:
+        str(RES_DIR / "hg38_centromeres.txt.gz"),
+    params:
+        url=config["centromere_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} {params.url}"
+
+
+rule download_pyrho_map:
+    output:
+        str(MAPS_DIR / "pyrho_interpolated_maps" / "{map_pop}" / "chr{chrom}.tab.gz"),
+    params:
+        base_url=config["pyrho_map_base_url"],
+    shell:
+        """
+        mkdir -p {MAPS_DIR}/pyrho_interpolated_maps/{wildcards.map_pop}
+        wget -q -O {output} \
+            {params.base_url}/{wildcards.map_pop}/chr{wildcards.chrom}.tab.gz
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Filter VCFs
+# ---------------------------------------------------------------------------
+
+
+rule filter_vcf:
+    input:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    output:
+        vcf=str(FILT_DIR / "chr{chrom}.vcf.gz"),
+        tbi=str(FILT_DIR / "chr{chrom}.vcf.gz.tbi"),
+    shell:
+        """
+        mkdir -p {FILT_DIR}
+        bcftools view --min-af 0.01 --types snps -Oz -o {output.vcf} {input.vcf}
+        bcftools index --tbi {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Individual list
+# ---------------------------------------------------------------------------
+
+
+rule prep_individuals:
+    input:
+        vcf=str(FILT_DIR / "chr22.vcf.gz"),  # any chromosome suffices
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+        base_url=config["sample_data_base_url"],
+        expected_count=lambda wc: expected_individual_count_param(wc.population),
+    shell:
+        """
+        python scripts/prep_individuals.py \
+            --sample-data-base-url {params.base_url} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output} \
+            {params.expected_count}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2a: Convert deCODE map to 3-column per chromosome
+# ---------------------------------------------------------------------------
+
+
+rule convert_decode_map:
+    input:
+        rules.download_decode_map.output[0],
+    output:
+        str(MAPS_DIR / "decode_raw" / "chr{chrom}.tab.gz"),
+    shell:
+        """
+        python scripts/convert_decode_map.py \
+            --input {input} \
+            --output-dir {MAPS_DIR}/decode_raw \
+            --chromosomes {wildcards.chrom}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2b: Extract SNP positions from filtered VCF
+# ---------------------------------------------------------------------------
+
+
+rule extract_snp_positions:
+    input:
+        str(FILT_DIR / "chr{chrom}.vcf.gz"),
+    output:
+        str(MAPS_DIR / "snps" / "chr{chrom}.bed.gz"),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}/snps
+        bcftools query -f '%CHROM\t%POS0\t%POS\t%ID\n' {input} | bgzip > {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2c: Interpolate deCODE genetic map
+# ---------------------------------------------------------------------------
+
+
+rule interpolate_map:
+    input:
+        snps=rules.extract_snp_positions.output[0],
+        map=rules.convert_decode_map.output[0],
+    output:
+        str(MAPS_DIR / "interpolated" / "chr{chrom}.tab.gz"),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}/interpolated
+        ldetect2 interpolate-maps \
+            --snp-file {input.snps} \
+            --genetic-map {input.map} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Run ldetect2 per chromosome × block set
+#
+# The shared ldetect2 covariance code applies the covariance cutoff before
+# adding the diagonal shrinkage term, matching original ldetect behavior and
+# preventing population-monomorphic variants from entering the covariance
+# output. deCODE block sets use the interpolated deCODE map; pyrho block sets
+# use MacDonald's published already-interpolated pyrho maps directly.
+# ---------------------------------------------------------------------------
+
+
+rule run_ldetect2:
+    input:
+        genetic_map=block_set_genetic_map,
+        vcf=str(FILT_DIR / "chr{chrom}.vcf.gz"),
+        individuals=lambda wc: str(
+            RES_DIR / f"{block_set_population(wc.block_set)}_inds.txt"
+        ),
+    output:
+        bed=str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.bed"),
+    log:
+        run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect2.log"),
+        timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
+    benchmark:
+        str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.benchmark.tsv")
+    threads: config["cov_workers"]
+    params:
+        output_dir=str(RESULTS / "{block_set}" / "chr{chrom}"),
+        log_dir=str(RESULTS / "logs" / "{block_set}"),
+        ne=lambda wc: block_set_ne(wc.block_set),
+        cutoff=config["cov_cutoff"],
+        subset=config["subset"],
+        n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome chr{wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
+            --subset {params.subset} \
+            --workers {threads} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Post-processing
+# ---------------------------------------------------------------------------
+
+
+rule postprocess:
+    input:
+        bed=rules.run_ldetect2.output.bed,
+        vcf=str(FILT_DIR / "chr{chrom}.vcf.gz"),
+        centromeres=rules.download_centromeres.output[0],
+    output:
+        str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.final.bed"),
+    params:
+        min_snps=config["min_snps_per_block"],
+    shell:
+        """
+        python scripts/postprocess.py \
+            --bed {input.bed} \
+            --vcf {input.vcf} \
+            --centromeres {input.centromeres} \
+            --min-snps {params.min_snps} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Combine chromosomes into genome-wide BED
+# ---------------------------------------------------------------------------
+
+
+rule combine_beds:
+    input:
+        expand(
+            str(
+                RESULTS
+                / "{{block_set}}"
+                / "chr{chrom}"
+                / "chr{chrom}-ld-blocks.final.bed"
+            ),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "{block_set}_LD_blocks.bed"),
+    shell:
+        """
+        # Write header once, then body lines from all chromosomes (skip per-file headers)
+        echo -e "#chr\tstart\tstop" > {output}
+        for f in {input}; do
+            tail -n +2 "$f" >> {output}
+        done
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 6a: Validate interpolated genetic maps
+# ---------------------------------------------------------------------------
+
+
+rule validate_maps:
+    input:
+        expand(
+            str(MAPS_DIR / "interpolated" / "chr{chrom}.tab.gz"),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "compare" / "map_summary.tsv"),
+    shell:
+        """
+        python scripts/validate_maps.py \
+            --interpolated {input} \
+            --output {output}
+        """
+
+
+rule compare_maps:
+    input:
+        expand(
+            str(MAPS_DIR / "interpolated" / "chr{chrom}.tab.gz"),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "compare" / "map_ref_comparison.tsv"),
+    params:
+        ref_dir=str(RES_DIR / "macdonalds_maps"),
+    shell:
+        """
+        python scripts/compare_maps.py \
+            --ours {input} \
+            --ref-dir {params.ref_dir} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 6b: Compare LD blocks against MacDonald et al. published output
+# ---------------------------------------------------------------------------
+
+
+rule download_reference_bed:
+    output:
+        str(RES_DIR / "{reference_bed}"),
+    params:
+        base_url=config["reference_bed_base_url"],
+    shell:
+        """
+        mkdir -p {RES_DIR}
+        wget -q -O {output} \
+            {params.base_url}/{wildcards.reference_bed}
+        """
+
+
+rule compare_blocks:
+    input:
+        ours=str(RESULTS / "{block_set}_LD_blocks.bed"),
+        ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+    output:
+        str(RESULTS / "compare" / "{block_set}_block_comparison.tsv"),
+    params:
+        tolerance=50_000,
+    shell:
+        """
+        python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """

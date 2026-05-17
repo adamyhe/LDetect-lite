@@ -1,3 +1,8 @@
 """ldetect2: approximately independent LD blocks in the human genome."""
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("ldetect2")
+except PackageNotFoundError:
+    __version__ = "unknown"

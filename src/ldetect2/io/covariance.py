@@ -8,12 +8,15 @@ import gzip
 from pathlib import Path
 from typing import Any
 
-from ldetect2._util.logging import log_msg
+import numpy as np
+
+from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.partitions import CovarianceStore
 
 # ---------------------------------------------------------------------------
-# Column indices for the 8-column covariance partition file format:
+# Column indices for the legacy 8-column covariance partition text format:
 #   i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld
+# (Kept for insert_into_matrix* public APIs used in tests and external code.)
 # ---------------------------------------------------------------------------
 _COL_I_ID = 0
 _COL_J_ID = 1
@@ -28,10 +31,16 @@ _COL_SHRINK = 7
 Matrix = dict[int, Any]
 LocusList = list[int]
 
+_COMPACT_NPZ_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
+_FULL_NPZ_KEYS = frozenset(
+    {"i_pos", "j_pos", "i_gpos", "j_gpos", "naive_ld", "shrink_ld", "i_id", "j_id"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Full matrix (stores all fields per cell — needed for heatmap generation)
 # ---------------------------------------------------------------------------
+
 
 def insert_into_matrix(
     row: list[str],
@@ -63,7 +72,10 @@ def insert_into_matrix(
 
     if hi not in matrix[lo]["data"]:
         matrix[lo]["data"][hi] = {
-            "r_id": hi_id, "r_g": hi_g, "naive": naive, "shrink": shrink
+            "r_id": hi_id,
+            "r_g": hi_g,
+            "naive": naive,
+            "shrink": shrink,
         }
 
     if symmetric:
@@ -72,8 +84,75 @@ def insert_into_matrix(
             locus_list.insert(bisect.bisect_left(locus_list, hi), hi)
         if lo not in matrix[hi]["data"]:
             matrix[hi]["data"][lo] = {
-                "r_id": lo_id, "r_g": lo_g, "naive": naive, "shrink": shrink
+                "r_id": lo_id,
+                "r_g": lo_g,
+                "naive": naive,
+                "shrink": shrink,
             }
+
+
+def _insert_full_values(
+    loc_i: int,
+    loc_j: int,
+    i_gpos: float,
+    j_gpos: float,
+    naive: float,
+    shrink: float,
+    i_id: str,
+    j_id: str,
+    matrix: Matrix,
+    locus_list: LocusList,
+    symmetric: bool = False,
+) -> None:
+    if loc_i <= loc_j:
+        lo, hi = loc_i, loc_j
+        lo_id, hi_id = i_id, j_id
+        lo_g, hi_g = i_gpos, j_gpos
+    else:
+        lo, hi = loc_j, loc_i
+        lo_id, hi_id = j_id, i_id
+        lo_g, hi_g = j_gpos, i_gpos
+
+    if lo not in matrix:
+        matrix[lo] = {"data": {}, "desc": {"l_id": lo_id, "l_g": lo_g}}
+        locus_list.insert(bisect.bisect_left(locus_list, lo), lo)
+
+    if hi not in matrix[lo]["data"]:
+        matrix[lo]["data"][hi] = {
+            "r_id": hi_id,
+            "r_g": hi_g,
+            "naive": naive,
+            "shrink": shrink,
+        }
+
+    if symmetric:
+        if hi not in matrix:
+            matrix[hi] = {"data": {}, "desc": {"l_id": hi_id, "l_g": hi_g}}
+            locus_list.insert(bisect.bisect_left(locus_list, hi), hi)
+        if lo not in matrix[hi]["data"]:
+            matrix[hi]["data"][lo] = {
+                "r_id": lo_id,
+                "r_g": lo_g,
+                "naive": naive,
+                "shrink": shrink,
+            }
+
+
+def _require_npz_keys(
+    path: Path, data: np.lib.npyio.NpzFile, keys: frozenset[str]
+) -> None:
+    missing = sorted(keys - set(data.files))
+    if not missing:
+        return
+    if keys == _FULL_NPZ_KEYS and _COMPACT_NPZ_KEYS.issubset(data.files):
+        raise ValueError(
+            f"{path} is a compact covariance partition and lacks full-schema "
+            f"field(s): {', '.join(missing)}. Full matrix and heatmap readers "
+            "require full covariance partitions; rerun with "
+            "`ldetect2 run --covariance-cache full` or use standalone "
+            "`ldetect2 calc-covariance`."
+        )
+    raise ValueError(f"{path} is missing covariance field(s): {', '.join(missing)}")
 
 
 def read_partition_into_matrix(
@@ -89,17 +168,47 @@ def read_partition_into_matrix(
 ) -> None:
     path = store.partition_path(name, partitions[p_index][0], partitions[p_index][1])
     try:
-        with gzip.open(path, "rt") as f:
-            reader = csv.reader(f, delimiter=" ")
-            for row in reader:
-                insert_into_matrix(row, matrix, locus_list, symmetric)
-    except EOFError as exc:
-        log_msg(f"EOFError reading {path}: {exc}")
+        if path.exists():
+            with np.load(path) as data:
+                _require_npz_keys(path, data, _FULL_NPZ_KEYS)
+                for ip, jp, ig, jg, naive, shrink, iid, jid in zip(
+                    data["i_pos"],
+                    data["j_pos"],
+                    data["i_gpos"],
+                    data["j_gpos"],
+                    data["naive_ld"],
+                    data["shrink_ld"],
+                    data["i_id"],
+                    data["j_id"],
+                ):
+                    _insert_full_values(
+                        int(ip),
+                        int(jp),
+                        float(ig),
+                        float(jg),
+                        float(naive),
+                        float(shrink),
+                        str(iid),
+                        str(jid),
+                        matrix,
+                        locus_list,
+                        symmetric,
+                    )
+        else:
+            with gzip.open(path.with_suffix(".gz"), "rt") as f:
+                reader = csv.reader(f, delimiter=" ")
+                for row in reader:
+                    insert_into_matrix(row, matrix, locus_list, symmetric)
+    except ValueError:
+        raise
+    except Exception as exc:
+        log_msg(f"Error reading {path}: {exc}")
 
 
 # ---------------------------------------------------------------------------
 # Lean matrix (stores only shrink value per cell — primary path)
 # ---------------------------------------------------------------------------
+
 
 def insert_into_matrix_lean(
     row: list[str],
@@ -107,16 +216,26 @@ def insert_into_matrix_lean(
     locus_list: LocusList,
 ) -> None:
     """Insert one covariance row into the lean matrix (shrink values only)."""
-    loc_i = int(row[_COL_I_POS])
-    loc_j = int(row[_COL_J_POS])
+    _insert_lean_values(
+        int(row[_COL_I_POS]),
+        int(row[_COL_J_POS]),
+        float(row[_COL_SHRINK]),
+        matrix,
+        locus_list,
+    )
 
+
+def _insert_lean_values(
+    loc_i: int,
+    loc_j: int,
+    shrink: float,
+    matrix: Matrix,
+    locus_list: LocusList,
+) -> None:
     lo, hi = (loc_i, loc_j) if loc_i <= loc_j else (loc_j, loc_i)
-    shrink = float(row[_COL_SHRINK])
-
     if lo not in matrix:
         matrix[lo] = {}
         locus_list.insert(bisect.bisect_left(locus_list, lo), lo)
-
     if hi not in matrix[lo]:
         matrix[lo][hi] = shrink
 
@@ -134,17 +253,26 @@ def read_partition_into_matrix_lean(
 ) -> None:
     path = store.partition_path(name, partitions[p_index][0], partitions[p_index][1])
     try:
-        with gzip.open(path, "rt") as f:
-            reader = csv.reader(f, delimiter=" ")
-            for row in reader:
-                insert_into_matrix_lean(row, matrix, locus_list)
-    except EOFError as exc:
-        log_msg(f"EOFError reading {path}: {exc}")
+        if path.exists():
+            with np.load(path) as data:
+                _require_npz_keys(path, data, _COMPACT_NPZ_KEYS)
+                for ip, jp, s in zip(data["i_pos"], data["j_pos"], data["shrink_ld"]):
+                    _insert_lean_values(int(ip), int(jp), float(s), matrix, locus_list)
+        else:
+            with gzip.open(path.with_suffix(".gz"), "rt") as f:
+                reader = csv.reader(f, delimiter=" ")
+                for row in reader:
+                    insert_into_matrix_lean(row, matrix, locus_list)
+    except ValueError:
+        raise
+    except Exception as exc:
+        log_msg(f"Error reading {path}: {exc}")
 
 
 # ---------------------------------------------------------------------------
 # Matrix deletion helpers
 # ---------------------------------------------------------------------------
+
 
 def _delete_matrix(cutoff: int, locus_list: LocusList, matrix: Matrix) -> int:
     """Delete loci < cutoff from matrix; return count deleted."""
@@ -161,7 +289,7 @@ def delete_loci_smaller_than(
     locus_list: LocusList,
     locus_list_deleted: LocusList,
 ) -> None:
-    log_msg("Deleting segment of matrix")
+    log_debug("Deleting segment of matrix")
     cnt = _delete_matrix(cutoff, locus_list, matrix)
     locus_list_deleted.extend(locus_list[:cnt])
     del locus_list[:cnt]
@@ -172,7 +300,7 @@ def delete_loci_smaller_than_leanest(
     matrix: Matrix,
     locus_list: LocusList,
 ) -> None:
-    log_msg("Deleting segment of matrix (leanest)")
+    log_debug("Deleting segment of matrix (leanest)")
     cnt = _delete_matrix(cutoff, locus_list, matrix)
     del locus_list[:cnt]
 
@@ -185,7 +313,7 @@ def delete_loci_smaller_than_lean(
     out_path: Path,
     sum_list: dict[int, float],
 ) -> None:
-    log_msg("Writing segment of matrix to file and deleting")
+    log_debug("Writing segment of matrix to file and deleting")
     cnt = _delete_matrix(cutoff, locus_list, matrix)
     _write_corr_vector_append(out_path, locus_list, 0, cnt, sum_list)
     for i in range(cnt):
@@ -196,6 +324,7 @@ def delete_loci_smaller_than_lean(
 # ---------------------------------------------------------------------------
 # Correlation vector output
 # ---------------------------------------------------------------------------
+
 
 def write_corr_vector(
     out_path: Path,
@@ -209,7 +338,7 @@ def write_corr_vector(
         writer = csv.writer(f, delimiter="\t")
         n_del = len(locus_list_deleted)
         n_act = len(locus_list)
-        log_msg(f"Writing {n_del} deleted + {n_act} active loci")
+        log_debug(f"Writing {n_del} deleted + {n_act} active loci")
         for locus_list_part in (locus_list_deleted, locus_list):
             for loc in locus_list_part:
                 if loc not in sum_list:
@@ -220,7 +349,7 @@ def write_corr_vector(
                 else:
                     val = sum_list[loc]
                 writer.writerow([loc, val])
-    log_msg("Output done")
+    log_debug("Output done")
 
 
 def write_corr_vector_slice(
@@ -255,4 +384,4 @@ def _write_corr_vector_append(
             else:
                 val2 = sum_list[loc]
             writer.writerow([loc, val2])
-    log_msg("Output done")
+    log_debug("Output done")

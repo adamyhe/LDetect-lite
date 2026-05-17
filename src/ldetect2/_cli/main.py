@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 from ldetect2 import __version__
@@ -17,8 +18,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
+
     parser.add_argument(
-        "--verbose", action="store_true", help="Enable debug logging"
+        "-v",
+        "--verbosity",
+        choices=["debug", "info", "warning", "error"],
+        default="info",
+        metavar="LEVEL",
+        help="Logging verbosity: debug, info (default), warning, error.",
     )
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
@@ -27,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     # Register all subcommands
     from ldetect2._cli import (
         cmd_covariance,
+        cmd_covariance_summary,
         cmd_extract_bpoints,
         cmd_find_minima,
         cmd_interpolate_maps,
@@ -37,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd_partition.register(subparsers)
     cmd_covariance.register(subparsers)
+    cmd_covariance_summary.register(subparsers)
     cmd_matrix_to_vector.register(subparsers)
     cmd_find_minima.register(subparsers)
     cmd_extract_bpoints.register(subparsers)
@@ -44,7 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     cmd_run.register(subparsers)
 
     args = parser.parse_args(argv)
-    configure_logging(verbose=args.verbose)
+
+    configure_logging(level=getattr(logging, args.verbosity.upper()))
 
     return args.func(args)
 

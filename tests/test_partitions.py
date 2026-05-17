@@ -13,29 +13,32 @@ from ldetect2.io.partitions import (
     relevant_subpartitions,
 )
 
-
 # ---------------------------------------------------------------------------
 # CovarianceStore path construction
 # ---------------------------------------------------------------------------
 
+
 def test_partitions_path():
     store = CovarianceStore(root=Path("/data/cov"))
-    assert store.partitions_path("chr2") == Path("/data/cov/scripts/chr2_partitions")
+    assert store.partitions_path("chr2") == Path("/data/cov/chr2_partitions.txt")
 
 
 def test_partition_path():
     store = CovarianceStore(root=Path("/data/cov"))
-    assert store.partition_path("chr2", 100, 200) == Path("/data/cov/chr2/chr2.100.200.gz")
+    assert store.partition_path("chr2", 100, 200) == Path(
+        "/data/cov/chr2/chr2.100.200.npz"
+    )
 
 
 def test_partitions_dir():
     store = CovarianceStore(root=Path("/data/cov"))
-    assert store.partitions_dir == Path("/data/cov/scripts")
+    assert store.partitions_dir == Path("/data/cov")
 
 
 # ---------------------------------------------------------------------------
 # read_partitions against the real example fixture
 # ---------------------------------------------------------------------------
+
 
 def test_read_partitions_example(example_store):
     partitions = read_partitions("chr2", example_store)
@@ -50,9 +53,7 @@ def test_read_partitions_example(example_store):
 # ---------------------------------------------------------------------------
 
 def test_read_partitions_multi(tmp_path):
-    scripts_dir = tmp_path / "scripts"
-    scripts_dir.mkdir()
-    (scripts_dir / "testchr_partitions").write_text("100 200\n200 300\n300 400\n")
+    (tmp_path / "testchr_partitions.txt").write_text("100 200\n200 300\n300 400\n")
     store = CovarianceStore(root=tmp_path)
     partitions = read_partitions("testchr", store)
     assert partitions == [(100, 200), (200, 300), (300, 400)]
