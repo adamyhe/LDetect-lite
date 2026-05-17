@@ -73,9 +73,8 @@ def interpolate(
                     gp = 0.0
                 else:
                     # Interpolate between map_idx-1 and map_idx
-                    frac = (
-                        (pos - map_positions[map_idx - 1])
-                        / (map_positions[map_idx] - map_positions[map_idx - 1])
+                    frac = (pos - map_positions[map_idx - 1]) / (
+                        map_positions[map_idx] - map_positions[map_idx - 1]
                     )
                     gp = map_gpos[map_idx - 1] + frac * (
                         map_gpos[map_idx] - map_gpos[map_idx - 1]

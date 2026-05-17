@@ -1,4 +1,4 @@
-"""Integration tests: run pipeline steps against example data and compare to reference."""
+"""Integration tests for the example pipeline against reference outputs."""
 
 from __future__ import annotations
 
@@ -116,6 +116,57 @@ def test_find_breakpoints_loci_in_range(example_data_dir, example_store, tmp_pat
     loci = data["fourier_ls"]["loci"]
     out_of_range = [loc for loc in loci if not (39967768 <= loc <= 40067768)]
     assert not out_of_range, f"Loci out of range: {out_of_range}"
+
+
+def test_find_breakpoints_uses_supplied_covariance_cache(
+    example_data_dir,
+    example_store,
+    tmp_path,
+    monkeypatch,
+):
+    """Cached normal metrics should avoid reloading chromosome arrays."""
+    import ldetect2.local_search as local_search_mod
+    import ldetect2.pipeline as pipeline_mod
+    from ldetect2._util.covariance_array import load_chromosome_covariance
+    from ldetect2.io.partitions import get_final_partitions
+
+    partitions = get_final_partitions(
+        example_store,
+        "chr2",
+        39967768,
+        40067768,
+    )
+    cache = load_chromosome_covariance(
+        "chr2",
+        example_store,
+        partitions,
+        39967768,
+        40067768,
+    )
+
+    def fail_reload(*args, **kwargs):
+        raise AssertionError("find_breakpoints should reuse supplied covariance cache")
+
+    monkeypatch.setattr(pipeline_mod, "load_covariance_arrays", fail_reload)
+    monkeypatch.setattr(local_search_mod, "load_covariance_arrays", fail_reload)
+
+    out_json = tmp_path / "breakpoints.json"
+    ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
+    pipeline_mod.find_breakpoints(
+        input_path=ref_vector,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=out_json,
+        snp_first=39967768,
+        snp_last=40067768,
+        covariance_cache=cache,
+    )
+
+    data = json.loads(out_json.read_text())
+    for subset in ("fourier", "fourier_ls", "uniform", "uniform_ls"):
+        assert data[subset]["loci"]
+        assert "metric" in data[subset]
 
 
 # ---------------------------------------------------------------------------

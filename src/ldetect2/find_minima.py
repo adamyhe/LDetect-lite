@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -79,7 +79,9 @@ def _trackback(
     found_more = True
     while found_more:
         found_more = False
-        for i in range(start_search + step_coarse, start_search + delta_coarse, step_coarse):
+        for i in range(
+            start_search + step_coarse, start_search + delta_coarse, step_coarse
+        ):
             if i >= len(wrapper):
                 break
             if wrapper[i] == srch_val:
@@ -95,7 +97,9 @@ def _trackback(
         found_more = True
         while found_more:
             found_more = False
-            for i in range(start_search + step_fine, start_search + delta_fine, step_fine):
+            for i in range(
+                start_search + step_fine, start_search + delta_fine, step_fine
+            ):
                 if i >= len(wrapper):
                     break
                 if wrapper[i] == srch_val:

@@ -25,6 +25,48 @@ except ImportError:
 
 
 @_njit_fallback
+def _count_pairwise_ld_impl(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+) -> int:
+    n_snps = hap_mat.shape[0]
+    n_haps = hap_mat.shape[1]
+    n_total = float(n_haps)
+
+    cnt = 0
+    for i in range(n_snps):
+        gpos1 = gpos_arr[i]
+        for j in range(i, n_snps):
+            df = gpos_arr[j] - gpos1
+            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+            if ee < cutoff:
+                break
+
+            a = hap_mat[i]
+            b = hap_mat[j]
+            n11 = np.sum(a * b)
+            n1x = np.sum(a)
+            nx1 = np.sum(b)
+
+            f11 = n11 / n_total
+            f1 = n1x / n_total
+            f2 = nx1 / n_total
+            d_naive = f11 - f1 * f2
+            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+
+            if math.fabs(ds2) < cutoff:
+                continue
+
+            cnt += 1
+
+    return cnt
+
+
+@_njit_fallback
 def _pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -49,12 +91,12 @@ def _pairwise_ld_impl(
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     n_total = float(n_haps)
-    max_pairs = n_snps * (n_snps + 1) // 2
+    n_pairs = _count_pairwise_ld_impl(hap_mat, gpos_arr, ne, n_ind, theta, cutoff)
 
-    ii = np.empty(max_pairs, dtype=np.int64)
-    jj = np.empty(max_pairs, dtype=np.int64)
-    d_naive_arr = np.empty(max_pairs, dtype=np.float64)
-    ds2_arr = np.empty(max_pairs, dtype=np.float64)
+    ii = np.empty(n_pairs, dtype=np.int32)
+    jj = np.empty(n_pairs, dtype=np.int32)
+    d_naive_arr = np.empty(n_pairs, dtype=np.float64)
+    ds2_arr = np.empty(n_pairs, dtype=np.float64)
 
     cnt = 0
     for i in range(n_snps):
@@ -76,11 +118,12 @@ def _pairwise_ld_impl(
             f2 = nx1 / n_total
             d_naive = f11 - f1 * f2
             ds2 = (1.0 - theta) ** 2 * d_naive * ee
-            if i == j:
-                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
 
             if math.fabs(ds2) < cutoff:
                 continue
+
+            if i == j:
+                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
 
             ii[cnt] = i
             jj[cnt] = j
@@ -88,7 +131,7 @@ def _pairwise_ld_impl(
             ds2_arr[cnt] = ds2
             cnt += 1
 
-    return ii[:cnt], jj[:cnt], d_naive_arr[:cnt], ds2_arr[:cnt]
+    return ii, jj, d_naive_arr, ds2_arr
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +198,8 @@ def partition_chromosome(
                 break
             test += 1
 
-        lines.append(f"{positions[start]} {positions[test]}")
+        end_idx = min(test, n_snp - 1)
+        lines.append(f"{positions[start]} {positions[end_idx]}")
 
     output_path.write_text("\n".join(lines) + "\n")
 
@@ -172,6 +216,7 @@ def calc_covariance(
     output_path: Path,
     ne: float = 11418.0,
     cutoff: float = 1e-7,
+    compact_output: bool = False,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -188,10 +233,14 @@ def calc_covariance(
             data rows).
         genetic_map_path: Gzipped genetic map (columns: chr, position, cM).
         individuals_path: Plain-text file; one individual ID per line.
-        output_path: Gzipped 8-column output file:
-            ``i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld``
+        output_path: Compressed NumPy output (``.npz``) with named arrays:
+            ``i_pos``, ``j_pos``, ``i_gpos``, ``j_gpos``, ``naive_ld``,
+            ``shrink_ld``, ``i_id``, ``j_id``. When ``compact_output`` is true,
+            only ``i_pos``, ``j_pos``, and ``shrink_ld`` are written.
         ne: Effective population size.
         cutoff: Pairs whose ``|Ds2| < cutoff`` are not written.
+        compact_output: Write the compact restartable cache schema used by
+            ``ldetect2 run``.
     """
     # --- read individuals ---
     individuals: list[str] = []
@@ -279,7 +328,6 @@ def calc_covariance(
         return
 
     # --- build numpy arrays for the JIT kernel ---
-    n_snps = len(all_pos)
     hap_mat = np.array(haps, dtype=np.uint8)  # (n_snps, n_haps)
     gpos_arr = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)  # (n_snps,)
 
@@ -289,11 +337,28 @@ def calc_covariance(
     )
 
     # --- write output ---
-    with gzip.open(output_path, "wt") as out:
-        for idx in range(len(ii)):
-            i, j = int(ii[idx]), int(jj[idx])
-            out.write(
-                f"{all_rs[i]} {all_rs[j]} {all_pos[i]} {all_pos[j]} "
-                f"{pos2gpos[all_pos[i]]} {pos2gpos[all_pos[j]]} "
-                f"{d_naive_arr[idx]} {ds2_arr[idx]}\n"
-            )
+    pos_arr = np.array(all_pos, dtype=np.int32)
+    i_pos = pos_arr[ii]
+    j_pos = pos_arr[jj]
+    if compact_output:
+        np.savez_compressed(
+            output_path,
+            i_pos=i_pos,
+            j_pos=j_pos,
+            shrink_ld=ds2_arr,
+        )
+        return
+
+    gpos_flat = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)
+    rs_arr = np.array(all_rs)
+    np.savez_compressed(
+        output_path,
+        i_pos=i_pos,
+        j_pos=j_pos,
+        i_gpos=gpos_flat[ii],
+        j_gpos=gpos_flat[jj],
+        naive_ld=d_naive_arr,
+        shrink_ld=ds2_arr,
+        i_id=rs_arr[ii],
+        j_id=rs_arr[jj],
+    )

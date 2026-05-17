@@ -6,33 +6,32 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from ldetect2._util.logging import log_msg
+from ldetect2._util.logging import log_debug
 
 
 @dataclass(frozen=True)
 class CovarianceStore:
     """Encapsulates the directory layout of a covariance matrix dataset.
 
-    The expected layout mirrors the reference implementation convention::
+    The expected layout::
 
         <root>/
-            scripts/
-                <name>_partitions      # space-delimited start/end pairs
+            <name>_partitions.txt      # space-delimited start/end pairs
             <name>/
-                <name>.<start>.<end>.gz  # gzipped 8-column covariance files
+                <name>.<start>.<end>.npz  # compressed NumPy covariance files
     """
 
     root: Path
 
     @property
     def partitions_dir(self) -> Path:
-        return self.root / "scripts"
+        return self.root
 
     def partitions_path(self, name: str) -> Path:
-        return self.partitions_dir / f"{name}_partitions"
+        return self.root / f"{name}_partitions.txt"
 
     def partition_path(self, name: str, start: int, end: int) -> Path:
-        return self.root / name / f"{name}.{start}.{end}.gz"
+        return self.root / name / f"{name}.{start}.{end}.npz"
 
 
 def read_partitions(name: str, store: CovarianceStore) -> list[tuple[int, int]]:
@@ -99,15 +98,13 @@ def get_final_partitions(
     if snp_first > snp_last:
         raise ValueError(f"snp_first ({snp_first}) > snp_last ({snp_last})")
 
-    log_msg("Reading partitions file")
+    log_debug("Reading partitions file")
     partitions = read_partitions(name, store)
 
-    log_msg("Getting relevant partitions")
+    log_debug("Getting relevant partitions")
     partitions = relevant_subpartitions(partitions, snp_first, snp_last)
 
     if not partitions:
         raise ValueError("No relevant subpartitions found")
 
     return partitions
-
-

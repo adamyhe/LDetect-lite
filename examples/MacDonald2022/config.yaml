@@ -1,0 +1,97 @@
+chromosomes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+populations:
+  AFR:
+    subpops: [YRI, LWK, GWD, MSL, ESN]  # ASW and ACB excluded per MacDonald
+    expected_count: 513
+    # HapMap II YRI effective population size used by SHAPEIT.
+    ne: 17469
+  EAS:
+    subpops: [CHB, JPT, CHS, CDX, KHV]
+    expected_count: 515
+    # HapMap II CHB+JPT effective population size used by SHAPEIT.
+    ne: 14269
+  EUR:
+    subpops: [TSI, IBS, CEU, GBR]  # FIN excluded per MacDonald
+    expected_count: 417
+    # HapMap II CEU effective population size used by SHAPEIT/ldetect.
+    ne: 11418
+  SAS:
+    subpops: [GIH, PJL, BEB, STU, ITU]
+    expected_count: 492
+    # No HapMap II SAS-specific default is cited by SHAPEIT; keep CEU default.
+    ne: 11418
+
+# Output block sets. The original deCODE EUR target keeps the historical
+# result name (EUR). The pyrho targets reproduce the four published
+# superpopulation BEDs from the MacDonald reference repository.
+block_sets:
+  EUR:
+    population: EUR
+    map_source: decode
+    reference_bed: deCODE_EUR_LD_blocks.bed
+  pyrho_AFR:
+    population: AFR
+    map_source: pyrho
+    map_pop: GWD
+    reference_bed: pyrho_AFR_LD_blocks.bed
+  pyrho_EAS:
+    population: EAS
+    map_source: pyrho
+    map_pop: CHB
+    reference_bed: pyrho_EAS_LD_blocks.bed
+  pyrho_EUR:
+    population: EUR
+    map_source: pyrho
+    map_pop: IBS
+    reference_bed: pyrho_EUR_LD_blocks.bed
+  pyrho_SAS:
+    population: SAS
+    map_source: pyrho
+    map_pop: GIH
+    reference_bed: pyrho_SAS_LD_blocks.bed
+
+# Directories (relative to the analysis/ directory)
+raw_vcf_dir: data/raw
+filtered_vcf_dir: data/filtered
+maps_dir: data/maps
+resources_dir: resources
+results_dir: results
+
+# ldetect2 parameters
+cov_cutoff: 0.0000001
+subset: fourier_ls
+# MacDonald et al. call P02_minima_pipeline.py via runStep4.sh with the
+# n_snps_bw_bpoints argument. Use SNP spacing rather than stale reference-BED
+# breakpoint-count targeting.
+n_snps_bw_bpoints: 7000
+# Parallel workers for covariance calculation within each chromosome job.
+# Set to the number of partitions per chromosome (~40 for human autosomes).
+# Snakemake will reserve this many cores per job, so total cores used =
+# (simultaneous chromosome jobs) × cov_workers.
+cov_workers: 16
+
+# Post-processing
+min_snps_per_block: 100
+centromere_bed: resources/hg38_centromeres.bed
+
+# 1000G reference panel (GRCh38, Dec 2018 biallelic SNV release)
+vcf_base_url: "http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000_genomes_project/release/20181203_biallelic_SNV"
+vcf_filename_template: "ALL.chr{chrom}.shapeit2_integrated_v1a.GRCh38.20181129.phased.vcf.gz"
+
+# 1000G population directories used by the MacDonald et al. README to build
+# eurinds.txt, followed by intersection with a filtered VCF header.
+sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000_genomes_project/data"
+
+# deCODE recombination map (Halldorsson et al. 2019, Science)
+# NOTE: requires journal access; download manually if behind paywall and place at
+#       data/maps/decode_raw/aau1043_datas3.gz
+decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
+
+# MacDonald et al. published already-interpolated pyrho maps in the reference
+# repository. These are in the chr/position/cM format accepted by ldetect2 run.
+pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
+reference_bed_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data"
+
+# UCSC GRCh38 centromere coordinates
+centromere_url: "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/centromeres.txt.gz"

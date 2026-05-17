@@ -14,16 +14,37 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         "extract-bpoints",
         help="Extract breakpoints from a find-minima JSON file and write a BED file.",
     )
-    p.add_argument("--name", required=True, metavar="TEXT",
-                   help="Chromosome name (e.g. chr2).")
-    p.add_argument("--dataset-path", required=True, type=Path, metavar="PATH",
-                   help="Root directory of the covariance matrix dataset.")
-    p.add_argument("--breakpoints", required=True, type=Path, metavar="PATH",
-                   help="JSON file from find-minima.")
-    p.add_argument("--subset", required=True, choices=_VALID_SUBSETS, metavar="SUBSET",
-                   help=f"Breakpoint set to extract: {{{', '.join(_VALID_SUBSETS)}}}.")
-    p.add_argument("--output", type=Path, default=None, metavar="PATH",
-                   help="Output BED file (default: stdout).")
+    p.add_argument(
+        "--name", required=True, metavar="TEXT", help="Chromosome name (e.g. chr2)."
+    )
+    p.add_argument(
+        "--dataset-path",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Root directory of the covariance matrix dataset.",
+    )
+    p.add_argument(
+        "--breakpoints",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="JSON file from find-minima.",
+    )
+    p.add_argument(
+        "--subset",
+        required=True,
+        choices=_VALID_SUBSETS,
+        metavar="SUBSET",
+        help=f"Breakpoint set to extract: {{{', '.join(_VALID_SUBSETS)}}}.",
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Output BED file (default: stdout).",
+    )
     p.set_defaults(func=_run)
 
 

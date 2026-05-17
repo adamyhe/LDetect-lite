@@ -1,0 +1,284 @@
+"""Snakemake workflow: Reproduce the ldetect example analysis.
+
+Reproduces the original ldetect EUR chr2 example from:
+    Berisa & Pickrell (2016), https://bitbucket.org/nygcresearch/ldetect
+
+Reference data (chr2:39967768-40067768, 379 EUR individuals) is downloaded
+from BitBucket. The original VCF is not publicly archived, so this example
+starts from the reference covariance matrix in the legacy 8-column gzipped text
+format. The workflow converts that reference-only .gz file to the current
+ldetect2 NPZ partition format before any ldetect2 command consumes it.
+
+Pipeline steps:
+    0  Download reference intermediates from BitBucket
+    1  Stage legacy covariance as ldetect2 NPZ (example-only compatibility)
+    2  Stage reference partition file
+    3  Run matrix-to-vector   (compare vs reference vector)
+    4  Run find-minima         (compare vs reference breakpoints)
+    5  Run extract-bpoints     (compare vs reference BED)
+    6  Run partition-chromosome with reference genetic map
+       (note: reference file has only 1 window; full-chr2 output won't match)
+    7  Aggregate comparison report
+
+Usage:
+    cd examples/ldetect_example/
+    snakemake -n               # dry-run
+    snakemake --cores 4        # run
+"""
+
+from pathlib import Path
+
+configfile: "config.yaml"
+
+CHROM     = config["chromosome"]
+START     = config["region_start"]
+END       = config["region_end"]
+N_INDS    = config["n_individuals"]
+NE        = config["ne"]
+N_SNPS    = config["n_snps_bw_bpoints"]
+SUBSET    = config["subset"]
+BB_BASE   = config["bitbucket_base"]
+
+REF_DIR   = Path(config["ref_dir"])
+WORK_DIR  = Path(config["work_dir"])
+RES_DIR   = Path(config["results_dir"])
+
+# Reference file paths (downloaded from BitBucket)
+REF_COV_GZ   = REF_DIR / f"cov_matrix/{CHROM}/{CHROM}.{START}.{END}.gz"
+REF_PARTS    = REF_DIR / f"cov_matrix/scripts/{CHROM}_partitions"
+REF_MAP      = REF_DIR / f"{CHROM}.interpolated_genetic_map.gz"
+REF_INDS     = REF_DIR / "eurinds.txt"
+REF_VECTOR   = REF_DIR / f"vector/vector-EUR-{CHROM}-{START}-{END}.txt.gz"
+REF_BPOINTS  = REF_DIR / f"minima/minima-EUR-{CHROM}-{N_SNPS}-{START}-{END}.pickle"
+REF_BED      = REF_DIR / f"bed/EUR-{CHROM}-{N_SNPS}-{START}-{END}.bed"
+
+# Our pipeline outputs
+WORK_NPZ    = WORK_DIR / f"{CHROM}/{CHROM}.{START}.{END}.npz"
+WORK_PARTS  = WORK_DIR / f"{CHROM}_partitions.txt"
+WORK_VECTOR = WORK_DIR / f"vector-{CHROM}.txt.gz"
+WORK_BPTS   = WORK_DIR / f"breakpoints-{CHROM}.json"
+WORK_BED    = WORK_DIR / f"{CHROM}-ld-blocks.bed"
+WORK_GEN_PARTS = WORK_DIR / f"generated_partitions/{CHROM}_partitions"
+
+
+# ---------------------------------------------------------------------------
+# Target rule
+# ---------------------------------------------------------------------------
+
+rule all:
+    input:
+        str(RES_DIR / "compare_vector.tsv"),
+        str(RES_DIR / "compare_bpoints.tsv"),
+        str(RES_DIR / "compare_bed.tsv"),
+
+
+# ---------------------------------------------------------------------------
+# Step 0: Download reference data from BitBucket
+# ---------------------------------------------------------------------------
+
+rule download_ref:
+    output:
+        cov_gz   = str(REF_COV_GZ),
+        parts    = str(REF_PARTS),
+        map_     = str(REF_MAP),
+        inds     = str(REF_INDS),
+        vector   = str(REF_VECTOR),
+        bpoints  = str(REF_BPOINTS),
+        bed      = str(REF_BED),
+    params:
+        base = BB_BASE,
+        chrom = CHROM,
+        start = START,
+        end   = END,
+        n     = N_SNPS,
+    shell:
+        """
+        mkdir -p {REF_DIR}/cov_matrix/{params.chrom} \
+                 {REF_DIR}/cov_matrix/scripts \
+                 {REF_DIR}/vector \
+                 {REF_DIR}/minima \
+                 {REF_DIR}/bed
+
+        wget -q -O {output.cov_gz}  "{params.base}/cov_matrix/{params.chrom}/{params.chrom}.{params.start}.{params.end}.gz"
+        wget -q -O {output.parts}   "{params.base}/cov_matrix/scripts/{params.chrom}_partitions"
+        wget -q -O {output.map_}    "{params.base}/{params.chrom}.interpolated_genetic_map.gz"
+        wget -q -O {output.inds}    "{params.base}/eurinds.txt"
+        wget -q -O {output.vector}  "{params.base}/vector/vector-EUR-{params.chrom}-{params.start}-{params.end}.txt.gz"
+        wget -q -O {output.bpoints} "{params.base}/minima/minima-EUR-{params.chrom}-{params.n}-{params.start}-{params.end}.pickle"
+        wget -q -O {output.bed}     "{params.base}/bed/EUR-{params.chrom}-{params.n}-{params.start}-{params.end}.bed"
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Stage legacy covariance as ldetect2 NPZ
+# ---------------------------------------------------------------------------
+
+rule convert_ref_covariance:
+    input:
+        str(REF_COV_GZ),
+    output:
+        str(WORK_NPZ),
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        python scripts/convert_covariance.py --input {input} --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Stage reference partition file
+# ---------------------------------------------------------------------------
+
+rule stage_ref_partitions:
+    input:
+        str(REF_PARTS),
+    output:
+        str(WORK_PARTS),
+    shell:
+        "mkdir -p $(dirname {output}) && cp {input} {output}"
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Matrix → vector
+# ---------------------------------------------------------------------------
+
+rule matrix_to_vector:
+    input:
+        npz   = str(WORK_NPZ),
+        parts = str(WORK_PARTS),
+    output:
+        str(WORK_VECTOR),
+    shell:
+        """
+        ldetect2 matrix-to-vector \
+            --dataset-path {WORK_DIR} \
+            --name {CHROM} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Find minima
+# ---------------------------------------------------------------------------
+
+rule find_minima:
+    input:
+        vector = str(WORK_VECTOR),
+        parts  = str(WORK_PARTS),
+    output:
+        str(WORK_BPTS),
+    shell:
+        """
+        ldetect2 find-minima \
+            --input {input.vector} \
+            --chr-name {CHROM} \
+            --dataset-path {WORK_DIR} \
+            --n-snps-bw-bpoints {N_SNPS} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Extract breakpoints → BED
+# ---------------------------------------------------------------------------
+
+rule extract_bpoints:
+    input:
+        bpts  = str(WORK_BPTS),
+        parts = str(WORK_PARTS),
+    output:
+        str(WORK_BED),
+    shell:
+        """
+        ldetect2 extract-bpoints \
+            --name {CHROM} \
+            --dataset-path {WORK_DIR} \
+            --breakpoints {input.bpts} \
+            --subset {SUBSET} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Re-run partition-chromosome (independent check)
+# ---------------------------------------------------------------------------
+
+rule partition_chromosome:
+    input:
+        str(REF_MAP),
+    output:
+        str(WORK_GEN_PARTS),
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        ldetect2 partition-chromosome \
+            --genetic-map {input} \
+            --n-individuals {N_INDS} \
+            --ne {NE} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 7: Comparisons
+# ---------------------------------------------------------------------------
+
+rule compare_vector:
+    input:
+        ours = str(WORK_VECTOR),
+        ref  = str(REF_VECTOR),
+    output:
+        str(RES_DIR / "compare_vector.tsv"),
+    shell:
+        """
+        mkdir -p {RES_DIR}
+        python scripts/compare_vector.py \
+            --ours {input.ours} \
+            --ref  {input.ref} \
+            --output {output}
+        """
+
+
+rule compare_bpoints:
+    input:
+        ours = str(WORK_BPTS),
+        ref  = str(REF_BPOINTS),
+    output:
+        str(RES_DIR / "compare_bpoints.tsv"),
+    shell:
+        """
+        python scripts/compare_bpoints.py \
+            --ours {input.ours} \
+            --ref  {input.ref} \
+            --output {output}
+        """
+
+
+rule compare_bed:
+    input:
+        ours = str(WORK_BED),
+        ref  = str(REF_BED),
+    output:
+        str(RES_DIR / "compare_bed.tsv"),
+    shell:
+        """
+        python scripts/compare_bed.py \
+            --ours {input.ours} \
+            --ref  {input.ref} \
+            --output {output}
+        """
+
+
+rule compare_partitions:
+    input:
+        ours = str(WORK_GEN_PARTS),
+        ref  = str(REF_PARTS),
+    output:
+        str(RES_DIR / "compare_partitions.tsv"),
+    shell:
+        """
+        python scripts/compare_partitions.py \
+            --ours {input.ours} \
+            --ref  {input.ref} \
+            --output {output}
+        """

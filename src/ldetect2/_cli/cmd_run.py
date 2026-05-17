@@ -5,10 +5,16 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import numpy as np
+
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+_COMPACT_COVARIANCE_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
+_FULL_COVARIANCE_KEYS = frozenset(
+    {"i_pos", "j_pos", "i_gpos", "j_gpos", "naive_ld", "shrink_ld", "i_id", "j_id"}
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -16,45 +22,166 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         "run",
         help="Run the full LD block detection pipeline end-to-end.",
     )
-    p.add_argument("--genetic-map", required=True, type=Path, metavar="PATH",
-                   help="Gzipped genetic map (chr, position, cM).")
-    p.add_argument("--reference-panel", required=True, metavar="PATH",
-                   help="VCF reference panel path (accessed via tabix).")
-    p.add_argument("--individuals", required=True, type=Path, metavar="PATH",
-                   help="Plain-text file; one individual ID per line.")
-    p.add_argument("--chromosome", required=True, metavar="TEXT",
-                   help="Chromosome name as in the VCF (e.g. chr2 or 2).")
-    p.add_argument("--output-dir", required=True, type=Path, metavar="PATH",
-                   help="Directory where all outputs are written.")
-    p.add_argument("--ne", type=float, default=11418.0, metavar="FLOAT",
-                   help="Effective population size (default: 11418.0).")
-    p.add_argument("--cov-cutoff", type=float, default=1e-7, metavar="FLOAT",
-                   help="LD cutoff for covariance calculation (default: 1e-7).")
-    p.add_argument("--n-snps-bw-bpoints", type=int, default=50, metavar="N",
-                   help="Target mean SNPs between breakpoints (default: 50).")
-    p.add_argument("--subset", choices=_VALID_SUBSETS, default="fourier_ls",
-                   metavar="SUBSET",
-                   help=f"Breakpoint set for final BED output "
-                        f"(default: fourier_ls).")
+    p.add_argument(
+        "--genetic-map",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Gzipped genetic map (chr, position, cM).",
+    )
+    p.add_argument(
+        "--reference-panel",
+        required=True,
+        metavar="PATH",
+        help="VCF reference panel path (accessed via tabix).",
+    )
+    p.add_argument(
+        "--individuals",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Plain-text file; one individual ID per line.",
+    )
+    p.add_argument(
+        "--chromosome",
+        required=True,
+        metavar="TEXT",
+        help="Chromosome name as in the VCF (e.g. chr2 or 2).",
+    )
+    p.add_argument(
+        "--output-dir",
+        required=True,
+        type=Path,
+        metavar="PATH",
+        help="Directory where all outputs are written.",
+    )
+    p.add_argument(
+        "--ne",
+        type=float,
+        default=11418.0,
+        metavar="FLOAT",
+        help="Effective population size (default: 11418.0).",
+    )
+    p.add_argument(
+        "--cov-cutoff",
+        type=float,
+        default=1e-7,
+        metavar="FLOAT",
+        help="LD cutoff for covariance calculation (default: 1e-7).",
+    )
+    p.add_argument(
+        "--covariance-cache",
+        choices=("compact", "full"),
+        default="compact",
+        help=(
+            "Covariance partition cache schema for this run. 'compact' writes "
+            "only i_pos, j_pos, and shrink_ld; 'full' writes the archival "
+            "debug schema (default: compact)."
+        ),
+    )
+    p.add_argument(
+        "--n-snps-bw-bpoints",
+        type=int,
+        default=10_000,
+        metavar="N",
+        help="Target mean SNPs between breakpoints (default: 10000).",
+    )
+    p.add_argument(
+        "--n-bpoints",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Direct target breakpoint count (overrides --n-snps-bw-bpoints).",
+    )
+    p.add_argument(
+        "--subset",
+        choices=_VALID_SUBSETS,
+        default="fourier_ls",
+        metavar="SUBSET",
+        help="Breakpoint set for final BED output (default: fourier_ls).",
+    )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Parallel workers for covariance calculation (default: 1).",
+    )
+    p.add_argument(
+        "--local-search-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for local search. Higher values may multiply "
+            "memory use because each worker loads its own covariance window "
+            "(default: 1)."
+        ),
+    )
+    p.add_argument(
+        "--high-precision",
+        action="store_true",
+        help="Use 50-digit Decimal arithmetic for local search (slower).",
+    )
     p.set_defaults(func=_run)
 
 
+def _calc_partition(
+    start: int,
+    end: int,
+    chrom: str,
+    reference_panel: str,
+    genetic_map_path: Path,
+    individuals_path: Path,
+    output_path: Path,
+    ne: float,
+    cutoff: float,
+    compact_output: bool,
+) -> None:
+    """
+    Wraps tabix > calc_covariance so we can run as a worker process.
+    """
+    from ldetect2.shrinkage import calc_covariance
+
+    region = f"{chrom}:{start}-{end}"
+    try:
+        tabix_proc = subprocess.Popen(
+            ["tabix", "-h", reference_panel, region],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "tabix not found. Install htslib and ensure tabix is on PATH."
+        )
+
+    with tabix_proc.stdout:  # type: ignore[union-attr]
+        calc_covariance(
+            vcf_stream=tabix_proc.stdout,
+            genetic_map_path=genetic_map_path,
+            individuals_path=individuals_path,
+            output_path=output_path,
+            ne=ne,
+            cutoff=cutoff,
+            compact_output=compact_output,
+        )
+    tabix_proc.wait()
+
+
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2._util.logging import log_msg
-    from ldetect2.io.partitions import CovarianceStore
-    from ldetect2.io.bed import write_bed
-    from ldetect2.pipeline import find_breakpoints
-    from ldetect2.shrinkage import calc_covariance, partition_chromosome
-    from ldetect2.matrix_analysis import MatrixAnalysis
-    from ldetect2.io.partitions import read_partitions
     import json
+
+    from ldetect2._util.logging import log_msg
+    from ldetect2.io.bed import write_bed
+    from ldetect2.io.partitions import CovarianceStore, read_partitions
+    from ldetect2.matrix_analysis import MatrixAnalysis
+    from ldetect2.pipeline import find_breakpoints
+    from ldetect2.shrinkage import partition_chromosome
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     chrom = args.chromosome
-    scripts_dir = output_dir / "scripts"
-    scripts_dir.mkdir(exist_ok=True)
     cov_dir = output_dir / chrom
     cov_dir.mkdir(exist_ok=True)
 
@@ -63,51 +190,73 @@ def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ #
     # Step 1: Partition chromosome                                         #
     # ------------------------------------------------------------------ #
-    partitions_path = scripts_dir / f"{chrom}_partitions"
+    partitions_path = output_dir / f"{chrom}_partitions.txt"
     log_msg("Step 1: Partitioning chromosome")
     partition_chromosome(
         genetic_map_path=args.genetic_map,
         n_individuals=_count_individuals(args.individuals),
         output_path=partitions_path,
+        ne=args.ne,
     )
 
     # ------------------------------------------------------------------ #
     # Step 2: Calculate covariance for each partition                     #
     # ------------------------------------------------------------------ #
-    log_msg("Step 2: Calculating covariance matrices")
+    compact_output = args.covariance_cache == "compact"
+    required_covariance_keys = (
+        _COMPACT_COVARIANCE_KEYS if compact_output else _FULL_COVARIANCE_KEYS
+    )
+    log_msg(
+        "Step 2: Calculating covariance matrices "
+        f"(workers={args.workers}, cache={args.covariance_cache})"
+    )
     partitions = read_partitions(chrom, store)
 
+    pending = []
+    invalid = 0
     for start, end in partitions:
-        cov_file = store.partition_path(chrom, start, end)
-        if cov_file.exists():
-            log_msg(f"  Partition {start}-{end} already exists, skipping")
+        partition_path = store.partition_path(chrom, start, end)
+        if not partition_path.exists():
+            pending.append((start, end))
             continue
-        log_msg(f"  Partition {start}-{end}")
-        region = f"{chrom}:{start}-{end}"
-        tabix_cmd = ["tabix", "-h", args.reference_panel, region]
-        try:
-            tabix_proc = subprocess.Popen(
-                tabix_cmd,
-                stdout=subprocess.PIPE,
-                text=True,
-            )
-        except FileNotFoundError:
-            print(
-                "Error: tabix not found. Install htslib and ensure tabix is on PATH.",
-                file=sys.stderr,
-            )
-            return 1
+        if not _is_valid_covariance_partition(partition_path, required_covariance_keys):
+            invalid += 1
+            partition_path.unlink()
+            pending.append((start, end))
+    skipped = len(partitions) - len(pending)
+    if skipped:
+        log_msg(f"  Skipping {skipped} already-completed partition(s)")
+    if invalid:
+        log_msg(f"  Regenerating {invalid} invalid cached partition(s)")
 
-        with tabix_proc.stdout:  # type: ignore[union-attr]
-            calc_covariance(
-                vcf_stream=tabix_proc.stdout,
-                genetic_map_path=args.genetic_map,
-                individuals_path=args.individuals,
-                output_path=cov_file,
-                ne=args.ne,
-                cutoff=args.cov_cutoff,
-            )
-        tabix_proc.wait()
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = {
+            pool.submit(
+                _calc_partition,
+                start,
+                end,
+                chrom,
+                args.reference_panel,
+                args.genetic_map,
+                args.individuals,
+                store.partition_path(chrom, start, end),
+                args.ne,
+                args.cov_cutoff,
+                compact_output,
+            ): (start, end)
+            for start, end in pending
+        }
+        for fut in as_completed(futures):
+            start, end = futures[fut]
+            try:
+                fut.result()
+            except RuntimeError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                return 1
+            log_msg(f"  Partition {start}-{end} done")
+
+    snp_first = partitions[0][0]
+    snp_last = partitions[-1][1]
 
     # ------------------------------------------------------------------ #
     # Step 3: Matrix → vector                                             #
@@ -128,6 +277,9 @@ def _run(args: argparse.Namespace) -> int:
         store=store,
         n_snps_bw_bpoints=args.n_snps_bw_bpoints,
         output_path=breakpoints_path,
+        workers=args.local_search_workers,
+        use_decimal=args.high_precision,
+        n_bpoints=args.n_bpoints,
     )
 
     # ------------------------------------------------------------------ #
@@ -138,10 +290,9 @@ def _run(args: argparse.Namespace) -> int:
     data = json.loads(breakpoints_path.read_text())
     loci: list[int] = data[args.subset]["loci"]
 
-    snp_first = partitions[0][0]
-    snp_last = partitions[-1][1]
-    write_bed(name=chrom, loci=loci, snp_first=snp_first, snp_last=snp_last,
-              output=bed_path)
+    write_bed(
+        name=chrom, loci=loci, snp_first=snp_first, snp_last=snp_last, output=bed_path
+    )
 
     log_msg(f"Done. BED file: {bed_path}")
     return 0
@@ -154,3 +305,13 @@ def _count_individuals(path: Path) -> int:
             if line.strip():
                 count += 1
     return count
+
+
+def _is_valid_covariance_partition(
+    path: Path, required_keys: frozenset[str] = _FULL_COVARIANCE_KEYS
+) -> bool:
+    try:
+        with np.load(path) as data:
+            return required_keys.issubset(data.files)
+    except Exception:
+        return False

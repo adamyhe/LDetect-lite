@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import decimal
 import math
+from bisect import bisect_left
+
+import numpy as np
 
 from ldetect2._util.binary_search import find_ge_ind, find_le_ind
-from ldetect2._util.logging import log_msg
+from ldetect2._util.covariance_array import (
+    ChromosomeCovariance,
+    CovariancePartition,
+    load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
+    load_covariance_partitions,
+)
+from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
@@ -16,12 +25,98 @@ from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 _PREC = 50
 
 
+def _append_partition(
+    active_lo: np.ndarray,
+    active_hi: np.ndarray,
+    active_shrink: np.ndarray,
+    partition: CovariancePartition,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if np.all(partition.i_pos <= partition.j_pos):
+        lo = partition.i_pos
+        hi = partition.j_pos
+    else:
+        lo = np.minimum(partition.i_pos, partition.j_pos)
+        hi = np.maximum(partition.i_pos, partition.j_pos)
+    shrink = partition.shrink_ld.astype(np.float64, copy=False)
+
+    if active_lo.size:
+        lo = np.concatenate((active_lo, lo))
+        hi = np.concatenate((active_hi, hi))
+        shrink = np.concatenate((active_shrink, shrink))
+
+    keep = _first_pair_indices(lo, hi)
+    lo = lo[keep]
+    hi = hi[keep]
+    shrink = shrink[keep]
+    return lo, hi, shrink, np.unique(lo)
+
+
+def _first_pair_indices(lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+    if lo.size == 0:
+        return np.array([], dtype=bool)
+    pairs = np.empty(lo.size, dtype=[("lo", lo.dtype), ("hi", hi.dtype)])
+    pairs["lo"] = lo
+    pairs["hi"] = hi
+    _, first_idx = np.unique(pairs, return_index=True)
+    keep = np.zeros(lo.size, dtype=bool)
+    keep[first_idx] = True
+    return keep
+
+
+def _add_array_locus_values(
+    curr_locus: int,
+    active_lo: np.ndarray,
+    active_hi: np.ndarray,
+    active_shrink: np.ndarray,
+    diag_lookup: dict[int, float],
+    snp_top: int,
+    sum_vert_by_locus: dict[int, float],
+    sum_horiz_by_locus: dict[int, float],
+) -> None:
+    diag_curr = diag_lookup.get(curr_locus, 0.0)
+    if diag_curr <= 0.0:
+        sum_vert_by_locus.setdefault(curr_locus, 0.0)
+        sum_horiz_by_locus.setdefault(curr_locus, 0.0)
+        return
+
+    row_mask = (active_lo == curr_locus) & (active_hi <= snp_top)
+    row_hi = active_hi[row_mask]
+    row_shrink = active_shrink[row_mask]
+    sum_vert_by_locus.setdefault(curr_locus, 0.0)
+    sum_horiz_by_locus.setdefault(curr_locus, 0.0)
+    for key, shrink in zip(row_hi, row_shrink):
+        key = int(key)
+        diag_key = diag_lookup.get(key, 0.0)
+        if diag_key <= 0.0:
+            continue
+        r2 = float(shrink * shrink / (diag_curr * diag_key))
+        sum_vert_by_locus[curr_locus] += r2
+        sum_horiz_by_locus[key] = sum_horiz_by_locus.get(key, 0.0) + r2
+        sum_vert_by_locus.setdefault(key, 0.0)
+
+
+def _diag_lookup(
+    lo: np.ndarray, hi: np.ndarray, shrink: np.ndarray
+) -> dict[int, float]:
+    diag_mask = lo == hi
+    return {
+        int(locus): float(value)
+        for locus, value in zip(lo[diag_mask], shrink[diag_mask])
+    }
+
+
 class LocalSearch:
     """Precomputes per-locus LD sums and searches for the locally-optimal breakpoint.
 
     The search evaluates each locus within [start_search, stop_search] as a
     candidate breakpoint and returns the one that minimises
     ``sum(r²) / N_zero``.
+
+    Args:
+        use_decimal: When *True*, accumulate sums with 50-digit
+            :class:`decimal.Decimal` precision (slower but exact).  When
+            *False* (default), use ``float`` arithmetic — sufficient for
+            almost all practical inputs.
     """
 
     def __init__(
@@ -31,20 +126,31 @@ class LocalSearch:
         stop_search: int,
         initial_breakpoint_index: int,
         breakpoints: list[int],
-        total_sum: decimal.Decimal,
-        total_n: decimal.Decimal,
+        total_sum,
+        total_n,
         store: CovarianceStore,
+        use_decimal: bool = False,
+        covariance_cache: ChromosomeCovariance | None = None,
     ) -> None:
-        decimal.getcontext().prec = _PREC
+        if use_decimal:
+            decimal.getcontext().prec = _PREC
 
         self.name = name
         self.start_search = start_search
         self.stop_search = stop_search
         self.initial_breakpoint_index = initial_breakpoint_index
         self.breakpoints = breakpoints
-        self.total_sum = total_sum
-        self.total_n = total_n
+        self.use_decimal = use_decimal
+
+        if use_decimal:
+            self.total_sum = decimal.Decimal(total_sum)
+            self.total_n = decimal.Decimal(total_n)
+        else:
+            self.total_sum = float(total_sum)
+            self.total_n = float(total_n)
+
         self.store = store
+        self.covariance_cache = covariance_cache
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -54,6 +160,9 @@ class LocalSearch:
             "locus_list": [],
             "data": {},
         }
+        self._array_loci: np.ndarray | None = None
+        self._array_sum_vert: np.ndarray | None = None
+        self._array_sum_horiz: np.ndarray | None = None
 
         self.dynamic_delete = True
         self.init_complete = False
@@ -61,7 +170,9 @@ class LocalSearch:
 
         # --- validation ---
         if start_search >= stop_search:
-            raise ValueError(f"start_search ({start_search}) >= stop_search ({stop_search})")
+            raise ValueError(
+                f"start_search ({start_search}) >= stop_search ({stop_search})"
+            )
         if not (0 <= initial_breakpoint_index < len(breakpoints)):
             raise ValueError("initial_breakpoint_index out of bounds")
         if breakpoints[initial_breakpoint_index] >= stop_search:
@@ -78,10 +189,14 @@ class LocalSearch:
 
         if initial_breakpoint_index > 0:
             if start_search < breakpoints[initial_breakpoint_index - 1]:
-                raise ValueError("start_search cannot be further than a neighbouring breakpoint")
+                raise ValueError(
+                    "start_search cannot be further than a neighbouring breakpoint"
+                )
         if initial_breakpoint_index < len(breakpoints) - 1:
             if stop_search > breakpoints[initial_breakpoint_index + 1]:
-                raise ValueError("stop_search cannot be further than a neighbouring breakpoint")
+                raise ValueError(
+                    "stop_search cannot be further than a neighbouring breakpoint"
+                )
 
         self.snp_first = start_search
         self.snp_last = stop_search
@@ -96,10 +211,14 @@ class LocalSearch:
         else:
             self.snp_bottom = tmp_partitions[0][0]
 
-        log_msg(f"LocalSearch: snp_first={self.snp_first} snp_last={self.snp_last} "
-                f"snp_bottom={self.snp_bottom} snp_top={self.snp_top}")
+        log_debug(
+            f"LocalSearch: snp_first={self.snp_first} snp_last={self.snp_last} "
+            f"snp_bottom={self.snp_bottom} snp_top={self.snp_top}"
+        )
 
-        self.partitions = get_final_partitions(store, name, self.snp_bottom, self.snp_top)
+        self.partitions = get_final_partitions(
+            store, name, self.snp_bottom, self.snp_top
+        )
 
         self.start_locus = -1
         self.start_locus_index = -1
@@ -112,18 +231,27 @@ class LocalSearch:
 
     def init_search(self) -> None:
         """Precompute per-locus vertical and horizontal LD sums (lean path)."""
-        decimal.getcontext().prec = _PREC
-        log_msg("Start local search init (lean)")
+        if not self.use_decimal:
+            self._init_search_array()
+            return
+
+        if self.use_decimal:
+            decimal.getcontext().prec = _PREC
+        log_debug("Start local search init (lean)")
 
         last_p_num = -1
         for p_num_init in range(len(self.partitions) - 1):
             if self.snp_bottom >= self.partitions[p_num_init + 1][0]:
-                log_msg(f"Pre-reading partition: {self.partitions[p_num_init]}")
+                log_debug(f"Pre-reading partition: {self.partitions[p_num_init]}")
                 read_partition_into_matrix_lean(
-                    self.partitions, p_num_init,
-                    self.matrix, self.locus_list,
-                    self.name, self.store,
-                    self.snp_bottom, self.snp_top,
+                    self.partitions,
+                    p_num_init,
+                    self.matrix,
+                    self.locus_list,
+                    self.name,
+                    self.store,
+                    self.snp_bottom,
+                    self.snp_top,
                 )
                 last_p_num = p_num_init
             else:
@@ -137,12 +265,16 @@ class LocalSearch:
 
         for p_num in range(last_p_num + 1, len(self.partitions)):
             p = self.partitions[p_num]
-            log_msg(f"Reading partition: {p}")
+            log_debug(f"Reading partition: {p}")
             read_partition_into_matrix_lean(
-                self.partitions, p_num,
-                self.matrix, self.locus_list,
-                self.name, self.store,
-                self.snp_bottom, self.snp_top,
+                self.partitions,
+                p_num,
+                self.matrix,
+                self.locus_list,
+                self.name,
+                self.store,
+                self.snp_bottom,
+                self.snp_top,
             )
 
             if curr_locus < 0:
@@ -156,9 +288,10 @@ class LocalSearch:
                         start_locus_index = i
                         break
             else:
-                try:
-                    curr_locus_index = self.locus_list.index(curr_locus)
-                except ValueError:
+                i = bisect_left(self.locus_list, curr_locus)
+                if i < len(self.locus_list) and self.locus_list[i] == curr_locus:
+                    curr_locus_index = i
+                else:
                     if self.locus_list:
                         curr_locus = self.locus_list[0]
                         curr_locus_index = 0
@@ -166,7 +299,7 @@ class LocalSearch:
                         raise RuntimeError("locus_list is empty")
 
             if curr_locus < 0:
-                log_msg(
+                log_debug(
                     f"Warning: curr_locus not found in partition {p} "
                     f"(snp_bottom={self.snp_bottom}); skipping"
                 )
@@ -187,34 +320,39 @@ class LocalSearch:
                     end_locus_index = 0
                     end_locus = self.locus_list[0]
 
-            log_msg(f"Precomputing for partition: {p}")
+            log_debug(f"Precomputing for partition: {p}")
+
+            _zero = decimal.Decimal(0) if self.use_decimal else 0.0
 
             while curr_locus <= end_locus:
                 self._add_locus(curr_locus)
 
                 in_range = (
-                    (curr_locus > self.snp_first or self.initial_breakpoint_index == 0)
-                    and curr_locus <= self.snp_last
-                )
+                    curr_locus > self.snp_first or self.initial_breakpoint_index == 0
+                ) and curr_locus <= self.snp_last
                 if in_range:
                     for key in self.matrix.get(curr_locus, {}):
                         if key <= self.snp_top:
                             diag_curr = self.matrix[curr_locus].get(curr_locus, 0.0)
                             diag_key = self.matrix.get(key, {}).get(key, 0.0)
                             if diag_curr > 0 and diag_key > 0:
-                                corr = (
-                                    self.matrix[curr_locus][key]
-                                    / math.sqrt(diag_curr * diag_key)
+                                corr = self.matrix[curr_locus][key] / math.sqrt(
+                                    diag_curr * diag_key
                                 )
-                                self._add_val(decimal.Decimal(corr ** 2), curr_locus, key)
+                                r2 = corr**2
+                                self._add_val(
+                                    decimal.Decimal(r2) if self.use_decimal else r2,
+                                    curr_locus,
+                                    key,
+                                )
                 else:
-                    self._add_val(decimal.Decimal(0), curr_locus, curr_locus)
+                    self._add_val(_zero, curr_locus, curr_locus)
 
                 if curr_locus_index + 1 < len(self.locus_list):
                     curr_locus_index += 1
                     curr_locus = self.locus_list[curr_locus_index]
                 else:
-                    log_msg("curr_locus_index out of bounds")
+                    log_debug("curr_locus_index out of bounds")
                     break
 
             delete_loci_smaller_than_leanest(end_locus, self.matrix, self.locus_list)
@@ -225,12 +363,182 @@ class LocalSearch:
         self.end_locus_index = end_locus_index
         self.init_complete = True
 
-    def _add_val(self, val: decimal.Decimal, curr_locus: int, key: int) -> None:
+    def _init_search_array(self) -> None:
+        """Precompute local-search deltas with exact legacy locus semantics."""
+        log_debug("Start local search init (array)")
+        partitions = self._local_covariance_partitions()
+        loci, sum_vert, sum_horiz = self._precompute_array_from_partitions(partitions)
+
+        self._array_loci = loci
+        self._array_sum_vert = sum_vert
+        self._array_sum_horiz = sum_horiz
+        self.precomputed["locus_list"] = loci.tolist()
+        self.init_complete = True
+
+    def _local_covariance_partitions(self) -> tuple[CovariancePartition, ...]:
+        if self.covariance_cache is None:
+            return load_covariance_partitions(
+                self.name,
+                self.store,
+                self.partitions,
+                snp_first=self.snp_bottom,
+                snp_last=self.snp_top,
+            )
+
+        by_bounds = {
+            (partition.start, partition.end): partition
+            for partition in self.covariance_cache.partition_arrays
+        }
+        missing = [
+            (start, end)
+            for start, end in self.partitions
+            if (start, end) not in by_bounds
+        ]
+        if missing:
+            raise ValueError(
+                "Chromosome covariance cache is missing local-search "
+                f"partition(s): {missing}"
+            )
+        return tuple(by_bounds[(start, end)] for start, end in self.partitions)
+
+    def _precompute_array_from_partitions(
+        self,
+        partitions: tuple[CovariancePartition, ...],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        position_dtype = partitions[0].i_pos.dtype if partitions else np.int64
+        active_lo = np.array([], dtype=position_dtype)
+        active_hi = np.array([], dtype=position_dtype)
+        active_shrink = np.array([], dtype=np.float64)
+        active_loci = np.array([], dtype=np.int64)
+        precomputed_loci: list[int] = []
+        sum_vert_by_locus: dict[int, float] = {}
+        sum_horiz_by_locus: dict[int, float] = {}
+
+        last_p_num = -1
+        for p_num_init in range(len(partitions) - 1):
+            if self.snp_bottom >= partitions[p_num_init + 1].start:
+                active_lo, active_hi, active_shrink, active_loci = _append_partition(
+                    active_lo,
+                    active_hi,
+                    active_shrink,
+                    partitions[p_num_init],
+                )
+                last_p_num = p_num_init
+            else:
+                break
+
+        curr_locus = -1
+        start_locus = -1
+        start_locus_index = -1
+        end_locus = -1
+        end_locus_index = -1
+
+        for p_num in range(last_p_num + 1, len(partitions)):
+            active_lo, active_hi, active_shrink, active_loci = _append_partition(
+                active_lo,
+                active_hi,
+                active_shrink,
+                partitions[p_num],
+            )
+
+            if curr_locus < 0:
+                if active_loci.size == 0:
+                    raise RuntimeError("locus_list is empty")
+                curr_locus_index = int(
+                    np.searchsorted(active_loci, self.snp_bottom, side="left")
+                )
+                if curr_locus_index >= active_loci.size:
+                    log_debug(
+                        "Warning: curr_locus not found in partition "
+                        f"{self.partitions[p_num]} (snp_bottom={self.snp_bottom}); "
+                        "skipping"
+                    )
+                    continue
+                curr_locus = int(active_loci[curr_locus_index])
+                start_locus = curr_locus
+                start_locus_index = curr_locus_index
+            else:
+                curr_locus_index = int(
+                    np.searchsorted(active_loci, curr_locus, side="left")
+                )
+                if (
+                    curr_locus_index >= active_loci.size
+                    or int(active_loci[curr_locus_index]) != curr_locus
+                ):
+                    if active_loci.size == 0:
+                        raise RuntimeError("locus_list is empty")
+                    curr_locus_index = 0
+                    curr_locus = int(active_loci[0])
+
+            if p_num + 1 < len(partitions):
+                end_locus = partitions[p_num + 1].start
+                end_locus_index = -1
+            else:
+                end_idx = int(np.searchsorted(active_loci, self.snp_last, side="right"))
+                if end_idx > 0:
+                    end_locus_index = end_idx - 1
+                    end_locus = int(active_loci[end_locus_index])
+                else:
+                    end_locus_index = 0
+                    end_locus = int(active_loci[0])
+
+            diag_lookup = _diag_lookup(active_lo, active_hi, active_shrink)
+            while curr_locus <= end_locus:
+                precomputed_loci.append(curr_locus)
+
+                in_range = (
+                    curr_locus > self.snp_first or self.initial_breakpoint_index == 0
+                ) and curr_locus <= self.snp_last
+                if in_range:
+                    _add_array_locus_values(
+                        curr_locus,
+                        active_lo,
+                        active_hi,
+                        active_shrink,
+                        diag_lookup,
+                        self.snp_top,
+                        sum_vert_by_locus,
+                        sum_horiz_by_locus,
+                    )
+                else:
+                    sum_vert_by_locus.setdefault(curr_locus, 0.0)
+                    sum_horiz_by_locus.setdefault(curr_locus, 0.0)
+
+                if curr_locus_index + 1 < active_loci.size:
+                    curr_locus_index += 1
+                    curr_locus = int(active_loci[curr_locus_index])
+                else:
+                    log_debug("curr_locus_index out of bounds")
+                    break
+
+            keep = active_lo >= end_locus
+            active_lo = active_lo[keep]
+            active_hi = active_hi[keep]
+            active_shrink = active_shrink[keep]
+            active_loci = np.unique(active_lo)
+
+        loci = np.asarray(precomputed_loci, dtype=np.int64)
+        sum_vert = np.asarray(
+            [sum_vert_by_locus.get(int(locus), 0.0) for locus in loci],
+            dtype=np.float64,
+        )
+        sum_horiz = np.asarray(
+            [sum_horiz_by_locus.get(int(locus), 0.0) for locus in loci],
+            dtype=np.float64,
+        )
+        self.start_locus = start_locus
+        self.start_locus_index = start_locus_index
+        self.end_locus = end_locus
+        self.end_locus_index = end_locus_index
+        return loci, sum_vert, sum_horiz
+
+    def _add_val(self, val, curr_locus: int, key: int) -> None:
+        zero = decimal.Decimal(0) if self.use_decimal else 0.0
         for loc in (curr_locus, key):
             if loc not in self.precomputed["data"]:
                 self.precomputed["data"][loc] = {
-                    "sum_vert": decimal.Decimal(0),
-                    "sum_horiz": decimal.Decimal(0),
+                    "sum_vert": zero,
+                    "sum_horiz": zero,
                 }
         self.precomputed["data"][curr_locus]["sum_vert"] += val
         self.precomputed["data"][key]["sum_horiz"] += val
@@ -251,10 +559,13 @@ class LocalSearch:
             no better position is found.
         """
         if not self.init_complete:
-            log_msg("init_search() not called — running automatically")
+            log_debug("init_search() not called — running automatically")
             self.init_search()
 
-        log_msg("Starting local search")
+        if not self.use_decimal and self._array_loci is not None:
+            return self._search_array()
+
+        log_debug("Starting local search")
         locus_list = self.precomputed["locus_list"]
 
         try:
@@ -266,18 +577,25 @@ class LocalSearch:
             log_msg("Returning initial breakpoint unchanged")
             return self.breakpoints[self.initial_breakpoint_index], None
 
-        bp_ind = find_le_ind(locus_list, self.breakpoints[self.initial_breakpoint_index])
+        bp_ind = find_le_ind(
+            locus_list, self.breakpoints[self.initial_breakpoint_index]
+        )
         init_bp_locus = locus_list[bp_ind]
 
         curr_sum = self.total_sum
         curr_n = self.total_n
-        min_metric = decimal.Decimal(self.total_sum) / decimal.Decimal(self.total_n)
+
+        if self.use_decimal:
+            min_metric = decimal.Decimal(self.total_sum) / decimal.Decimal(self.total_n)
+        else:
+            min_metric = self.total_sum / self.total_n
+
         min_breakpoint: int | None = None
         min_metric_details: dict = {"sum": self.total_sum, "N_zero": self.total_n}
         min_distance_right = 0
 
         # Search RIGHT
-        log_msg("Searching right...")
+        log_debug("Searching right...")
         if bp_ind + 1 < len(locus_list):
             curr_loc_ind = bp_ind + 1
             curr_loc = locus_list[curr_loc_ind]
@@ -285,15 +603,17 @@ class LocalSearch:
             while curr_loc <= self.snp_last:
                 data = self.precomputed["data"]
                 curr_sum = (
-                    curr_sum
-                    - data[curr_loc]["sum_horiz"]
-                    + data[curr_loc]["sum_vert"]
+                    curr_sum - data[curr_loc]["sum_horiz"] + data[curr_loc]["sum_vert"]
                 )
                 horiz_n = curr_loc_ind - snp_bottom_ind - 1
                 vert_n = snp_top_ind - curr_loc_ind
                 curr_n = curr_n - horiz_n + vert_n
 
-                curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(curr_n)
+                if self.use_decimal:
+                    curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(curr_n)
+                else:
+                    curr_metric = curr_sum / curr_n
+
                 if curr_metric < min_metric:
                     min_metric = curr_metric
                     min_breakpoint = curr_loc
@@ -313,7 +633,7 @@ class LocalSearch:
         curr_n = self.total_n
 
         # Search LEFT
-        log_msg("Searching left...")
+        log_debug("Searching left...")
         if bp_ind - 1 >= 0:
             curr_loc_ind = bp_ind - 1
             curr_loc = locus_list[curr_loc_ind]
@@ -321,15 +641,17 @@ class LocalSearch:
             while curr_loc > self.snp_first:
                 data = self.precomputed["data"]
                 curr_sum = (
-                    curr_sum
-                    + data[curr_loc]["sum_horiz"]
-                    - data[curr_loc]["sum_vert"]
+                    curr_sum + data[curr_loc]["sum_horiz"] - data[curr_loc]["sum_vert"]
                 )
                 horiz_n = curr_loc_ind - snp_bottom_ind - 1
                 vert_n = snp_top_ind - curr_loc_ind
                 curr_n = curr_n + horiz_n - vert_n
 
-                curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(curr_n)
+                if self.use_decimal:
+                    curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(curr_n)
+                else:
+                    curr_metric = curr_sum / curr_n
+
                 left_dist = init_bp_locus - curr_loc
                 if curr_metric < min_metric or (
                     curr_metric == min_metric and left_dist < min_distance_right
@@ -347,5 +669,109 @@ class LocalSearch:
             log_msg("Warning: no loci to the left of initial breakpoint")
 
         self.search_complete = True
-        log_msg("Search done")
+        log_debug("Search done")
+        return min_breakpoint, min_metric_details
+
+    def _search_array(self) -> tuple[int | None, dict | None]:
+        log_debug("Starting local search (array)")
+        loci = self._array_loci
+        sum_vert = self._array_sum_vert
+        sum_horiz = self._array_sum_horiz
+        if loci is None or sum_vert is None or sum_horiz is None or loci.size == 0:
+            log_msg("Array local search has no loci; keeping original")
+            return self.breakpoints[self.initial_breakpoint_index], None
+        if self.total_n <= 0:
+            log_msg("Array local search has no valid denominator; keeping original")
+            return self.breakpoints[self.initial_breakpoint_index], None
+
+        try:
+            snp_bottom_ind = int(np.searchsorted(loci, self.snp_bottom, side="left"))
+            snp_top_ind = int(np.searchsorted(loci, self.snp_top, side="right") - 1)
+            if snp_bottom_ind >= loci.size or snp_top_ind < 0:
+                raise ValueError("bounds not found")
+            bp_ind = int(
+                np.searchsorted(
+                    loci,
+                    self.breakpoints[self.initial_breakpoint_index],
+                    side="right",
+                )
+                - 1
+            )
+            if bp_ind < 0:
+                raise ValueError("breakpoint not found")
+        except ValueError as exc:
+            log_msg(f"Error finding bounds in array local search: {exc}")
+            log_msg("Returning initial breakpoint unchanged")
+            return self.breakpoints[self.initial_breakpoint_index], None
+
+        init_bp_locus = int(loci[bp_ind])
+        min_metric = self.total_sum / self.total_n
+        min_breakpoint: int | None = None
+        min_metric_details: dict = {"sum": self.total_sum, "N_zero": self.total_n}
+        min_distance_right = 0
+
+        right_stop = int(np.searchsorted(loci, self.snp_last, side="right"))
+        if bp_ind + 1 < right_stop:
+            right_idx = np.arange(bp_ind + 1, right_stop, dtype=np.int64)
+            sum_delta = np.cumsum(-sum_horiz[right_idx] + sum_vert[right_idx])
+            n_delta = np.cumsum(
+                -(right_idx - snp_bottom_ind - 1) + (snp_top_ind - right_idx)
+            )
+            sums = self.total_sum + sum_delta
+            ns = self.total_n + n_delta
+            valid = ns > 0
+            if np.any(valid):
+                valid_metrics = sums[valid] / ns[valid]
+                best_valid = int(np.argmin(valid_metrics))
+                valid_idx = np.flatnonzero(valid)
+                best = int(valid_idx[best_valid])
+            else:
+                best = -1
+            if best >= 0 and valid_metrics[best_valid] < min_metric:
+                min_metric = float(valid_metrics[best_valid])
+                min_breakpoint = int(loci[right_idx[best]])
+                min_metric_details = {
+                    "sum": float(sums[best]),
+                    "N_zero": float(ns[best]),
+                }
+                min_distance_right = min_breakpoint - init_bp_locus
+        else:
+            log_msg("Warning: no loci to the right of initial breakpoint")
+
+        left_start = int(np.searchsorted(loci, self.snp_first, side="right"))
+        if left_start < bp_ind:
+            left_idx = np.arange(bp_ind - 1, left_start - 1, -1, dtype=np.int64)
+            sum_delta = np.cumsum(sum_horiz[left_idx] - sum_vert[left_idx])
+            n_delta = np.cumsum(
+                (left_idx - snp_bottom_ind - 1) - (snp_top_ind - left_idx)
+            )
+            sums = self.total_sum + sum_delta
+            ns = self.total_n + n_delta
+            valid = ns > 0
+            metrics = np.empty_like(sums)
+            metrics[valid] = sums[valid] / ns[valid]
+            for pos, metric, curr_sum, curr_n, is_valid in zip(
+                loci[left_idx],
+                metrics,
+                sums,
+                ns,
+                valid,
+            ):
+                if not is_valid:
+                    continue
+                left_dist = init_bp_locus - int(pos)
+                if metric < min_metric or (
+                    metric == min_metric and left_dist < min_distance_right
+                ):
+                    min_metric = float(metric)
+                    min_breakpoint = int(pos)
+                    min_metric_details = {
+                        "sum": float(curr_sum),
+                        "N_zero": float(curr_n),
+                    }
+        else:
+            log_msg("Warning: no loci to the left of initial breakpoint")
+
+        self.search_complete = True
+        log_debug("Search done")
         return min_breakpoint, min_metric_details
