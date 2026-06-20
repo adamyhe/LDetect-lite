@@ -30,26 +30,37 @@ block_sets:
     population: EUR
     map_source: decode
     reference_bed: deCODE_EUR_LD_blocks.bed
+    remove_centromere_blocks: false
   pyrho_AFR:
     population: AFR
     map_source: pyrho
     map_pop: GWD
     reference_bed: pyrho_AFR_LD_blocks.bed
+    remove_centromere_blocks: true
   pyrho_EAS:
     population: EAS
     map_source: pyrho
     map_pop: CHB
     reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
   pyrho_EUR:
     population: EUR
     map_source: pyrho
     map_pop: IBS
     reference_bed: pyrho_EUR_LD_blocks.bed
+    remove_centromere_blocks: true
   pyrho_SAS:
     population: SAS
     map_source: pyrho
     map_pop: GIH
     reference_bed: pyrho_SAS_LD_blocks.bed
+    remove_centromere_blocks: true
+
+# Default targets for rule all. SAS is kept as an available block set above,
+# but is excluded from the default reproduction target because MacDonald et al.
+# do not document an SAS-specific effective population size and the current
+# CEU fallback gives poor concordance.
+active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
 
 # Directories (relative to the analysis/ directory)
 raw_vcf_dir: data/raw
@@ -73,6 +84,8 @@ cov_workers: 16
 
 # Post-processing
 min_snps_per_block: 100
+# Default centromere-removal behavior for block sets that do not override it.
+remove_centromere_blocks: false
 centromere_bed: resources/hg38_centromeres.bed
 
 # 1000G reference panel (GRCh38, Dec 2018 biallelic SNV release)

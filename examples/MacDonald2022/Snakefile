@@ -22,6 +22,7 @@ Usage:
     uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
+import re
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -34,6 +35,8 @@ configfile: "config.yaml"
 
 CHROMS = config["chromosomes"]
 BLOCK_SETS = list(config["block_sets"].keys())
+ACTIVE_BLOCK_SETS = config.get("active_block_sets", BLOCK_SETS)
+BLOCK_SET_PATTERN = "|".join(re.escape(block_set) for block_set in BLOCK_SETS)
 RAW_DIR = Path(config["raw_vcf_dir"])
 FILT_DIR = Path(config["filtered_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
@@ -43,7 +46,7 @@ VCF_TMPL = config["vcf_filename_template"]
 
 
 wildcard_constraints:
-    reference_bed=r"(deCODE_EUR|pyrho_(AFR|EAS|EUR|SAS))_LD_blocks\.bed"
+    reference_bed=r"(deCODE_EUR|pyrho_(AFR|EAS|EUR|SAS))_LD_blocks\.bed",
 
 
 def pop_ne(population):
@@ -64,6 +67,21 @@ def block_set_ne(block_set):
 
 def block_set_reference_bed(block_set):
     return config["block_sets"][block_set]["reference_bed"]
+
+
+def diagnostic_resource(filename):
+    primary = RES_DIR / filename
+    nested = RES_DIR / RES_DIR.name / filename
+    if not primary.exists() and nested.exists():
+        return str(nested)
+    return str(primary)
+
+
+def block_set_remove_centromeres(block_set):
+    return config["block_sets"][block_set].get(
+        "remove_centromere_blocks",
+        config.get("remove_centromere_blocks", False),
+    )
 
 
 def block_set_genetic_map(wc):
@@ -87,6 +105,12 @@ def expected_individual_count_param(population):
     return f"--expected-count {expected}"
 
 
+def remove_centromeres_param(wc):
+    if block_set_remove_centromeres(wc.block_set):
+        return "--remove-centromeres"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Target rule
 # ---------------------------------------------------------------------------
@@ -94,10 +118,27 @@ def expected_individual_count_param(population):
 
 rule all:
     input:
-        expand(str(RESULTS / "{block_set}_LD_blocks.bed"), block_set=BLOCK_SETS),
+        expand(
+            str(RESULTS / "{block_set}_LD_blocks.bed"),
+            block_set=ACTIVE_BLOCK_SETS,
+        ),
         expand(
             str(RESULTS / "compare" / "{block_set}_block_comparison.tsv"),
-            block_set=BLOCK_SETS,
+            block_set=ACTIVE_BLOCK_SETS,
+        ),
+        expand(
+            str(
+                RESULTS / "compare" / "boundaries" / "{block_set}_boundary_offsets.tsv"
+            ),
+            block_set=ACTIVE_BLOCK_SETS,
+        ),
+        expand(
+            str(RESULTS / "compare" / "raw" / "{block_set}_block_comparison.tsv"),
+            block_set=ACTIVE_BLOCK_SETS,
+        ),
+        expand(
+            str(RESULTS / "compare" / "raw" / "{block_set}_boundary_offsets.tsv"),
+            block_set=ACTIVE_BLOCK_SETS,
         ),
         str(RESULTS / "compare" / "map_summary.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
@@ -289,6 +330,8 @@ rule run_ldetect2:
         timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
     benchmark:
         str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.benchmark.tsv")
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
     threads: config["cov_workers"]
     params:
         output_dir=str(RESULTS / "{block_set}" / "chr{chrom}"),
@@ -328,14 +371,18 @@ rule postprocess:
         centromeres=rules.download_centromeres.output[0],
     output:
         str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.final.bed"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
     params:
         min_snps=config["min_snps_per_block"],
+        remove_centromeres=remove_centromeres_param,
     shell:
         """
         uv run python scripts/postprocess.py \
             --bed {input.bed} \
             --vcf {input.vcf} \
             --centromeres {input.centromeres} \
+            {params.remove_centromeres} \
             --min-snps {params.min_snps} \
             --output {output}
         """
@@ -344,6 +391,26 @@ rule postprocess:
 # ---------------------------------------------------------------------------
 # Step 5: Combine chromosomes into genome-wide BED
 # ---------------------------------------------------------------------------
+
+
+rule combine_raw_beds:
+    input:
+        expand(
+            str(RESULTS / "{{block_set}}" / "chr{chrom}" / "chr{chrom}-ld-blocks.bed"),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "{block_set}_raw_LD_blocks.bed"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    shell:
+        """
+        # Write header once, then body lines from all chromosomes (skip per-file headers)
+        echo -e "#chr\tstart\tstop" > {output}
+        for f in {input}; do
+            tail -n +2 "$f" >> {output}
+        done
+        """
 
 
 rule combine_beds:
@@ -359,6 +426,8 @@ rule combine_beds:
         ),
     output:
         str(RESULTS / "{block_set}_LD_blocks.bed"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
     shell:
         """
         # Write header once, then body lines from all chromosomes (skip per-file headers)
@@ -433,6 +502,8 @@ rule compare_blocks:
         ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
     output:
         str(RESULTS / "compare" / "{block_set}_block_comparison.tsv"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
     params:
         tolerance=50_000,
     shell:
@@ -442,4 +513,128 @@ rule compare_blocks:
             --ref {input.ref} \
             --output {output} \
             --tolerance {params.tolerance}
+        """
+
+
+rule compare_boundaries:
+    input:
+        ours=str(RESULTS / "{block_set}_LD_blocks.bed"),
+        ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+    output:
+        str(RESULTS / "compare" / "boundaries" / "{block_set}_boundary_offsets.tsv"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        tolerance=50_000,
+    shell:
+        """
+        python scripts/compare_boundaries.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """
+
+
+rule compare_raw_blocks:
+    input:
+        ours=str(RESULTS / "{block_set}_raw_LD_blocks.bed"),
+        ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+    output:
+        str(RESULTS / "compare" / "raw" / "{block_set}_block_comparison.tsv"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        tolerance=50_000,
+    shell:
+        """
+        python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """
+
+
+rule compare_raw_boundaries:
+    input:
+        ours=str(RESULTS / "{block_set}_raw_LD_blocks.bed"),
+        ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+    output:
+        str(RESULTS / "compare" / "raw" / "{block_set}_boundary_offsets.tsv"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        tolerance=50_000,
+    shell:
+        """
+        python scripts/compare_boundaries.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """
+
+
+# These diagnostic rules deliberately treat combined BEDs as snapshots rather
+# than workflow inputs. Downloaded aggregate results can therefore be examined
+# without Snakemake trying to reconstruct missing per-chromosome intermediates.
+rule diagnose_boundaries:
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "{block_set}_boundary_diagnostics.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        ours=str(RESULTS / "{block_set}_LD_blocks.bed"),
+        ref=lambda wc: diagnostic_resource(
+            block_set_reference_bed(wc.block_set)
+        ),
+        centromeres=diagnostic_resource("hg38_centromeres.txt.gz"),
+        tolerance=50_000,
+        window=2_000_000,
+    shell:
+        """
+        python scripts/diagnose_boundaries.py \
+            --ours {params.ours} \
+            --ref {params.ref} \
+            --centromeres {params.centromeres} \
+            --output {output} \
+            --tolerance {params.tolerance} \
+            --window {params.window}
+        """
+
+
+rule diagnose_raw_boundaries:
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "raw"
+            / "{block_set}_boundary_diagnostics.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        ours=str(RESULTS / "{block_set}_raw_LD_blocks.bed"),
+        ref=lambda wc: diagnostic_resource(
+            block_set_reference_bed(wc.block_set)
+        ),
+        centromeres=diagnostic_resource("hg38_centromeres.txt.gz"),
+        tolerance=50_000,
+        window=2_000_000,
+    shell:
+        """
+        python scripts/diagnose_boundaries.py \
+            --ours {params.ours} \
+            --ref {params.ref} \
+            --centromeres {params.centromeres} \
+            --output {output} \
+            --tolerance {params.tolerance} \
+            --window {params.window}
         """
