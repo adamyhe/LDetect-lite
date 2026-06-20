@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -13,6 +13,9 @@ The complete reference implementation lives in `_reference/ldetect/`. The new im
 ```bash
 # Install in editable mode (uv recommended)
 uv sync
+
+# Install with heatmap support (matplotlib, required for --generate-heatmap)
+uv sync --extra heatmap
 
 # Run unit tests only (fast)
 uv run pytest -m "not integration"
@@ -48,12 +51,13 @@ The package is under `src/ldetect2/`. Key modules:
 | `io/covariance.py` | Covariance matrix I/O: `insert_into_matrix_lean`, `read_partition_into_matrix_lean`, `delete_loci_*` |
 | `io/bed.py` | `write_bed` |
 | `_util/binary_search.py` | `find_le/ge/lt/gt` and `*_ind` variants wrapping `bisect` |
-| `_cli/` | argparse subcommands: `partition-chromosome`, `calc-covariance`, `matrix-to-vector`, `find-minima`, `extract-bpoints`, `interpolate-maps`, `run` |
+| `_cli/` | argparse subcommands: `partition-chromosome`, `calc-covariance`, `matrix-to-vector`, `find-minima`, `extract-bpoints`, `interpolate-maps`, `run`; global `-v/--verbosity {debug,info,warning,error}` flag handled in `main.py` |
 
 ## Key Design Decisions
 
 - **`CovarianceStore`** (frozen dataclass) replaces the reference's `flat_file_consts.py` global path-config dict. Every function that previously took `input_config: dict` now takes `store: CovarianceStore`.
-- **Numba JIT**: `_pairwise_ld_impl` in `shrinkage.py` is decorated with `@_njit_fallback` — a decorator defined as `njit(cache=True)` when Numba is available, or a no-op otherwise. The inner k loop was replaced with `np.sum(a * b)` / `np.sum(a)` / `np.sum(b)` to let LLVM vectorize.
+- **Numba JIT**: `_pairwise_ld_impl` in `shrinkage.py` is decorated with `@_jit` — a decorator defined as `njit(cache=True)` when Numba is available, or a no-op otherwise. The inner k loop was replaced with `np.sum(a * b)` / `np.sum(a)` / `np.sum(b)` to let LLVM vectorize (~50x speedup over pure Python).
+- **Parallel covariance**: `ldetect2 run --workers N` uses `concurrent.futures.ProcessPoolExecutor` to calculate covariance matrices for multiple partitions concurrently. Each partition is independent (unique output file, no shared state). The tabix spawn + `calc_covariance` call is extracted into a module-level `_calc_partition` function in `_cli/cmd_run.py` so it is picklable by the process pool.
 - **Pickle → JSON**: Intermediate breakpoint output uses `.json` (not `.pickle`) for portability.
 - **Symmetric Hann window**: `filters.py` uses `np.hanning(2*width+1)` — the symmetric variant. `scipy.signal.get_window('hann', N)` (default `fftbins=True`) is a periodic DFT window and gives different results.
 - **Test data**: Downloaded on first run from BitBucket raw URLs into `tests/data/` (gitignored). Session-scoped fixtures in `tests/conftest.py` handle this.

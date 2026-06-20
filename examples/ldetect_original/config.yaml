@@ -1,0 +1,48 @@
+chromosomes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+populations:
+  EUR:
+    subpops: [CEU, TSI, FIN, GBR, IBS]
+    # HapMap II CEU effective population size used by SHAPEIT/ldetect.
+    ne: 11418
+  AFR:
+    subpops: [YRI, LWK, ASW]
+    # HapMap II YRI effective population size used by SHAPEIT.
+    ne: 17469
+  ASN:
+    subpops: [CHB, JPT, CHS]
+    # HapMap II CHB+JPT effective population size used by SHAPEIT.
+    ne: 14269
+
+# Directories
+raw_vcf_dir: data/raw
+maps_dir: data/maps
+resources_dir: resources
+results_dir: results
+
+# ldetect2 parameters
+cov_cutoff: 0.0000001
+covariance_cache: compact
+n_snps_bw_bpoints: 10000
+subset: fourier_ls
+cov_workers: 4
+local_search_workers: 1
+
+# Post-processing
+min_snps_per_block: 0   # original ldetect does not merge small blocks
+
+# 1000G Phase 1 reference panel (GRCh37, release 20110521)
+# Note: VCF CHROM field uses bare integers (1, 2, ...) without "chr" prefix
+vcf_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521"
+vcf_filename_template: "ALL.chr{chrom}.phase1_release_v3.20101123.snps_indels_svs.genotypes.vcf.gz"
+
+# Panel annotation (same release)
+panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+
+# Genetic maps (HapMap-interpolated, GRCh37 positions)
+# joepickrell/1000-genomes-genetic-maps — 3-col: chr  position  cM
+maps_base_url: "https://raw.githubusercontent.com/joepickrell/1000-genomes-genetic-maps/master/interpolated_from_hapmap"
+map_filename_template: "chr{chrom}.interpolated_genetic_map.gz"
+
+# Published ldetect LD blocks (reference for comparison)
+ldetect_data_base_url: "https://bitbucket.org/nygcresearch/ldetect-data/raw/master"
