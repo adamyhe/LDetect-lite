@@ -21,10 +21,7 @@ ldetect_ref_fallback_urls:
   EUR: "https://gitlab.pasteur.fr/statistical-genetics/jass/-/raw/7b88d5c53dd7418bbc5f43ad366c0a387a7ed69c/data/fourier_ls-all.bed"
 
 # Diagnostic runs can fan out both through Snakemake jobs and ldetect2's
-# internal workers. By default, each ldetect2 chromosome job claims 4 Snakemake
-# cores and uses up to 4 covariance workers internally. With `--cores 4`, this
-# runs one chromosome at a time with internal parallelism. To run chromosomes in
-# parallel instead, override all three values to 1 and raise `--cores`.
+# internal workers. Defaults here favor bounded memory over throughput.
 cov_workers: 4
 local_search_workers: 1
-ldetect2_job_threads: 4
+ldetect2_job_threads: 999

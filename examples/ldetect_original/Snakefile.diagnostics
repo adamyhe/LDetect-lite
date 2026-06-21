@@ -278,15 +278,12 @@ rule diagnostic_run_ldetect2:
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
         ne=pop_ne(DIAG_POP),
         cutoff=config["cov_cutoff"],
-        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        cov_workers=config.get("cov_workers", 4),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
         high_precision=diag_flag_high_precision,
-        local_search_workers=lambda wildcards, threads: min(
-            config.get("local_search_workers", 1),
-            threads,
-        ),
+        local_search_workers=config.get("local_search_workers", 1),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -380,15 +377,12 @@ rule diagnostic_run_ldetect2_omni:
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
         ne=pop_ne(DIAG_POP),
         cutoff=config["cov_cutoff"],
-        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        cov_workers=config.get("cov_workers", 4),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
         high_precision=diag_flag_high_precision,
-        local_search_workers=lambda wildcards, threads: min(
-            config.get("local_search_workers", 1),
-            threads,
-        ),
+        local_search_workers=config.get("local_search_workers", 1),
     shell:
         """
         mkdir -p {params.log_dir}
