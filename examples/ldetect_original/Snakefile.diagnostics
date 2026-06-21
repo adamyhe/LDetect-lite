@@ -1,0 +1,508 @@
+"""Diagnostic workflow for ldetect_original boundary-divergence investigation.
+
+This workflow reuses the main reproduction inputs but writes isolated outputs
+under results/diagnostics/{population}/{chrom}/.
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "diagnostics.yaml"
+
+
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = Path(config["results_dir"]) / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+
+
+def as_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+DIAG_POP = config.get("population", "EUR")
+DIAG_CHROMS = [str(chrom) for chrom in config.get("chromosomes", [10, 13])]
+CASE_CHROM = str(config.get("case_chromosome", DIAG_CHROMS[0]))
+CONTROL_CHROM = str(config.get("control_chromosome", DIAG_CHROMS[-1]))
+OMNI_CHROMS = [str(chrom) for chrom in config.get("omni_chromosomes", [CASE_CHROM])]
+RUN_OMNI_DIAGNOSTIC = as_bool(config.get("run_omni_diagnostic", False))
+REF_CHECK_POPS = config.get("reference_check_populations", ["AFR", "ASN", "EUR"])
+REF_CHECK_CHROMS = [str(chrom) for chrom in config.get("reference_check_chromosomes", range(1, 23))]
+DIAG_ROOT = RESULTS / "diagnostics" / DIAG_POP
+REF_CHECK_ROOT = RESULTS / "diagnostics" / "reference_beds"
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def diag_run_dir(wildcards):
+    return str(DIAG_ROOT / str(wildcards.chrom) / "run")
+
+
+def diag_flag_high_precision(wildcards):
+    return "--high-precision" if as_bool(config.get("high_precision", False)) else ""
+
+
+def ref_bed_fallback_url(wildcards):
+    return config.get("ldetect_ref_fallback_urls", {}).get(wildcards.population, "")
+
+
+def omni_targets():
+    if not RUN_OMNI_DIAGNOSTIC:
+        return []
+    return (
+        expand(str(DIAG_ROOT / "{chrom}" / "omni_summary.tsv"), chrom=OMNI_CHROMS)
+        + expand(
+            str(DIAG_ROOT / "{chrom}" / "omni_block_comparison.tsv"),
+            chrom=OMNI_CHROMS,
+        )
+    )
+
+
+rule all:
+    input:
+        str(DIAG_ROOT / "diagnostic_summary.tsv"),
+        str(DIAG_ROOT / "case_vs_control.tsv"),
+        str(DIAG_ROOT / "input_summary.tsv"),
+        str(RESULTS / "diagnostics" / "reference_bed_consistency.tsv"),
+        expand(
+            str(DIAG_ROOT / "{chrom}" / "summary.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        expand(
+            str(DIAG_ROOT / "{chrom}" / "input_summary.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        expand(
+            str(DIAG_ROOT / "{chrom}" / "block_comparison.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        omni_targets(),
+
+
+rule download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule download_omni_map:
+    output:
+        str(MAPS_DIR / "omni" / "chr{chrom}.OMNI.interpolated_genetic_map.gz"),
+    params:
+        base_url=config.get(
+            "omni_maps_base_url",
+            "https://raw.githubusercontent.com/joepickrell/1000-genomes-genetic-maps/master/interpolated_OMNI",
+        ),
+        fname=lambda wc: config.get(
+            "omni_map_filename_template",
+            "chr{chrom}.OMNI.interpolated_genetic_map.gz",
+        ).format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}/omni
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule download_ref_bed:
+    output:
+        str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+        fallback_url=ref_bed_fallback_url,
+    shell:
+        """
+        mkdir -p {RES_DIR}/ldetect_ref
+        tmp="{output}.tmp"
+        if ! wget -q -O "$tmp" \
+            "{params.base_url}/{wildcards.population}/fourier_ls-all.bed"; then
+            rm -f "$tmp"
+            if [ -n "{params.fallback_url}" ]; then
+                wget -q -O "$tmp" "{params.fallback_url}"
+            else
+                exit 1
+            fi
+        fi
+        mv "$tmp" {output}
+        """
+
+
+rule download_ref_chrom_bed:
+    output:
+        str(REF_CHECK_ROOT / "{population}" / "fourier_ls-chr{chrom}.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+    shell:
+        """
+        mkdir -p {REF_CHECK_ROOT}/{wildcards.population}
+        wget -q -O {output} \
+            "{params.base_url}/{wildcards.population}/fourier_ls-chr{wildcards.chrom}.bed"
+        """
+
+
+rule check_reference_beds:
+    input:
+        all_beds=expand(
+            str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+            population=REF_CHECK_POPS,
+        ),
+        chrom_beds=expand(
+            str(REF_CHECK_ROOT / "{population}" / "fourier_ls-chr{chrom}.bed"),
+            population=REF_CHECK_POPS,
+            chrom=REF_CHECK_CHROMS,
+        ),
+        script="scripts/check_reference_beds.py",
+    output:
+        str(RESULTS / "diagnostics" / "reference_bed_consistency.tsv"),
+    params:
+        populations=" ".join(REF_CHECK_POPS),
+        chroms=" ".join(REF_CHECK_CHROMS),
+    shell:
+        """
+        args=""
+        for pop in {params.populations}; do
+            args="$args --population $pop"
+            args="$args --all-bed {RES_DIR}/ldetect_ref/${{pop}}_fourier_ls-all.bed"
+            chrom_args=""
+            for chrom in {params.chroms}; do
+                chrom_args="$chrom_args {REF_CHECK_ROOT}/${{pop}}/fourier_ls-chr${{chrom}}.bed"
+            done
+            args="$args --chrom-beds $chrom_args"
+        done
+        python scripts/check_reference_beds.py $args --output {output}
+        """
+
+
+rule prep_individuals:
+    input:
+        panel=rules.download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+rule diagnostic_run_ldetect2:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.replace("{population}", DIAG_POP),
+        tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        individuals=str(RES_DIR / f"{DIAG_POP}_inds.txt"),
+    output:
+        bed=str(DIAG_ROOT / "{chrom}" / "run" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(DIAG_ROOT / "{chrom}" / "run" / "breakpoints-{chrom}.json"),
+        vector=str(DIAG_ROOT / "{chrom}" / "run" / "vector-{chrom}.txt.gz"),
+        partitions=str(DIAG_ROOT / "{chrom}" / "run" / "{chrom}_partitions.txt"),
+    log:
+        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2.log"),
+        timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing.log"),
+    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    params:
+        output_dir=diag_run_dir,
+        log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
+        ne=pop_ne(DIAG_POP),
+        cutoff=config["cov_cutoff"],
+        cov_workers=config.get("cov_workers", 4),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        high_precision=diag_flag_high_precision,
+        local_search_workers=config.get("local_search_workers", 1),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            {params.high_precision} \
+            > {log.run} 2>&1
+        awk 'BEGIN {{OFS="\\t"}} /^#/ {{print; next}} {{$1 = ($1 ~ /^chr/ ? $1 : "chr"$1); print}}' \
+            {output.bed} > {output.bed}.tmp
+        mv {output.bed}.tmp {output.bed}
+        """
+
+
+rule diagnostic_input_summary:
+    input:
+        raw_vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        raw_tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        filtered_vcf=FILT_VCF.replace("{population}", DIAG_POP),
+        filtered_tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        partitions=rules.diagnostic_run_ldetect2.output.partitions,
+        script="scripts/diagnose_inputs.py",
+    output:
+        str(DIAG_ROOT / "{chrom}" / "input_summary.tsv"),
+    params:
+        population=DIAG_POP,
+    shell:
+        """
+        python scripts/diagnose_inputs.py \
+            --population {params.population} \
+            --chromosome {wildcards.chrom} \
+            --raw-vcf {input.raw_vcf} \
+            --filtered-vcf {input.filtered_vcf} \
+            --genetic-map {input.genetic_map} \
+            --partitions {input.partitions} \
+            --output {output}
+        """
+
+
+rule diagnostic_summarise_run:
+    input:
+        bed=rules.diagnostic_run_ldetect2.output.bed,
+        breakpoints=rules.diagnostic_run_ldetect2.output.breakpoints,
+        vector=rules.diagnostic_run_ldetect2.output.vector,
+        script="scripts/diagnose_run.py",
+    output:
+        str(DIAG_ROOT / "{chrom}" / "summary.tsv"),
+    params:
+        run_dir=diag_run_dir,
+        population=DIAG_POP,
+    shell:
+        """
+        python scripts/diagnose_run.py \
+            --run-dir {params.run_dir} \
+            --chromosome {wildcards.chrom} \
+            --population {params.population} \
+            --output {output}
+        """
+
+
+rule diagnostic_run_ldetect2_omni:
+    input:
+        genetic_map=rules.download_omni_map.output[0],
+        vcf=FILT_VCF.replace("{population}", DIAG_POP),
+        tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        individuals=str(RES_DIR / f"{DIAG_POP}_inds.txt"),
+    output:
+        bed=str(DIAG_ROOT / "{chrom}" / "omni_run" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(
+            DIAG_ROOT / "{chrom}" / "omni_run" / "breakpoints-{chrom}.json"
+        ),
+        vector=str(DIAG_ROOT / "{chrom}" / "omni_run" / "vector-{chrom}.txt.gz"),
+    log:
+        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2_omni.log"),
+        timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing_omni.log"),
+    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    params:
+        output_dir=lambda wc: str(DIAG_ROOT / str(wc.chrom) / "omni_run"),
+        log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
+        ne=pop_ne(DIAG_POP),
+        cutoff=config["cov_cutoff"],
+        cov_workers=config.get("cov_workers", 4),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        high_precision=diag_flag_high_precision,
+        local_search_workers=config.get("local_search_workers", 1),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            {params.high_precision} \
+            > {log.run} 2>&1
+        awk 'BEGIN {{OFS="\\t"}} /^#/ {{print; next}} {{$1 = ($1 ~ /^chr/ ? $1 : "chr"$1); print}}' \
+            {output.bed} > {output.bed}.tmp
+        mv {output.bed}.tmp {output.bed}
+        """
+
+
+rule diagnostic_summarise_omni_run:
+    input:
+        bed=rules.diagnostic_run_ldetect2_omni.output.bed,
+        breakpoints=rules.diagnostic_run_ldetect2_omni.output.breakpoints,
+        vector=rules.diagnostic_run_ldetect2_omni.output.vector,
+        script="scripts/diagnose_run.py",
+    output:
+        str(DIAG_ROOT / "{chrom}" / "omni_summary.tsv"),
+    params:
+        run_dir=lambda wc: str(DIAG_ROOT / str(wc.chrom) / "omni_run"),
+        population=DIAG_POP,
+    shell:
+        """
+        python scripts/diagnose_run.py \
+            --run-dir {params.run_dir} \
+            --chromosome {wildcards.chrom} \
+            --population {params.population} \
+            --output {output}
+        """
+
+
+rule diagnostic_compare_omni_blocks:
+    input:
+        ours=rules.diagnostic_run_ldetect2_omni.output.bed,
+        ref=str(RES_DIR / "ldetect_ref" / f"{DIAG_POP}_fourier_ls-all.bed"),
+    output:
+        str(DIAG_ROOT / "{chrom}" / "omni_block_comparison.tsv"),
+    params:
+        tolerance=config.get("tolerance", 100_000),
+    shell:
+        """
+        python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """
+
+
+rule diagnostic_compare_blocks:
+    input:
+        ours=rules.diagnostic_run_ldetect2.output.bed,
+        ref=str(RES_DIR / "ldetect_ref" / f"{DIAG_POP}_fourier_ls-all.bed"),
+    output:
+        str(DIAG_ROOT / "{chrom}" / "block_comparison.tsv"),
+    params:
+        tolerance=config.get("tolerance", 100_000),
+    shell:
+        """
+        python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """
+
+
+rule diagnostic_summary:
+    input:
+        summaries=expand(str(DIAG_ROOT / "{chrom}" / "summary.tsv"), chrom=DIAG_CHROMS),
+        comparisons=expand(
+            str(DIAG_ROOT / "{chrom}" / "block_comparison.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        script="scripts/diagnose_run.py",
+    output:
+        summary=str(DIAG_ROOT / "diagnostic_summary.tsv"),
+        case_control=str(DIAG_ROOT / "case_vs_control.tsv"),
+    params:
+        case=CASE_CHROM,
+        control=CONTROL_CHROM,
+    shell:
+        """
+        python scripts/diagnose_run.py \
+            --combine-summaries {input.summaries} \
+            --combine-comparisons {input.comparisons} \
+            --output {output.summary} \
+            --case-vs-control {output.case_control} \
+            --case-chromosome {params.case} \
+            --control-chromosome {params.control}
+        """
+
+
+rule diagnostic_input_summary_all:
+    input:
+        summaries=expand(
+            str(DIAG_ROOT / "{chrom}" / "input_summary.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        script="scripts/combine_tsv.py",
+    output:
+        str(DIAG_ROOT / "input_summary.tsv"),
+    shell:
+        """
+        python scripts/combine_tsv.py \
+            --input {input.summaries} \
+            --output {output}
+        """

@@ -1,0 +1,293 @@
+"""Snakemake workflow: Reproduce Berisa & Pickrell (2016) ldetect LD blocks.
+
+Reproduces the EUR / AFR / ASN analyses from:
+    Berisa & Pickrell (2016), https://bitbucket.org/nygcresearch/ldetect
+    Published blocks:         https://bitbucket.org/nygcresearch/ldetect-data
+
+Reference panel:  1000G Phase 1 (GRCh37, release 20110521, 1,092 individuals)
+Genetic maps:     HapMap-interpolated per-SNP maps from joepickrell/1000-genomes-genetic-maps
+Note:             Phase 1 VCF chromosomes use bare integers (1, 2, ...) — no "chr" prefix.
+                  ldetect2 is invoked with --chromosome {N}; the BED assembly step
+                  restores the "chr" prefix to match the published block files.
+
+Pipeline steps:
+    0  Data download (VCFs + TBI, genetic maps, panel annotation, reference BED blocks)
+    1  Individual list preparation (subpopulation intersection with VCF)
+    2  Population-specific VCF filtering (MAC >= 1 after sample subsetting)
+    3  LD block detection per chromosome × population (ldetect2 run)
+    4  Genome-wide BED assembly (cat all chromosomes, restore chr prefix)
+    5  Compare against published ldetect blocks
+
+Usage:
+    cd examples/ldetect_original/
+    snakemake -n                         # dry-run, all chromosomes
+    snakemake --cores 8                  # run with 8 parallel jobs
+    snakemake --config chromosomes=[22]  # smoke-test on chr22 only
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+
+
+CHROMS = config["chromosomes"]
+POPS = list(config["populations"].keys())
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+# ---------------------------------------------------------------------------
+# Target rule
+# ---------------------------------------------------------------------------
+
+
+rule all:
+    input:
+        expand(str(RESULTS / "{population}_LD_blocks.bed"), population=POPS),
+        expand(
+            str(RESULTS / "compare" / "{population}_block_comparison.tsv"),
+            population=POPS,
+        ),
+
+
+# ---------------------------------------------------------------------------
+# Step 0a: Download VCFs
+# ---------------------------------------------------------------------------
+
+
+rule download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 0b: Download genetic maps (one per chromosome)
+# ---------------------------------------------------------------------------
+
+
+rule download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 0c: Download panel annotation
+# ---------------------------------------------------------------------------
+
+
+rule download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+# ---------------------------------------------------------------------------
+# Step 0d: Download published ldetect reference BED files
+# ---------------------------------------------------------------------------
+
+
+rule download_ref_bed:
+    output:
+        str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+    shell:
+        """
+        mkdir -p {RES_DIR}/ldetect_ref
+        wget -q -O {output} \
+            "{params.base_url}/{wildcards.population}/fourier_ls-all.bed"
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Individual list (subpopulation × VCF intersection)
+# ---------------------------------------------------------------------------
+
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = Path(config["results_dir"]) / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+
+
+rule prep_individuals:
+    input:
+        panel=rules.download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Population-specific VCF filter
+#
+# Exact ldetect reproduction requires subsetting to the population before
+# filtering on minor allele count.  For the chr2 example window, this command
+# reproduces the reference covariance SNP count (672):
+#
+#   bcftools view -S eurinds.txt -Ou raw.vcf.gz 2:39967768-40067768 |
+#   bcftools view -H -i 'MAC[0]>=1' -m2 -M2 | wc -l
+#
+# Do not add FILTER=PASS or --types snps here; the reference ldetect pipeline
+# consumed all biallelic records supplied to it.
+# ---------------------------------------------------------------------------
+
+
+rule filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Run ldetect2 per chromosome × population
+# Note: --chromosome uses bare integer (e.g. 1) to match Phase 1 VCF CHROM field.
+# ---------------------------------------------------------------------------
+
+
+rule run_ldetect2:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(RESULTS / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
+    log:
+        run=str(RESULTS / "logs" / "{population}" / "{chrom}.ldetect2.log"),
+        timing=str(RESULTS / "logs" / "{population}" / "{chrom}.timing.log"),
+    benchmark:
+        str(RESULTS / "logs" / "{population}" / "{chrom}.benchmark.tsv")
+    threads: config.get("ldetect2_job_threads", config["cov_workers"])
+    params:
+        output_dir=str(RESULTS / "{population}" / "{chrom}"),
+        log_dir=str(RESULTS / "logs" / "{population}"),
+        ne=lambda wc: pop_ne(wc.population),
+        cutoff=config["cov_cutoff"],
+        cov_workers=config["cov_workers"],
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config["subset"],
+        local_search_workers=config.get("local_search_workers", 1),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Combine chromosomes → genome-wide BED, restoring "chr" prefix
+# ---------------------------------------------------------------------------
+
+
+rule combine_beds:
+    input:
+        expand(
+            str(RESULTS / "{{population}}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "{population}_LD_blocks.bed"),
+    shell:
+        """
+        echo -e "#chr\tstart\tstop" > {output}
+        for f in {input}; do
+            tail -n +2 "$f" | sed 's/^/chr/' >> {output}
+        done
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Compare against published ldetect blocks
+# ---------------------------------------------------------------------------
+
+
+rule compare_blocks:
+    input:
+        ours=str(RESULTS / "{population}_LD_blocks.bed"),
+        ref=str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    output:
+        str(RESULTS / "compare" / "{population}_block_comparison.tsv"),
+    params:
+        tolerance=100_000,
+    shell:
+        """
+        mkdir -p {RESULTS}/compare
+        python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref  {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """

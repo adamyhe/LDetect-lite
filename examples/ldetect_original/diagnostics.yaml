@@ -1,0 +1,27 @@
+population: EUR
+chromosomes: [10, 13]
+case_chromosome: 10
+control_chromosome: 13
+high_precision: false
+covariance_cache: compact
+subset: fourier_ls
+tolerance: 100000
+
+# Optional provenance diagnostic: rerun selected chromosomes with the CEU OMNI
+# recombination map from joepickrell/1000-genomes-genetic-maps. This is intended
+# to test whether EUR chr8-12 disagreement reflects a mixed map source.
+run_omni_diagnostic: true
+omni_chromosomes: [10]
+omni_maps_base_url: "https://raw.githubusercontent.com/joepickrell/1000-genomes-genetic-maps/master/interpolated_OMNI"
+omni_map_filename_template: "chr{chrom}.OMNI.interpolated_genetic_map.gz"
+
+# Fallback for the now-unavailable nygcresearch Bitbucket account. This mirror
+# contains the EUR genome-wide fourier_ls all-BED used by JASS.
+ldetect_ref_fallback_urls:
+  EUR: "https://gitlab.pasteur.fr/statistical-genetics/jass/-/raw/7b88d5c53dd7418bbc5f43ad366c0a387a7ed69c/data/fourier_ls-all.bed"
+
+# Diagnostic runs can fan out both through Snakemake jobs and ldetect2's
+# internal workers. Defaults here favor bounded memory over throughput.
+cov_workers: 4
+local_search_workers: 1
+ldetect2_job_threads: 999
