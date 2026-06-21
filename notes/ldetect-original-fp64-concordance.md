@@ -164,3 +164,67 @@ These checks are now wired into
 `results/diagnostics/{POP}/input_summary.tsv`,
 `results/diagnostics/{POP}/diagnostic_summary.tsv`, and
 `results/diagnostics/reference_bed_consistency.tsv`.
+
+## Diagnostic summary review
+
+Date: 2026-06-21
+
+Downloaded diagnostic summaries for EUR chr10 as the failing case and EUR
+chr13 as the matched control were reviewed under:
+
+```text
+examples/ldetect_original/results/diagnostics/EUR/
+```
+
+Key observations:
+
+- chr10 still fails against the published EUR reference despite matching the
+  expected block count:
+
+```text
+chr10: our_n=85, ref_n=85, recall=0.2907, precision=0.2907,
+       median_offset=264.2 kb, p90_offset=723.8 kb
+```
+
+- chr13 remains an exact control:
+
+```text
+chr13: our_n=62, ref_n=62, recall=1.0, precision=1.0
+```
+
+- The CEU OMNI-map rerun for chr10 does not rescue the mismatch:
+
+```text
+chr10 OMNI: our_n=85, ref_n=85, recall=0.314,
+            median_offset=266.8 kb, p90_offset=728.0 kb
+```
+
+  The OMNI vector differs substantially from the HapMap-interpolated vector
+  and increases covariance rows, but final reference concordance remains poor.
+  This makes a simple "wrong Pickrell map family" explanation unlikely.
+
+- `reference_bed_consistency.tsv` contains no mismatches. The Bitbucket
+  `fourier_ls-all.bed` files and chromosome-specific `fourier_ls-chrN.bed`
+  files are internally consistent for the checked populations/chromosomes.
+
+- Input scale differs as expected between chr10 and chr13, but the current
+  summaries do not show an obvious pathological map or partition issue:
+
+```text
+chr10 filtered_vcf_records=845717, vector_rows=845019,
+      partitions=376, cov_rows=2289855822, found_width=4305
+chr13 filtered_vcf_records=611065, vector_rows=610559,
+      partitions=274, cov_rows=1362130544, found_width=4861
+```
+
+One caveat: `raw_vcf_records` is reported as `0` for both chromosomes. This is
+probably a diagnostic-script limitation from using `bcftools index -n` on these
+raw `.tbi` files, not evidence that the raw VCFs are empty. The filtered VCF
+counts are informative.
+
+Updated interpretation: the leading hypotheses are now (1) original published
+EUR chr8-12 were generated from a different 1000G/public-input snapshot or
+filtering state than the current release files, or (2) there is still an
+unidentified upstream implementation/provenance detail before vector/minima
+selection. The simple reference-BED packaging and OMNI-vs-HapMap-map-family
+explanations are both disfavored.
