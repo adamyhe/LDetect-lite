@@ -147,3 +147,114 @@ while curr_locus <= end_locus:
     ...
     if x in matrix and y in matrix[x]:
 ```
+
+---
+
+## Future Work: Optimization Opportunities and Memory Risk
+
+The remaining pipeline bottlenecks are mostly data-flow and repeated
+precomputation issues. Several possible optimizations would improve runtime but
+could raise peak memory, which has been a previous operational risk for
+whole-chromosome runs.
+
+### Lower memory-risk candidates
+
+#### Cache filter-width search counts
+
+**Affected code:** `custom_binary_search_with_trackback` in
+`src/ldetect2/find_minima.py`; `apply_filter_get_minima` in
+`src/ldetect2/filters.py`
+
+The filter-width search may evaluate the same width more than once during
+binary search and trackback. A small cache of `{width: minima_count}` would
+avoid repeated Hanning-window construction, convolution, and minima extraction.
+
+Memory guidance: cache only integer minima counts. Do not cache full smoothed
+arrays or filter result dicts unless profiling shows the memory increase is
+acceptable.
+
+#### Avoid vector file reread in end-to-end `run`
+
+**Affected code:** `MatrixAnalysis.calc_diag_lean`,
+`write_diag_vector_array`, and `find_breakpoints`
+
+The end-to-end CLI writes `vector-{chrom}.txt.gz` and then immediately rereads
+it in `find_breakpoints`. An internal fast path could return the vector arrays
+directly while still writing the restartable vector file for users.
+
+Memory guidance: the vector is small compared with covariance partitions, so
+this should be low to moderate risk. Keep the current file-backed path as the
+default fallback until real chromosome memory profiles confirm the peak impact.
+
+### Moderate memory-risk candidates
+
+#### Group local-search windows by overlapping partitions
+
+**Affected code:** `_run_local_search` in `src/ldetect2/pipeline.py`;
+`LocalSearch` in `src/ldetect2/local_search.py`
+
+Adjacent breakpoint searches often touch overlapping covariance partitions.
+Grouping windows by partition range could reduce repeated partition loads and
+precomputation.
+
+Memory guidance: implement groups so partitions are loaded, processed, and
+released within a bounded scope. Avoid retaining all grouped windows or all
+partition arrays at once.
+
+#### Precompute partition-level normalized rows
+
+**Affected code:** `src/ldetect2/_util/covariance_array.py` and
+`src/ldetect2/local_search.py`
+
+Local search repeatedly derives `r²` from `shrink_ld` and diagonal values.
+Precomputing normalized rows per partition could reduce repeated arithmetic and
+lookup work.
+
+Memory guidance: this duplicates information already stored in `shrink_ld` plus
+diagonals. Treat it as moderate to high risk unless the precomputed rows are
+streamed, memory-mapped, or scoped to a small partition group.
+
+### Higher memory-risk candidates
+
+#### Pass a chromosome covariance cache through `ldetect2 run`
+
+**Affected code:** `src/ldetect2/_cli/cmd_run.py`,
+`MatrixAnalysis.calc_diag_lean`, and `find_breakpoints`
+
+Both matrix-to-vector and breakpoint finding can accept a chromosome covariance
+cache, but the end-to-end `run` command currently does not build and pass one.
+Passing a cache could avoid repeated partition reads across vector generation,
+metrics, and local search.
+
+Memory guidance: `load_chromosome_covariance()` retains raw partition arrays and
+metric arrays. On whole chromosomes this may hold most or all covariance data in
+RAM. Make this opt-in or guarded by a clearly documented "fast/high-memory"
+mode, not an unconditional default.
+
+#### Unify full and metric-only covariance caches
+
+**Affected code:** `load_chromosome_covariance`,
+`load_metric_covariance`, and `metric_from_arrays` in
+`src/ldetect2/_util/covariance_array.py`
+
+`load_metric_covariance()` intentionally builds a slimmer cache for metrics,
+while `load_chromosome_covariance()` keeps raw partition arrays needed by
+matrix-to-vector and local search. A unified cache could reduce duplicate reads
+in fast runs.
+
+Memory guidance: preserving the metric-only path is important for low-memory
+runs. A unified cache should be opt-in and should not be combined with worker
+parallelism without explicit shared-memory or memory-mapping design.
+
+#### Parallelize cached local search
+
+**Affected code:** `_run_local_search` in `src/ldetect2/pipeline.py`
+
+The current code uses cached in-memory array local search in a single process.
+This avoids pickling or copying a large chromosome cache into multiple worker
+processes.
+
+Memory guidance: do not pass large covariance caches into a
+`ProcessPoolExecutor` casually. On many platforms this can copy the cache per
+worker. If cached local search is parallelized, prefer shared memory,
+memory-mapped arrays, or partition-group workers with bounded inputs.
