@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "ldetect2"
 version = "0.1.0"
-description = "Modern reimplementation of LDetect: approximately independent LD blocks in the human genome"
+description = "Fast calculation of approximately independent LD blocks"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
-authors = [{ name = "Original algorithm: Tomaz Berisa, Joe Pickrell" }]
+authors = [{ name = "Adam He" }]
 keywords = ["bioinformatics", "LD", "linkage-disequilibrium", "GWAS"]
 classifiers = [
     "Development Status :: 3 - Alpha",
