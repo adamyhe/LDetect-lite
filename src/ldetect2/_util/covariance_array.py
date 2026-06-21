@@ -39,8 +39,14 @@ CovarianceArrays = ChromosomeCovariance
 
 def _position_array(arr: np.ndarray) -> np.ndarray:
     arr = np.asarray(arr)
-    if np.issubdtype(arr.dtype, np.integer):
-        return arr
+    if not np.issubdtype(arr.dtype, np.integer):
+        arr = arr.astype(np.int64, copy=False)
+    if arr.size == 0:
+        return arr.astype(np.int32, copy=False)
+
+    int32_info = np.iinfo(np.int32)
+    if int(arr.min()) >= int32_info.min and int(arr.max()) <= int32_info.max:
+        return arr.astype(np.int32, copy=False)
     return arr.astype(np.int64, copy=False)
 
 

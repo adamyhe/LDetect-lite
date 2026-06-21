@@ -51,3 +51,38 @@ def test_load_covariance_partitions_slices_to_requested_range(
     assert partition.i_pos.tolist() == [200, 400]
     assert partition.j_pos.tolist() == [300, 400]
     assert partition.i_pos.dtype == np.dtype("int32")
+
+
+def test_load_partition_arrays_downcasts_int64_positions_when_safe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chr1.100.300.npz"
+    np.savez_compressed(
+        path,
+        i_pos=np.array([100, 200], dtype=np.int64),
+        j_pos=np.array([200, 300], dtype=np.int64),
+        shrink_ld=np.ones(2),
+    )
+
+    i_pos, j_pos, _ = _load_partition_arrays(path)
+
+    assert i_pos.dtype == np.dtype("int32")
+    assert j_pos.dtype == np.dtype("int32")
+
+
+def test_load_partition_arrays_keeps_int64_positions_when_needed(
+    tmp_path: Path,
+) -> None:
+    too_large = np.iinfo(np.int32).max + 1
+    path = tmp_path / "chr1.large.npz"
+    np.savez_compressed(
+        path,
+        i_pos=np.array([100, too_large], dtype=np.int64),
+        j_pos=np.array([200, too_large], dtype=np.int64),
+        shrink_ld=np.ones(2),
+    )
+
+    i_pos, j_pos, _ = _load_partition_arrays(path)
+
+    assert i_pos.dtype == np.dtype("int64")
+    assert j_pos.dtype == np.dtype("int64")
