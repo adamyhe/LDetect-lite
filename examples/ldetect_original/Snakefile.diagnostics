@@ -34,7 +34,7 @@ def as_bool(value):
 
 
 DIAG_POP = config.get("population", "EUR")
-DIAG_CHROMS = [str(chrom) for chrom in config.get("chromosomes", [10, 13])]
+DIAG_CHROMS = [str(chrom) for chrom in config.get("chromosomes", [21, 22])]
 CASE_CHROM = str(config.get("case_chromosome", DIAG_CHROMS[0]))
 CONTROL_CHROM = str(config.get("control_chromosome", DIAG_CHROMS[-1]))
 OMNI_CHROMS = [str(chrom) for chrom in config.get("omni_chromosomes", [CASE_CHROM])]
@@ -43,6 +43,13 @@ REF_CHECK_POPS = config.get("reference_check_populations", ["AFR", "ASN", "EUR"]
 REF_CHECK_CHROMS = [str(chrom) for chrom in config.get("reference_check_chromosomes", range(1, 23))]
 DIAG_ROOT = RESULTS / "diagnostics" / DIAG_POP
 REF_CHECK_ROOT = RESULTS / "diagnostics" / "reference_beds"
+PROFILE_SUMMARY = as_bool(config.get("profile_summary", True))
+PROFILE_PLOTS = as_bool(config.get("profile_plots", True))
+PROFILE_NAME = config.get("profile_name", "default")
+PROFILE_CHROMS = [
+    str(chrom) for chrom in config.get("profile_chromosomes", []) or DIAG_CHROMS
+]
+PROFILE_ROOT = DIAG_ROOT / "profiling"
 
 def pop_ne(population):
     return config["populations"][population]["ne"]
@@ -76,6 +83,19 @@ def omni_targets():
     )
 
 
+def profile_targets():
+    if not (PROFILE_SUMMARY or PROFILE_PLOTS):
+        return []
+    targets = [
+        str(PROFILE_ROOT / "run_summary.tsv"),
+        str(PROFILE_ROOT / "local_search_breakpoints.tsv"),
+        str(PROFILE_ROOT / "local_search_by_chrom.tsv"),
+    ]
+    if PROFILE_PLOTS:
+        targets.append(str(PROFILE_ROOT / "plots"))
+    return targets
+
+
 rule all:
     input:
         str(DIAG_ROOT / "diagnostic_summary.tsv"),
@@ -95,6 +115,7 @@ rule all:
             chrom=DIAG_CHROMS,
         ),
         omni_targets(),
+        profile_targets(),
 
 
 rule download_vcf:
@@ -284,11 +305,12 @@ rule diagnostic_run_ldetect2:
         subset=config.get("subset", "fourier_ls"),
         high_precision=diag_flag_high_precision,
         local_search_workers=config.get("local_search_workers", 1),
+        verbosity=config.get("profile_verbosity", "debug"),
     shell:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 run \
+        ldetect2 -v {params.verbosity} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -383,11 +405,12 @@ rule diagnostic_run_ldetect2_omni:
         subset=config.get("subset", "fourier_ls"),
         high_precision=diag_flag_high_precision,
         local_search_workers=config.get("local_search_workers", 1),
+        verbosity=config.get("profile_verbosity", "debug"),
     shell:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 run \
+        ldetect2 -v {params.verbosity} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -488,6 +511,43 @@ rule diagnostic_summary:
             --case-vs-control {output.case_control} \
             --case-chromosome {params.case} \
             --control-chromosome {params.control}
+        """
+
+
+rule diagnostic_profile_summary:
+    input:
+        logs=expand(
+            str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2.log"),
+            chrom=PROFILE_CHROMS,
+        ),
+        timings=expand(
+            str(DIAG_ROOT / "{chrom}" / "logs" / "timing.log"),
+            chrom=PROFILE_CHROMS,
+        ),
+        script="scripts/profile_ldetect2.py",
+    output:
+        run_summary=str(PROFILE_ROOT / "run_summary.tsv"),
+        breakpoints=str(PROFILE_ROOT / "local_search_breakpoints.tsv"),
+        by_chrom=str(PROFILE_ROOT / "local_search_by_chrom.tsv"),
+        plots=directory(str(PROFILE_ROOT / "plots")),
+    params:
+        diagnostic_root=str(DIAG_ROOT),
+        chromosomes=" ".join(PROFILE_CHROMS),
+        population=DIAG_POP,
+        profile_name=PROFILE_NAME,
+        plots=lambda wc: "--plots" if PROFILE_PLOTS else "--no-plots",
+    shell:
+        """
+        python scripts/profile_ldetect2.py \
+            --diagnostic-root {params.diagnostic_root} \
+            --population {params.population} \
+            --profile-name {params.profile_name} \
+            --chromosomes {params.chromosomes} \
+            --run-summary {output.run_summary} \
+            --local-search-breakpoints {output.breakpoints} \
+            --local-search-by-chrom {output.by_chrom} \
+            --plot-dir {output.plots} \
+            {params.plots}
         """
 
 

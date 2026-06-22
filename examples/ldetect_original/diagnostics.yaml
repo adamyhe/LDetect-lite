@@ -1,7 +1,7 @@
 population: EUR
-chromosomes: [10, 13]
-case_chromosome: 10
-control_chromosome: 13
+chromosomes: [21, 22]
+case_chromosome: 22
+control_chromosome: 21
 high_precision: false
 covariance_cache: compact
 subset: fourier_ls
@@ -10,7 +10,7 @@ tolerance: 100000
 # Optional provenance diagnostic: rerun selected chromosomes with the CEU OMNI
 # recombination map from joepickrell/1000-genomes-genetic-maps. This is intended
 # to test whether EUR chr8-12 disagreement reflects a mixed map source.
-run_omni_diagnostic: true
+run_omni_diagnostic: false
 omni_chromosomes: [10]
 omni_maps_base_url: "https://raw.githubusercontent.com/joepickrell/1000-genomes-genetic-maps/master/interpolated_OMNI"
 omni_map_filename_template: "chr{chrom}.OMNI.interpolated_genetic_map.gz"
@@ -25,3 +25,12 @@ ldetect_ref_fallback_urls:
 cov_workers: 4
 local_search_workers: 1
 ldetect2_job_threads: 999
+
+# Profiling summaries parse the diagnostics logs and timing output. Keep these
+# enabled for remote profiling runs; they do not launch additional ldetect2 jobs.
+profile_summary: true
+profile_plots: true
+profile_name: default
+# Override this to profile a subset of diagnostic chromosomes without changing
+# the diagnostics outputs, e.g. profile_chromosomes: [10, 11].
+profile_chromosomes: []

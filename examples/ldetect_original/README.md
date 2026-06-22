@@ -134,9 +134,10 @@ be used to decide whether the analysis is reproducing the original result.
 ## Diagnostic Workflow
 
 `Snakefile.diagnostics` runs a focused case/control investigation for boundary
-divergence. The default `diagnostics.yaml` compares EUR chr10 against EUR
-chr13, records upstream input summaries, checks published reference BED
-consistency, and optionally reruns chr10 with the Pickrell CEU OMNI map.
+divergence and profiling. The default `diagnostics.yaml` uses smaller EUR
+chromosomes 21 and 22 so remote profiling iterations finish faster, records
+upstream input summaries, checks published reference BED consistency, and
+writes speed/memory profiling TSVs and plots from the diagnostic logs.
 
 Dry-run the default diagnostic:
 
@@ -148,6 +149,16 @@ Run the default diagnostic:
 
 ```bash
 snakemake -s Snakefile.diagnostics --cores 4
+```
+
+Run the problematic EUR chr10/chr11 profiling targets explicitly:
+
+```bash
+snakemake -s Snakefile.diagnostics --cores 4 \
+  --config chromosomes='[10,11]' \
+           case_chromosome=10 \
+           control_chromosome=11 \
+           profile_chromosomes='[10,11]'
 ```
 
 Run the five problematic EUR chromosomes plus chr13 as a control:
@@ -169,6 +180,15 @@ Useful outputs:
   breakpoint, and final BED comparison summaries.
 - `results/diagnostics/{POP}/case_vs_control.tsv`: compact side-by-side
   comparison of the configured case and control chromosomes.
+- `results/diagnostics/{POP}/profiling/run_summary.tsv`: wall time, CPU time,
+  max RSS, page faults, and I/O parsed from `/usr/bin/time`.
+- `results/diagnostics/{POP}/profiling/local_search_breakpoints.tsv`:
+  per-breakpoint local-search timing, partition counts, row counts, and RSS
+  parsed from debug logs.
+- `results/diagnostics/{POP}/profiling/local_search_by_chrom.tsv`: aggregated
+  local-search timing by chromosome and subset.
+- `results/diagnostics/{POP}/profiling/plots/`: PNG plots when matplotlib is
+  installed, or a `SKIPPED.txt` marker when plots are unavailable.
 - `results/diagnostics/reference_bed_consistency.tsv`: comparison of
   `fourier_ls-all.bed` slices against chromosome-specific `fourier_ls-chrN.bed`
   files for the configured reference populations.
