@@ -12,8 +12,11 @@ from ldetect2._util.binary_search import find_ge_ind, find_le_ind
 from ldetect2._util.covariance_array import (
     ChromosomeCovariance,
     CovariancePartition,
+    LocalSearchPartition,
+    canonical_local_search_rows,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
     load_covariance_partitions,
+    local_search_partition,
 )
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
@@ -29,38 +32,38 @@ def _append_partition(
     active_lo: np.ndarray,
     active_hi: np.ndarray,
     active_shrink: np.ndarray,
-    partition: CovariancePartition,
+    partition: LocalSearchPartition,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    if np.all(partition.i_pos <= partition.j_pos):
-        lo = partition.i_pos
-        hi = partition.j_pos
+    """Append a canonical partition and keep sorted first-pair semantics."""
+    if not active_lo.size:
+        lo = partition.lo
+        hi = partition.hi
+        shrink = partition.shrink_ld
     else:
-        lo = np.minimum(partition.i_pos, partition.j_pos)
-        hi = np.maximum(partition.i_pos, partition.j_pos)
-    shrink = partition.shrink_ld.astype(np.float64, copy=False)
-
-    if active_lo.size:
-        lo = np.concatenate((active_lo, lo))
-        hi = np.concatenate((active_hi, hi))
-        shrink = np.concatenate((active_shrink, shrink))
-
-    keep = _first_pair_indices(lo, hi)
-    lo = lo[keep]
-    hi = hi[keep]
-    shrink = shrink[keep]
-    return lo, hi, shrink, np.unique(lo)
+        lo = np.concatenate((active_lo, partition.lo))
+        hi = np.concatenate((active_hi, partition.hi))
+        shrink = np.concatenate((active_shrink, partition.shrink_ld))
+        lo, hi, shrink = canonical_local_search_rows(lo, hi, shrink)
+    return lo, hi, shrink, _unique_sorted(lo)
 
 
-def _first_pair_indices(lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
-    if lo.size == 0:
-        return np.array([], dtype=bool)
-    pairs = np.empty(lo.size, dtype=[("lo", lo.dtype), ("hi", hi.dtype)])
-    pairs["lo"] = lo
-    pairs["hi"] = hi
-    _, first_idx = np.unique(pairs, return_index=True)
-    keep = np.zeros(lo.size, dtype=bool)
-    keep[first_idx] = True
-    return keep
+def _unique_sorted(values: np.ndarray) -> np.ndarray:
+    """Return unique values from an already sorted array."""
+    if values.size <= 1:
+        return values.astype(np.int64, copy=False)
+    keep = np.ones(values.size, dtype=bool)
+    keep[1:] = values[1:] != values[:-1]
+    return values[keep].astype(np.int64, copy=False)
+
+
+def _active_diagonal(
+    active_lo: np.ndarray,
+    active_hi: np.ndarray,
+    active_shrink: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted diagonal positions and values from canonical active rows."""
+    diag_mask = active_lo == active_hi
+    return active_lo[diag_mask], active_shrink[diag_mask]
 
 
 def _add_array_locus_values(
@@ -100,6 +103,8 @@ def _add_array_segment_values(
     active_lo: np.ndarray,
     active_hi: np.ndarray,
     active_shrink: np.ndarray,
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
     snp_first: int,
     snp_last: int,
     snp_top: int,
@@ -123,41 +128,33 @@ def _add_array_segment_values(
         sum_vert_by_locus.setdefault(locus_key, 0.0)
         sum_horiz_by_locus.setdefault(locus_key, 0.0)
 
-    diag_mask = active_lo == active_hi
-    if not np.any(diag_mask):
-        return
-
-    diag_pos = active_lo[diag_mask]
-    diag_val = active_shrink[diag_mask]
-    order = np.argsort(diag_pos, kind="stable")
-    diag_pos = diag_pos[order]
-    diag_val = diag_val[order]
-    diag_pos, unique_idx = np.unique(diag_pos, return_index=True)
-    diag_val = diag_val[unique_idx]
     if diag_pos.size == 0:
         return
 
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
-    eligible = (
-        (active_lo >= lo_min)
-        & (active_lo <= lo_max)
-        & (active_lo <= snp_last)
-        & (active_hi <= snp_top)
-    )
+    left = int(np.searchsorted(active_lo, lo_min, side="left"))
+    right = int(np.searchsorted(active_lo, lo_max, side="right"))
+    if left >= right:
+        return
+
+    candidate_lo = active_lo[left:right]
+    candidate_hi = active_hi[left:right]
+    candidate_shrink = active_shrink[left:right]
+    eligible = (candidate_lo <= snp_last) & (candidate_hi <= snp_top)
     if include_snp_first:
-        eligible &= active_lo >= snp_first
+        eligible &= candidate_lo >= snp_first
     else:
-        eligible &= active_lo > snp_first
+        eligible &= candidate_lo > snp_first
     eligible_idx = np.flatnonzero(eligible)
     if eligible_idx.size == 0:
         return
 
     for chunk_start in range(0, eligible_idx.size, chunk_size):
         chunk = eligible_idx[chunk_start : chunk_start + chunk_size]
-        row_lo = active_lo[chunk]
-        row_hi = active_hi[chunk]
-        row_shrink = active_shrink[chunk]
+        row_lo = candidate_lo[chunk]
+        row_hi = candidate_hi[chunk]
+        row_shrink = candidate_shrink[chunk]
 
         diag_lo_idx = np.searchsorted(diag_pos, row_lo)
         diag_hi_idx = np.searchsorted(diag_pos, row_hi)
@@ -187,8 +184,14 @@ def _add_array_segment_values(
             / (diag_lo[positive] * diag_hi[positive])
         )
 
-        vert_loci, vert_inverse = np.unique(row_lo, return_inverse=True)
-        vert_sums = np.bincount(vert_inverse, weights=r2)
+        group_starts = np.concatenate(
+            (
+                np.array([0], dtype=np.int64),
+                np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
+            )
+        )
+        vert_loci = row_lo[group_starts]
+        vert_sums = np.add.reduceat(r2, group_starts)
         for locus, value in zip(vert_loci, vert_sums):
             sum_vert_by_locus[int(locus)] = (
                 sum_vert_by_locus.get(int(locus), 0.0) + float(value)
@@ -520,7 +523,10 @@ class LocalSearch:
         self,
         partitions: tuple[CovariancePartition, ...],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        position_dtype = partitions[0].i_pos.dtype if partitions else np.int64
+        local_partitions = tuple(
+            local_search_partition(partition) for partition in partitions
+        )
+        position_dtype = local_partitions[0].lo.dtype if local_partitions else np.int64
         active_lo = np.array([], dtype=position_dtype)
         active_hi = np.array([], dtype=position_dtype)
         active_shrink = np.array([], dtype=np.float64)
@@ -530,13 +536,13 @@ class LocalSearch:
         sum_horiz_by_locus: dict[int, float] = {}
 
         last_p_num = -1
-        for p_num_init in range(len(partitions) - 1):
-            if self.snp_bottom >= partitions[p_num_init + 1].start:
+        for p_num_init in range(len(local_partitions) - 1):
+            if self.snp_bottom >= local_partitions[p_num_init + 1].start:
                 active_lo, active_hi, active_shrink, active_loci = _append_partition(
                     active_lo,
                     active_hi,
                     active_shrink,
-                    partitions[p_num_init],
+                    local_partitions[p_num_init],
                 )
                 last_p_num = p_num_init
             else:
@@ -548,12 +554,12 @@ class LocalSearch:
         end_locus = -1
         end_locus_index = -1
 
-        for p_num in range(last_p_num + 1, len(partitions)):
+        for p_num in range(last_p_num + 1, len(local_partitions)):
             active_lo, active_hi, active_shrink, active_loci = _append_partition(
                 active_lo,
                 active_hi,
                 active_shrink,
-                partitions[p_num],
+                local_partitions[p_num],
             )
 
             if curr_locus < 0:
@@ -585,8 +591,8 @@ class LocalSearch:
                     curr_locus_index = 0
                     curr_locus = int(active_loci[0])
 
-            if p_num + 1 < len(partitions):
-                end_locus = partitions[p_num + 1].start
+            if p_num + 1 < len(local_partitions):
+                end_locus = local_partitions[p_num + 1].start
                 end_locus_index = -1
             else:
                 end_idx = int(np.searchsorted(active_loci, self.snp_last, side="right"))
@@ -603,11 +609,16 @@ class LocalSearch:
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
+                diag_pos, diag_val = _active_diagonal(
+                    active_lo, active_hi, active_shrink
+                )
                 _add_array_segment_values(
                     segment_loci,
                     active_lo,
                     active_hi,
                     active_shrink,
+                    diag_pos,
+                    diag_val,
                     self.snp_first,
                     self.snp_last,
                     self.snp_top,
@@ -627,7 +638,7 @@ class LocalSearch:
             active_lo = active_lo[keep]
             active_hi = active_hi[keep]
             active_shrink = active_shrink[keep]
-            active_loci = np.unique(active_lo)
+            active_loci = _unique_sorted(active_lo)
 
         loci = np.asarray(precomputed_loci, dtype=np.int64)
         sum_vert = np.asarray(

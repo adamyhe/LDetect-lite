@@ -23,6 +23,23 @@ class CovariancePartition:
 
 
 @dataclass(frozen=True)
+class LocalSearchPartition:
+    """Canonical covariance rows and diagonals for array local search.
+
+    Rows use lower/upper endpoints, are sorted by ``(lo, hi)``, and keep the
+    first value for duplicate endpoint pairs to match the legacy array path.
+    """
+
+    start: int
+    end: int
+    lo: np.ndarray
+    hi: np.ndarray
+    shrink_ld: np.ndarray
+    diag_pos: np.ndarray
+    diag_val: np.ndarray
+
+
+@dataclass(frozen=True)
 class ChromosomeCovariance:
     """Chromosome-level covariance cache for vector and metric calculations."""
 
@@ -73,6 +90,69 @@ def _load_partition_arrays(path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             _position_array(data["j_pos"]),
             np.asarray(data["shrink_ld"], dtype=np.float64),
         )
+
+
+def local_search_partition(partition: CovariancePartition) -> LocalSearchPartition:
+    """Return a sorted, deduplicated view of one partition for local search."""
+    lo, hi, shrink = canonical_local_search_rows(
+        partition.i_pos,
+        partition.j_pos,
+        partition.shrink_ld,
+    )
+    diag_mask = lo == hi
+    return LocalSearchPartition(
+        start=partition.start,
+        end=partition.end,
+        lo=lo,
+        hi=hi,
+        shrink_ld=shrink,
+        diag_pos=lo[diag_mask],
+        diag_val=shrink[diag_mask],
+    )
+
+
+def canonical_local_search_rows(
+    i_pos: np.ndarray,
+    j_pos: np.ndarray,
+    shrink_ld: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Canonicalize covariance rows as sorted unique lower/upper endpoints.
+
+    Duplicate endpoint pairs keep the first value from the input arrays.  The
+    returned position dtype follows :func:`_position_array`, preserving
+    ``int32`` when every position fits.
+    """
+    i_pos = _position_array(i_pos)
+    j_pos = _position_array(j_pos)
+    if i_pos.size == 0:
+        dtype = np.result_type(i_pos.dtype, j_pos.dtype)
+        return (
+            np.array([], dtype=dtype),
+            np.array([], dtype=dtype),
+            np.array([], dtype=np.float64),
+        )
+
+    if np.all(i_pos <= j_pos):
+        lo = i_pos.astype(np.result_type(i_pos.dtype, j_pos.dtype), copy=False)
+        hi = j_pos.astype(lo.dtype, copy=False)
+    elif np.all(j_pos <= i_pos):
+        hi = i_pos.astype(np.result_type(i_pos.dtype, j_pos.dtype), copy=False)
+        lo = j_pos.astype(hi.dtype, copy=False)
+    else:
+        dtype = np.result_type(i_pos.dtype, j_pos.dtype)
+        lo = np.minimum(i_pos, j_pos).astype(dtype, copy=False)
+        hi = np.maximum(i_pos, j_pos).astype(dtype, copy=False)
+    shrink = np.asarray(shrink_ld, dtype=np.float64)
+
+    original_order = np.arange(lo.size, dtype=np.int64)
+    order = np.lexsort((original_order, hi, lo))
+    lo = lo[order]
+    hi = hi[order]
+    shrink = shrink[order]
+
+    keep = np.ones(lo.size, dtype=bool)
+    keep[1:] = (lo[1:] != lo[:-1]) | (hi[1:] != hi[:-1])
+    return lo[keep], hi[keep], shrink[keep]
 
 
 def _slice_arrays_to_range(

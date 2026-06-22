@@ -16,6 +16,7 @@ from ldetect2._util.binary_search import find_ge_ind, find_le_ind
 from ldetect2._util.covariance_array import (
     ChromosomeCovariance,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
+    load_covariance_partitions,
     load_metric_covariance,
     metric_from_arrays,
 )
@@ -477,19 +478,52 @@ def _run_local_search(
                 subset_name,
             )
     elif workers == 1:
-        for idx, start, stop in tasks:
-            results[idx] = _local_search_worker(
-                chr_name,
-                start,
-                stop,
-                idx,
-                breakpoint_loci,
-                total_sum,
-                total_n,
-                store,
-                use_decimal,
-                subset_name=subset_name,
+        if use_decimal:
+            for idx, start, stop in tasks:
+                results[idx] = _local_search_worker(
+                    chr_name,
+                    start,
+                    stop,
+                    idx,
+                    breakpoint_loci,
+                    total_sum,
+                    total_n,
+                    store,
+                    use_decimal,
+                    subset_name=subset_name,
+                )
+        else:
+            grouped_tasks = _group_local_search_tasks(
+                chr_name, tasks, breakpoint_loci, store
             )
+            for partition_bounds, group in grouped_tasks:
+                partition_arrays = load_covariance_partitions(
+                    chr_name,
+                    store,
+                    list(partition_bounds),
+                )
+                group_cache = ChromosomeCovariance(
+                    loci=np.array([], dtype=np.int64),
+                    i_pos=np.array([], dtype=np.int64),
+                    j_pos=np.array([], dtype=np.int64),
+                    r2=np.array([], dtype=np.float64),
+                    partitions=partition_bounds,
+                    partition_arrays=partition_arrays,
+                )
+                for idx, start, stop in group:
+                    results[idx] = _local_search_worker(
+                        chr_name,
+                        start,
+                        stop,
+                        idx,
+                        breakpoint_loci,
+                        total_sum,
+                        total_n,
+                        store,
+                        use_decimal,
+                        group_cache,
+                        subset_name,
+                    )
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -522,6 +556,33 @@ def _run_local_search(
     )
 
     return {"loci": new_loci, "metrics": new_metrics}
+
+
+def _group_local_search_tasks(
+    chr_name: str,
+    tasks: list[tuple[int, int, int]],
+    breakpoint_loci: list[int],
+    store: CovarianceStore,
+) -> list[tuple[tuple[tuple[int, int], ...], list[tuple[int, int, int]]]]:
+    """Group local-search tasks that require the same covariance partitions."""
+    grouped: dict[tuple[tuple[int, int], ...], list[tuple[int, int, int]]] = {}
+    order: list[tuple[tuple[int, int], ...]] = []
+    for idx, start, stop in tasks:
+        tmp_partitions = get_final_partitions(store, chr_name, start, stop)
+        snp_top = (
+            breakpoint_loci[idx + 1]
+            if idx + 1 < len(breakpoint_loci)
+            else tmp_partitions[-1][1]
+        )
+        snp_bottom = breakpoint_loci[idx - 1] if idx - 1 >= 0 else tmp_partitions[0][0]
+        partition_bounds = tuple(
+            get_final_partitions(store, chr_name, snp_bottom, snp_top)
+        )
+        if partition_bounds not in grouped:
+            grouped[partition_bounds] = []
+            order.append(partition_bounds)
+        grouped[partition_bounds].append((idx, start, stop))
+    return [(partition_bounds, grouped[partition_bounds]) for partition_bounds in order]
 
 
 def _max_rss_mib() -> float | None:

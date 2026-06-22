@@ -1,0 +1,420 @@
+# Local Search Memory and Runtime Handoff
+
+Date: 2026-06-21
+
+## Context
+
+Recent profiling and `ldetect_original` runs show that local search dominates
+both runtime and memory. The current production target is still normal
+`ldetect2 run --subset fourier_ls`, where the first-order fix is to avoid
+unrequested local-search subsets. After that, the remaining cost is mostly in
+per-breakpoint covariance loading, row filtering, normalization, and repeated
+array aggregation.
+
+This handoff separates two tracks:
+
+1. Non-storage optimizations that can be implemented against the current `.npz`
+   covariance partitions.
+2. A later migration path to HDF5 partition files with local-search-friendly
+   chunking and indexes.
+
+The guiding constraint is that peak RSS must not increase for whole-chromosome
+runs. Any optimization that trades runtime for larger resident arrays should be
+opt-in or guarded by instrumentation.
+
+## Non-Storage Optimization Status
+
+These changes keep the existing `.npz` covariance artifacts and focus on
+reducing repeated local-search work.
+
+### Completed
+
+#### Sort and Deduplicate Rows Once Per Partition Load
+
+**Affected code:** `src/ldetect2/local_search.py`,
+`src/ldetect2/_util/covariance_array.py`
+
+Implemented `LocalSearchPartition` plus `local_search_partition()` and
+`canonical_local_search_rows()`. Each local-search partition now exposes
+canonical `lo`, `hi`, `shrink_ld`, `diag_pos`, and `diag_val` arrays.
+
+The canonical row helper:
+
+- converts endpoints to lower/upper form;
+- preserves `int32` positions when possible;
+- sorts by `(lo, hi)`;
+- deduplicates duplicate endpoint pairs with first-input-row-wins behavior;
+- keeps compact diagonal arrays for local-search normalization.
+
+Expected benefit carried forward:
+
+- Less repeated `np.unique` work inside local-search windows.
+- More predictable memory because deduplication happens once per loaded
+  partition rather than repeatedly on growing active arrays.
+
+Memory risk status:
+
+- Sorting still allocates temporary index arrays, but the scope is one loaded
+  partition/window rather than a chromosome-wide cache.
+
+#### Precompute Diagonal Lookup Arrays Per Loaded Partition
+
+**Affected code:** `src/ldetect2/local_search.py`,
+`src/ldetect2/_util/covariance_array.py`
+
+Implemented compact diagonal arrays in `LocalSearchPartition`:
+
+```text
+diag_pos int32/int64
+diag_val float64
+```
+
+Active local-search diagonals are now derived from canonical active rows rather
+than repeatedly sorting and uniquing diagonal positions in
+`_add_array_segment_values()`.
+
+Expected benefit:
+
+- Lower CPU in `_add_array_segment_values()`.
+- Lower temporary object churn from repeated dictionary-style diagonal lookup.
+
+Memory risk status:
+
+- Low. Diagonal arrays scale with number of loci, not covariance row count.
+
+#### Replace Boolean Full-Row Scans With Sorted Range Slices
+
+**Affected code:** `_add_array_segment_values()` in
+`src/ldetect2/local_search.py`
+
+Implemented sorted `lo` range slicing with `np.searchsorted()`. The function
+now slices candidate rows for the current segment before applying remaining
+eligibility masks, instead of building the first mask across the full active
+row set.
+
+Expected benefit:
+
+- Less work per segment when active partitions contain many rows outside the
+  local search interval.
+- Smaller temporary masks.
+
+Memory risk status:
+
+- Low if slices are views and chunk processing remains bounded.
+
+#### Use Grouped Reductions for Vertical Sums
+
+**Affected code:** `_add_array_segment_values()` in
+`src/ldetect2/local_search.py`
+
+Implemented grouped vertical aggregation with `np.add.reduceat()` over chunks
+that are already sorted by `lo`. Horizontal aggregation intentionally remains
+on `np.unique(..., return_inverse=True)` plus `np.bincount()` because `hi` is
+not globally sorted within the candidate `lo` range.
+
+Expected benefit:
+
+- Lower allocation and CPU in one of the hottest local-search loops.
+
+Memory risk status:
+
+- Low. This change does not add dense chromosome-wide arrays.
+
+#### Process Breakpoints by Partition Range
+
+**Affected code:** `_run_local_search()` in `src/ldetect2/pipeline.py`
+
+Implemented sequential grouping for the normal float, single-worker, uncached
+path. `_group_local_search_tasks()` groups tasks by required covariance
+partition bounds, loads each group once with `load_covariance_partitions()`,
+processes that group's breakpoints, then releases the group cache.
+
+This is intentionally not used for:
+
+- Decimal local search;
+- caller-supplied chromosome covariance caches;
+- multiprocessing runs.
+
+Expected benefit:
+
+- Fewer repeated `.npz` loads for adjacent breakpoint windows that touch the
+  same partition range.
+- No additional memory multiplication across process workers.
+
+Memory risk status:
+
+- Moderate but bounded. One partition group is retained at a time in the
+  sequential path.
+
+#### Keep Selective Subset Computation as the Default Hot Path
+
+**Affected code:** `find_breakpoints()` in `src/ldetect2/pipeline.py`,
+`src/ldetect2/_cli/cmd_run.py`
+
+Already implemented before this pass. `ldetect2 run --subset fourier_ls`
+computes raw Fourier plus Fourier local search and skips uniform local search
+unless requested or `--all-breakpoint-subsets` is passed.
+
+Expected benefit:
+
+- Roughly halves local-search work for the default production subset.
+
+Memory risk status:
+
+- Lower than previous behavior because fewer local-search windows are loaded.
+
+### Completed Exactness Coverage
+
+**Affected code:** `tests/test_local_search.py`,
+`tests/integration/test_pipeline.py`
+
+Added/strengthened tests for:
+
+- canonical local-search partition rows, including reversed endpoints,
+  duplicates, `int32` preservation, and zero diagonal values;
+- duplicate-pair local search versus the Decimal legacy path;
+- exact selected breakpoint matching against Decimal local search;
+- exact `N_zero` matching against Decimal local search;
+- precompute parity for `loci`, `sum_vert`, and `sum_horiz` against the
+  Decimal legacy path on a multi-partition fixture.
+
+Validation run after implementation:
+
+```text
+uv run pytest -q
+uv run ruff check src/ldetect2 tests
+git diff --check
+```
+
+Result: all checks passed (`154 passed`).
+
+## Non-Storage To-Dos
+
+### 1. Representative Performance and Memory Validation
+
+Run one representative `ldetect_original` chromosome, preferably EUR chr10 or
+chr11.
+
+Acceptance criteria:
+
+- final `fourier_ls` BED is byte-identical to the current branch baseline;
+- max RSS does not increase;
+- local-search precompute runtime improves or remains neutral;
+- per-breakpoint diagnostics show lower repeated partition loading for grouped
+  sequential runs.
+
+### 2. Dense Local Accumulators
+
+The implementation still uses `sum_vert_by_locus` and `sum_horiz_by_locus`
+dictionaries during precompute, then materializes arrays at the end. A future
+pass can replace those dictionaries with dense local arrays aligned to the
+current precomputed locus window.
+
+Constraints:
+
+- keep accumulators scoped to the local search window;
+- preserve exact locus list semantics;
+- compare `sum_vert` and `sum_horiz` against the Decimal legacy path before
+  enabling by default.
+
+### 3. Horizontal Grouped Reduction
+
+Horizontal aggregation still uses `np.unique(..., return_inverse=True)` and
+`np.bincount()` per chunk. This is conservative because `hi` is not globally
+sorted within each `lo` range.
+
+Possible future approach:
+
+- benchmark whether horizontal aggregation still dominates after the current
+  changes;
+- if it does, sort only the chunk's `(hi, r2)` view or use a bounded grouped
+  reduction strategy;
+- accept only if runtime improves without increasing peak RSS.
+
+### 4. Multiprocessing-Aware Grouping
+
+Current grouping is sequential only. A future version could assign whole
+partition groups to process workers.
+
+Constraints:
+
+- do not send a chromosome-wide covariance cache to every worker;
+- group tasks must remain bounded by partition range;
+- worker count should be documented as a memory multiplier.
+
+### 5. JIT Review After Profiling
+
+Do not add JIT until the representative chromosome run identifies remaining
+hot pure-array kernels.
+
+Likely candidates if still hot:
+
+- chunk normalization and aggregation in `_add_array_segment_values()`;
+- `_search_array()` candidate scoring to reduce temporary arrays;
+- streaming metric calculation only if metric memory remains material.
+
+## HDF5 Migration Plan
+
+The current compressed `.npz` archives are storage-efficient but not
+local-search-friendly. `np.load(..., mmap_mode=...)` does not give true partial
+array access for compressed `.npz` members; each touched array member must be
+inflated before it can be sliced. HDF5 gives us one partition artifact with
+chunked, compressed datasets that can be read in bounded slices.
+
+The goal is to replace or optionally supplement `.npz` partitions with HDF5
+partition files that support local-search chunk reads without requiring raw
+`.npy` caches.
+
+### Target HDF5 Layout
+
+One HDF5 file per covariance partition:
+
+```text
+{chrom}.{start}.{end}.h5
+  /covariance/lo          int32 or int64, sorted
+  /covariance/hi          int32 or int64, sorted with lo
+  /covariance/shrink_ld   float64
+  /index/diag_pos         int32 or int64
+  /index/diag_val         float64
+  /index/lo_values        int32 or int64
+  /index/lo_offsets       int64
+  attrs:
+    format = "ldetect2-covariance-h5"
+    version = 1
+    chrom = ...
+    start = ...
+    end = ...
+    position_dtype = "int32" or "int64"
+    sorted_by = "lo_hi"
+    deduplicated = true
+```
+
+`lo_offsets` stores row-group offsets for each `lo_values` entry, so local
+search can map a genomic `lo` range to row slices quickly.
+
+### Compression and Chunking
+
+Initial recommendation:
+
+- Use `shuffle=True`.
+- Benchmark `lzf` for speed-first workflows.
+- Benchmark `gzip` level 1 or 2 for space-first workflows.
+- Chunk rows in fixed row-count chunks, for example 64K to 1M rows depending
+  on observed partition sizes.
+
+The cache should optimize for bounded local-search reads, not maximum
+compression ratio. A slightly larger file is acceptable if it avoids inflating
+100 MB archive members into much larger temporary arrays.
+
+### CLI and Store Migration
+
+Add a covariance format option without breaking current `.npz` users:
+
+```text
+ldetect2 calc-covariance --covariance-format npz|h5|both
+ldetect2 run --covariance-format npz|h5|both
+```
+
+Recommended default during migration:
+
+- `npz`: default compatibility mode.
+- `h5`: write only HDF5 partition files.
+- `both`: write both formats for validation and transition runs.
+
+Update `CovarianceStore.partition_path()` or add a format-aware companion so
+loaders can find either `.npz` or `.h5` without hardcoding suffix decisions in
+algorithm code.
+
+### Loader Abstraction
+
+Introduce a small partition reader abstraction:
+
+```python
+class CovariancePartitionReader(Protocol):
+    start: int
+    end: int
+
+    def read_all(self) -> CovariancePartition: ...
+    def iter_rows(
+        self,
+        lo_min: int,
+        lo_max: int,
+        chunk_rows: int,
+    ) -> Iterator[CovarianceRowChunk]: ...
+    def read_diagonal(self) -> tuple[np.ndarray, np.ndarray]: ...
+```
+
+`.npz` readers can initially implement `read_all()` and emulate `iter_rows()`
+from loaded arrays. HDF5 readers can implement true chunked reads.
+
+This keeps `LocalSearch` focused on row aggregation and avoids scattering
+storage-format checks through the algorithm.
+
+### Local Search HDF5 Flow
+
+For each local-search segment:
+
+1. Determine `lo_min`, `lo_max`, and `hi` constraints from the search window.
+2. Use `/index/lo_values` and `/index/lo_offsets` to locate candidate row
+   ranges.
+3. Read bounded chunks from `/covariance/lo`, `/covariance/hi`, and
+   `/covariance/shrink_ld`.
+4. Normalize chunks to `r²` using `/index/diag_pos` and `/index/diag_val`.
+5. Aggregate into local `sum_vert` and `sum_horiz`.
+6. Discard the chunk before reading the next one.
+
+This should make peak memory depend on chunk size plus local accumulators,
+rather than full partition array size.
+
+### Validation Plan
+
+Correctness:
+
+- Add tests that write equivalent `.npz` and `.h5` partitions and compare
+  loaded arrays.
+- Compare HDF5 local-search output with current `.npz` output on synthetic
+  single-partition and multi-partition fixtures.
+- Run the existing metric and local-search test suite.
+- Run the toy integration pipeline.
+
+Performance:
+
+- Re-run one representative `ldetect_original` chromosome, preferably EUR chr10
+  or chr11.
+- Compare local-search elapsed time and max RSS against current `.npz`.
+- Confirm `--subset fourier_ls` output BED is identical to current output.
+- Track HDF5 file size versus current `.npz` for 10 MB, 50 MB, and 100 MB
+  partitions.
+
+Acceptance criteria:
+
+- No RSS increase relative to current `.npz` path.
+- Identical final `fourier_ls` BED for the same inputs.
+- HDF5 partition storage does not require keeping `.npz` intermediates unless
+  `--covariance-format both` is requested.
+- Local-search chunk size is configurable or at least centralized as a single
+  tuning constant.
+
+### Implementation Order
+
+1. Add HDF5 dependency behind an optional extra, or detect `h5py` at runtime
+   and emit a clear error for `--covariance-format h5` when unavailable.
+2. Add format-aware covariance partition path handling.
+3. Implement HDF5 writer from the arrays already produced by
+   `calc_covariance()`.
+4. Implement `.npz` and HDF5 readers behind a shared loader interface.
+5. Teach metric and matrix-to-vector paths to read through the interface while
+   preserving existing `.npz` behavior.
+6. Teach local search to use HDF5 `iter_rows()` for bounded chunk processing.
+7. Add `both` mode and equivalence tests.
+8. Run representative chromosome validation before changing any defaults.
+
+## Open Questions
+
+- Should HDF5 be a required dependency or an optional `storage` extra?
+- Should the first HDF5 implementation store only compact arrays, or also the
+  full metadata arrays used by non-compact output?
+- What chunk size best balances local-search window reads against compression
+  efficiency on real 10-100 MB partition files?
+- Should HDF5 become the default only for `ldetect2 run`, or also for
+  standalone `calc-covariance`?

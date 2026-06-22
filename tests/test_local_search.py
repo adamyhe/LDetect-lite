@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2._util.covariance_array import load_chromosome_covariance
+from ldetect2._util.covariance_array import (
+    CovariancePartition,
+    load_chromosome_covariance,
+    local_search_partition,
+)
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.local_search import LocalSearch
 from ldetect2.metric import Metric
@@ -90,6 +94,27 @@ def _make_partitioned_store(
     return CovarianceStore(root=root)
 
 
+def _make_custom_partitioned_store(
+    tmp_path: Path,
+    partitions: dict[tuple[int, int], list[tuple[int, int, float]]],
+) -> CovarianceStore:
+    root = tmp_path / "cov"
+    chrom_dir = root / "chr1"
+    chrom_dir.mkdir(parents=True)
+    with (root / "chr1_partitions.txt").open("w") as f:
+        for start, end in partitions:
+            f.write(f"{start} {end}\n")
+
+    for (start, end), rows in partitions.items():
+        np.savez_compressed(
+            chrom_dir / f"chr1.{start}.{end}.npz",
+            i_pos=np.array([row[0] for row in rows], dtype=np.int32),
+            j_pos=np.array([row[1] for row in rows], dtype=np.int32),
+            shrink_ld=np.array([row[2] for row in rows], dtype=np.float64),
+        )
+    return CovarianceStore(root=root)
+
+
 def _metric(
     store: CovarianceStore,
     breakpoints: list[int],
@@ -147,8 +172,106 @@ def _assert_searches_match(
     else:
         assert fast_metric is not None
         assert fast_metric["sum"] == pytest.approx(float(legacy_metric["sum"]))
-        assert fast_metric["N_zero"] == pytest.approx(float(legacy_metric["N_zero"]))
+        assert fast_metric["N_zero"] == float(legacy_metric["N_zero"])
     return fast_bp, fast_metric
+
+
+def _assert_precompute_matches_legacy(
+    store: CovarianceStore,
+    breakpoints: list[int],
+    idx: int,
+    start: int,
+    stop: int,
+    first: int,
+    last: int,
+) -> None:
+    metric = _metric(store, breakpoints, first, last)
+    fast = LocalSearch(
+        "chr1",
+        start,
+        stop,
+        idx,
+        breakpoints,
+        metric["sum"],
+        metric["N_zero"],
+        store,
+        use_decimal=False,
+    )
+    legacy = LocalSearch(
+        "chr1",
+        start,
+        stop,
+        idx,
+        breakpoints,
+        metric["sum"],
+        metric["N_zero"],
+        store,
+        use_decimal=True,
+    )
+
+    fast.init_search()
+    legacy.init_search()
+
+    assert fast._array_loci is not None
+    assert fast._array_sum_vert is not None
+    assert fast._array_sum_horiz is not None
+    assert fast.precomputed["locus_list"] == legacy.precomputed["locus_list"]
+    for offset, locus in enumerate(fast.precomputed["locus_list"]):
+        legacy_data = legacy.precomputed["data"][locus]
+        assert fast._array_sum_vert[offset] == pytest.approx(
+            float(legacy_data["sum_vert"])
+        )
+        assert fast._array_sum_horiz[offset] == pytest.approx(
+            float(legacy_data["sum_horiz"])
+        )
+
+
+def test_local_search_partition_canonicalizes_rows_exactly() -> None:
+    partition = CovariancePartition(
+        start=100,
+        end=400,
+        i_pos=np.array([300, 100, 200, 100, 200, 400], dtype=np.int64),
+        j_pos=np.array([100, 100, 100, 300, 200, 400], dtype=np.int64),
+        shrink_ld=np.array([0.3, 1.0, 0.5, 0.9, 1.2, 0.0]),
+    )
+
+    canonical = local_search_partition(partition)
+
+    np.testing.assert_array_equal(
+        canonical.lo, np.array([100, 100, 100, 200, 400], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        canonical.hi, np.array([100, 200, 300, 200, 400], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        canonical.shrink_ld, np.array([1.0, 0.5, 0.3, 1.2, 0.0])
+    )
+    np.testing.assert_array_equal(
+        canonical.diag_pos, np.array([100, 200, 400], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(canonical.diag_val, np.array([1.0, 1.2, 0.0]))
+
+
+def test_local_search_matches_legacy_with_duplicate_pairs(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        (100, 100, 1.0),
+        (200, 200, 1.0),
+        (300, 300, 1.0),
+        (400, 400, 1.0),
+        (500, 500, 1.0),
+        (300, 100, 0.6),
+        (100, 300, 0.9),
+        (200, 400, 0.7),
+        (300, 500, 0.8),
+    ]
+    store = _make_custom_partitioned_store(tmp_path, {(100, 500): rows})
+
+    bp, metric = _assert_searches_match(store, [200, 400], 0, 100, 400)
+
+    assert bp is None or 100 <= bp <= 400
+    assert metric is not None
 
 
 def test_array_local_search_keeps_unchanged_breakpoint(tmp_path: Path) -> None:
@@ -224,6 +347,16 @@ def test_local_search_matches_legacy_across_multiple_partitions(
 
     assert bp is None or 400 <= bp <= 750
     assert metric is not None
+
+    _assert_precompute_matches_legacy(
+        store,
+        [300, 600, 800],
+        1,
+        400,
+        750,
+        first=100,
+        last=900,
+    )
 
 
 def test_float_local_search_uses_array_path_for_multiple_partitions(
