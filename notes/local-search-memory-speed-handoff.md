@@ -163,6 +163,42 @@ Memory risk status:
 
 - Lower than previous behavior because fewer local-search windows are loaded.
 
+#### Add Precompute Phase Instrumentation
+
+**Affected code:** `src/ldetect2/local_search.py`,
+`src/ldetect2/pipeline.py`,
+`examples/ldetect_original/scripts/profile_ldetect2.py`
+
+Implemented debug-level phase timing and row-count diagnostics for the normal
+array local-search precompute path. Each per-breakpoint debug row can now
+include:
+
+- partition load seconds;
+- canonicalization seconds;
+- active-row append/dedup seconds;
+- diagonal extraction seconds;
+- range-slice eligibility seconds;
+- `r²` normalization seconds;
+- vertical and horizontal aggregation seconds;
+- candidate, eligible, and normalized row counts;
+- chunk count, segment count, and peak active rows.
+
+The profiling parser now preserves these fields in
+`local_search_breakpoints.tsv`, aggregates them in
+`local_search_by_chrom.tsv`, and emits a phase-breakdown plot when matplotlib
+is available.
+
+Expected benefit:
+
+- Identifies whether the next runtime lever is storage inflation,
+  canonicalization, row filtering, normalization, or aggregation.
+- Gives row-volume counters needed to validate row-reduction changes.
+
+Memory risk status:
+
+- Low. The change records scalar counters/timers only and does not retain
+  additional row arrays.
+
 ### Completed Exactness Coverage
 
 **Affected code:** `tests/test_local_search.py`,
@@ -188,12 +224,76 @@ git diff --check
 
 Result: all checks passed (`154 passed`).
 
+## Profiling Findings: EUR chr21/chr22
+
+Remote diagnostics were run for EUR chr21 and chr22 with profiling outputs
+under:
+
+```text
+examples/ldetect_original/results/diagnostics/EUR/profiling/
+```
+
+The key finding is that local-search candidate scoring is not the bottleneck.
+The remaining cost is overwhelmingly local-search precompute, driven by the
+number of covariance rows loaded and aggregated per breakpoint.
+
+| Chrom | Wall time | Max RSS | Local search | LS % wall | Precompute | Search |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| chr21 | 348.56 s | 10.79 GiB | 93.19 s | 26.7% | 70.58 s | 0.034 s |
+| chr22 | 481.50 s | 11.60 GiB | 158.76 s | 33.0% | 123.26 s | 0.032 s |
+
+Rows loaded and precompute time scale closely:
+
+- chr21 loaded 603.0M rows across 23 breakpoint searches.
+- chr22 loaded 920.1M rows across 23 breakpoint searches.
+- observed precompute throughput was roughly 7.5-8.5M rows/sec.
+
+Worst breakpoint windows in the chr21/chr22 profile:
+
+| Chrom | Index | Rows | Partitions | Precompute |
+| --- | ---: | ---: | ---: | ---: |
+| chr22 | 15 | 134.4M | 9 | 22.414 s |
+| chr22 | 16 | 139.9M | 10 | 19.749 s |
+| chr22 | 14 | 108.4M | 11 | 15.402 s |
+| chr22 | 9 | 76.2M | 11 | 10.817 s |
+| chr21 | 10 | 58.0M | 16 | 7.753 s |
+
+Implications:
+
+- Do not prioritize `_search_array()` candidate scoring. It is effectively
+  free at this scale.
+- Do not add JIT yet; first add finer instrumentation inside precompute to
+  identify whether time is in `.npz` inflation, canonicalization, diagonal
+  lookup, `r²` normalization, vertical aggregation, or horizontal aggregation.
+- The highest leverage next changes should reduce rows loaded per window or
+  repeated row processing.
+- Dense accumulators and horizontal grouped reductions may still help, but they
+  are second-order until row-volume/precompute substeps are measured.
+
 ## Non-Storage To-Dos
 
-### 1. Representative Performance and Memory Validation
+### 1. Row-Volume Reduction Before Numeric Micro-Optimization
 
-Run one representative `ldetect_original` chromosome, preferably EUR chr10 or
-chr11.
+Use the precompute instrumentation to reduce loaded/processed row counts before
+optimizing candidate scoring.
+
+Candidate approaches:
+
+- narrow partition loads by local-search window bounds as early as possible;
+- avoid re-canonicalizing rows that are already canonical inside a partition
+  group;
+- add lightweight per-partition row-range metadata in memory for the current
+  group so each breakpoint reads only relevant `lo` ranges;
+- avoid retaining chromosome-wide covariance caches.
+
+Acceptance criteria:
+
+- final `fourier_ls` BED remains byte-identical;
+- max RSS does not increase;
+- rows processed per breakpoint decreases on chr21/chr22 or chr10/chr11 remote
+  profiles.
+
+### 2. Representative chr10/chr11 Validation
 
 Acceptance criteria:
 
@@ -203,7 +303,9 @@ Acceptance criteria:
 - per-breakpoint diagnostics show lower repeated partition loading for grouped
   sequential runs.
 
-### 2. Dense Local Accumulators
+Run this remotely only; do not run real-data profiling from a local checkout.
+
+### 3. Dense Local Accumulators
 
 The implementation still uses `sum_vert_by_locus` and `sum_horiz_by_locus`
 dictionaries during precompute, then materializes arrays at the end. A future
@@ -217,7 +319,10 @@ Constraints:
 - compare `sum_vert` and `sum_horiz` against the Decimal legacy path before
   enabling by default.
 
-### 3. Horizontal Grouped Reduction
+Priority after chr21/chr22 profiling: medium. This should follow precompute
+substep instrumentation so we know dictionary accumulation is material.
+
+### 4. Horizontal Grouped Reduction
 
 Horizontal aggregation still uses `np.unique(..., return_inverse=True)` and
 `np.bincount()` per chunk. This is conservative because `hi` is not globally
@@ -231,7 +336,10 @@ Possible future approach:
   reduction strategy;
 - accept only if runtime improves without increasing peak RSS.
 
-### 4. Multiprocessing-Aware Grouping
+Priority after chr21/chr22 profiling: unknown. It may reduce wall time but can
+increase memory pressure; profile single-worker precompute first.
+
+### 5. Multiprocessing-Aware Grouping
 
 Current grouping is sequential only. A future version could assign whole
 partition groups to process workers.
@@ -242,7 +350,10 @@ Constraints:
 - group tasks must remain bounded by partition range;
 - worker count should be documented as a memory multiplier.
 
-### 5. JIT Review After Profiling
+Priority after chr21/chr22 profiling: low until precompute substeps identify a
+pure numeric kernel as dominant.
+
+### 6. JIT Review After Profiling
 
 Do not add JIT until the representative chromosome run identifies remaining
 hot pure-array kernels.

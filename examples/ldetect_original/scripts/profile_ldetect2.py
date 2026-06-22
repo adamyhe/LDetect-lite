@@ -39,6 +39,20 @@ BREAKPOINT_COLS = [
     "search_seconds",
     "total_seconds",
     "max_rss_mib",
+    "partition_load_seconds",
+    "canonicalize_seconds",
+    "append_seconds",
+    "diagonal_seconds",
+    "slice_seconds",
+    "normalize_seconds",
+    "vertical_seconds",
+    "horizontal_seconds",
+    "candidate_rows",
+    "eligible_rows",
+    "normalized_rows",
+    "chunks",
+    "segments",
+    "active_rows_peak",
 ]
 
 BY_CHROM_COLS = [
@@ -55,6 +69,39 @@ BY_CHROM_COLS = [
     "max_rss_mib",
     "rows",
     "partitions",
+    "partition_load_seconds",
+    "canonicalize_seconds",
+    "append_seconds",
+    "diagonal_seconds",
+    "slice_seconds",
+    "normalize_seconds",
+    "vertical_seconds",
+    "horizontal_seconds",
+    "candidate_rows",
+    "eligible_rows",
+    "normalized_rows",
+    "chunks",
+    "segments",
+    "active_rows_peak",
+]
+
+_BREAKPOINT_EXTRA_FLOAT_COLS = [
+    "partition_load_seconds",
+    "canonicalize_seconds",
+    "append_seconds",
+    "diagonal_seconds",
+    "slice_seconds",
+    "normalize_seconds",
+    "vertical_seconds",
+    "horizontal_seconds",
+]
+
+_BREAKPOINT_EXTRA_INT_COLS = [
+    "candidate_rows",
+    "eligible_rows",
+    "normalized_rows",
+    "chunks",
+    "segments",
 ]
 
 _MAC_TIME_RE = re.compile(r"^\s*(?P<value>[0-9.]+)\s+(?P<key>.+?)\s*$")
@@ -62,15 +109,8 @@ _SET_RE = re.compile(
     r"Local search (?P<subset>\S+) done: breakpoints=(?P<breakpoints>\d+) "
     r"elapsed_seconds=(?P<elapsed>[0-9.]+)"
 )
-_BP_RE = re.compile(
-    r"(?P<subset>\S+) breakpoint idx=(?P<idx>\d+) "
-    r"start=(?P<start>-?\d+) stop=(?P<stop>-?\d+) "
-    r"partitions=(?P<partitions>None|-?\d+) rows=(?P<rows>None|-?\d+) "
-    r"precompute_seconds=(?P<precompute>[0-9.]+) "
-    r"search_seconds=(?P<search>[0-9.]+) "
-    r"total_seconds=(?P<total>[0-9.]+)"
-    r"(?: max_rss_mib=(?P<rss>[0-9.]+))?"
-)
+_BP_PREFIX_RE = re.compile(r"(?P<subset>\S+) breakpoint idx=")
+_KV_RE = re.compile(r"(?P<key>[A-Za-z_]+)=(?P<value>None|-?[0-9.]+)")
 
 
 def parse_elapsed(value: str) -> float | None:
@@ -185,24 +225,41 @@ def parse_ldetect2_log(path: Path) -> tuple[list[dict[str, str]], list[dict[str,
                 }
             )
 
-        bp_match = _BP_RE.search(line)
-        if bp_match:
-            breakpoints.append(
-                {
-                    "subset": bp_match.group("subset"),
-                    "idx": bp_match.group("idx"),
-                    "start": bp_match.group("start"),
-                    "stop": bp_match.group("stop"),
-                    "partitions": _none_to_empty(bp_match.group("partitions")),
-                    "rows": _none_to_empty(bp_match.group("rows")),
-                    "precompute_seconds": bp_match.group("precompute"),
-                    "search_seconds": bp_match.group("search"),
-                    "total_seconds": bp_match.group("total"),
-                    "max_rss_mib": bp_match.group("rss") or "",
-                }
-            )
+        breakpoint_row = _parse_breakpoint_line(line)
+        if breakpoint_row is not None:
+            breakpoints.append(breakpoint_row)
 
     return sets, breakpoints
+
+
+def _parse_breakpoint_line(line: str) -> dict[str, str] | None:
+    """Parse one local-search breakpoint debug line into TSV columns."""
+    prefix_match = _BP_PREFIX_RE.search(line)
+    if not prefix_match:
+        return None
+    values = {
+        key: _none_to_empty(value)
+        for key, value in _KV_RE.findall(line)
+        if key in BREAKPOINT_COLS
+    }
+    required = {
+        "idx",
+        "start",
+        "stop",
+        "partitions",
+        "rows",
+        "precompute_seconds",
+        "search_seconds",
+        "total_seconds",
+    }
+    if not required <= set(values):
+        return None
+
+    metadata_cols = {"profile_name", "population", "chrom"}
+    row = {col: "" for col in BREAKPOINT_COLS if col not in metadata_cols}
+    row.update(values)
+    row["subset"] = prefix_match.group("subset")
+    return row
 
 
 def _none_to_empty(value: str | None) -> str:
@@ -254,23 +311,27 @@ def aggregate_by_chrom(
         profile_name, population, chrom, subset = key
         rows = grouped.get(key, [])
         set_row = set_elapsed.get(key, {})
-        out.append(
-            {
-                "profile_name": profile_name,
-                "population": population,
-                "chrom": chrom,
-                "subset": subset,
-                "breakpoints": set_row.get("breakpoints", ""),
-                "set_elapsed_seconds": set_row.get("set_elapsed_seconds", ""),
-                "breakpoint_count": str(len(rows)),
-                "precompute_seconds": _sum_field(rows, "precompute_seconds"),
-                "search_seconds": _sum_field(rows, "search_seconds"),
-                "total_seconds": _sum_field(rows, "total_seconds"),
-                "max_rss_mib": _max_field(rows, "max_rss_mib"),
-                "rows": _sum_int_field(rows, "rows"),
-                "partitions": _sum_int_field(rows, "partitions"),
-            }
-        )
+        out_row = {
+            "profile_name": profile_name,
+            "population": population,
+            "chrom": chrom,
+            "subset": subset,
+            "breakpoints": set_row.get("breakpoints", ""),
+            "set_elapsed_seconds": set_row.get("set_elapsed_seconds", ""),
+            "breakpoint_count": str(len(rows)),
+            "precompute_seconds": _sum_field(rows, "precompute_seconds"),
+            "search_seconds": _sum_field(rows, "search_seconds"),
+            "total_seconds": _sum_field(rows, "total_seconds"),
+            "max_rss_mib": _max_field(rows, "max_rss_mib"),
+            "rows": _sum_int_field(rows, "rows"),
+            "partitions": _sum_int_field(rows, "partitions"),
+        }
+        for field in _BREAKPOINT_EXTRA_FLOAT_COLS:
+            out_row[field] = _sum_field(rows, field)
+        for field in _BREAKPOINT_EXTRA_INT_COLS:
+            out_row[field] = _sum_int_field(rows, field)
+        out_row["active_rows_peak"] = _max_int_field(rows, "active_rows_peak")
+        out.append(out_row)
     return out
 
 
@@ -286,6 +347,11 @@ def _sum_int_field(rows: list[dict[str, str]], field: str) -> str:
 def _max_field(rows: list[dict[str, str]], field: str) -> str:
     values = [float(row[field]) for row in rows if row.get(field)]
     return f"{max(values):.6f}" if values else ""
+
+
+def _max_int_field(rows: list[dict[str, str]], field: str) -> str:
+    values = [int(row[field]) for row in rows if row.get(field)]
+    return str(max(values)) if values else ""
 
 
 def write_tsv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -342,6 +408,9 @@ def write_plots(
     _plot_stacked_local_search(
         plt, plot_dir / "local_search_time_by_chrom.png", by_chrom_rows
     )
+    _plot_stacked_precompute_phases(
+        plt, plot_dir / "local_search_precompute_phases_by_chrom.png", by_chrom_rows
+    )
     _plot_scatter(
         plt,
         plot_dir / "rows_vs_precompute_seconds.png",
@@ -390,6 +459,37 @@ def _plot_stacked_local_search(plt, path: Path, rows) -> None:
     ax.set_ylabel("Seconds")
     ax.tick_params(axis="x", rotation=30)
     ax.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def _plot_stacked_precompute_phases(plt, path: Path, rows) -> None:
+    phase_fields = [
+        "partition_load_seconds",
+        "canonicalize_seconds",
+        "append_seconds",
+        "diagonal_seconds",
+        "slice_seconds",
+        "normalize_seconds",
+        "vertical_seconds",
+        "horizontal_seconds",
+    ]
+    plot_rows = [row for row in rows if any(row.get(field) for field in phase_fields)]
+    if not plot_rows:
+        return
+
+    labels = [f"{row['chrom']} {row['subset']}" for row in plot_rows]
+    bottoms = [0.0 for _ in plot_rows]
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    for field in phase_fields:
+        values = [float(row.get(field) or 0.0) for row in plot_rows]
+        ax.bar(labels, values, bottom=bottoms, label=field.removesuffix("_seconds"))
+        bottoms = [bottom + value for bottom, value in zip(bottoms, values)]
+    ax.set_title("Local-search precompute phases by chromosome")
+    ax.set_ylabel("Seconds")
+    ax.tick_params(axis="x", rotation=30)
+    ax.legend(fontsize="small")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

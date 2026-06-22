@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import decimal
 import math
+import time
 from bisect import bisect_left
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -26,6 +28,45 @@ from ldetect2.io.covariance import (
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 
 _PREC = 50
+
+
+@dataclass
+class LocalSearchPrecomputeStats:
+    """Timing and row-count diagnostics for array local-search precompute."""
+
+    partition_load_seconds: float = 0.0
+    canonicalize_seconds: float = 0.0
+    append_seconds: float = 0.0
+    diagonal_seconds: float = 0.0
+    slice_seconds: float = 0.0
+    normalize_seconds: float = 0.0
+    vertical_seconds: float = 0.0
+    horizontal_seconds: float = 0.0
+    candidate_rows: int = 0
+    eligible_rows: int = 0
+    normalized_rows: int = 0
+    chunks: int = 0
+    segments: int = 0
+    active_rows_peak: int = 0
+
+    def log_fields(self) -> str:
+        """Return stable key/value fields for debug profiling logs."""
+        return (
+            f"partition_load_seconds={self.partition_load_seconds:.6f} "
+            f"canonicalize_seconds={self.canonicalize_seconds:.6f} "
+            f"append_seconds={self.append_seconds:.6f} "
+            f"diagonal_seconds={self.diagonal_seconds:.6f} "
+            f"slice_seconds={self.slice_seconds:.6f} "
+            f"normalize_seconds={self.normalize_seconds:.6f} "
+            f"vertical_seconds={self.vertical_seconds:.6f} "
+            f"horizontal_seconds={self.horizontal_seconds:.6f} "
+            f"candidate_rows={self.candidate_rows} "
+            f"eligible_rows={self.eligible_rows} "
+            f"normalized_rows={self.normalized_rows} "
+            f"chunks={self.chunks} "
+            f"segments={self.segments} "
+            f"active_rows_peak={self.active_rows_peak}"
+        )
 
 
 def _append_partition(
@@ -112,6 +153,7 @@ def _add_array_segment_values(
     sum_vert_by_locus: dict[int, float],
     sum_horiz_by_locus: dict[int, float],
     chunk_size: int = 2_000_000,
+    stats: LocalSearchPrecomputeStats | None = None,
 ) -> None:
     """Aggregate local-search vertical/horizontal r² sums for one locus segment.
 
@@ -122,6 +164,8 @@ def _add_array_segment_values(
     """
     if segment_loci.size == 0:
         return
+    if stats is not None:
+        stats.segments += 1
 
     for locus in segment_loci:
         locus_key = int(locus)
@@ -133,20 +177,28 @@ def _add_array_segment_values(
 
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
+    slice_start = time.perf_counter()
     left = int(np.searchsorted(active_lo, lo_min, side="left"))
     right = int(np.searchsorted(active_lo, lo_max, side="right"))
     if left >= right:
+        if stats is not None:
+            stats.slice_seconds += time.perf_counter() - slice_start
         return
 
     candidate_lo = active_lo[left:right]
     candidate_hi = active_hi[left:right]
     candidate_shrink = active_shrink[left:right]
+    if stats is not None:
+        stats.candidate_rows += int(candidate_lo.size)
     eligible = (candidate_lo <= snp_last) & (candidate_hi <= snp_top)
     if include_snp_first:
         eligible &= candidate_lo >= snp_first
     else:
         eligible &= candidate_lo > snp_first
     eligible_idx = np.flatnonzero(eligible)
+    if stats is not None:
+        stats.eligible_rows += int(eligible_idx.size)
+        stats.slice_seconds += time.perf_counter() - slice_start
     if eligible_idx.size == 0:
         return
 
@@ -155,7 +207,10 @@ def _add_array_segment_values(
         row_lo = candidate_lo[chunk]
         row_hi = candidate_hi[chunk]
         row_shrink = candidate_shrink[chunk]
+        if stats is not None:
+            stats.chunks += 1
 
+        normalize_start = time.perf_counter()
         diag_lo_idx = np.searchsorted(diag_pos, row_lo)
         diag_hi_idx = np.searchsorted(diag_pos, row_hi)
         has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
@@ -165,6 +220,8 @@ def _add_array_segment_values(
             diag_pos[safe_hi_idx] == row_hi
         )
         if not np.any(has_diag):
+            if stats is not None:
+                stats.normalize_seconds += time.perf_counter() - normalize_start
             continue
 
         row_lo = row_lo[has_diag]
@@ -174,6 +231,8 @@ def _add_array_segment_values(
         diag_hi = diag_val[diag_hi_idx[has_diag]]
         positive = (diag_lo > 0.0) & (diag_hi > 0.0)
         if not np.any(positive):
+            if stats is not None:
+                stats.normalize_seconds += time.perf_counter() - normalize_start
             continue
 
         row_lo = row_lo[positive]
@@ -183,7 +242,11 @@ def _add_array_segment_values(
             * row_shrink[positive]
             / (diag_lo[positive] * diag_hi[positive])
         )
+        if stats is not None:
+            stats.normalized_rows += int(r2.size)
+            stats.normalize_seconds += time.perf_counter() - normalize_start
 
+        vertical_start = time.perf_counter()
         group_starts = np.concatenate(
             (
                 np.array([0], dtype=np.int64),
@@ -196,7 +259,10 @@ def _add_array_segment_values(
             sum_vert_by_locus[int(locus)] = (
                 sum_vert_by_locus.get(int(locus), 0.0) + float(value)
             )
+        if stats is not None:
+            stats.vertical_seconds += time.perf_counter() - vertical_start
 
+        horizontal_start = time.perf_counter()
         horiz_loci, horiz_inverse = np.unique(row_hi, return_inverse=True)
         horiz_sums = np.bincount(horiz_inverse, weights=r2)
         for locus, value in zip(horiz_loci, horiz_sums):
@@ -205,6 +271,8 @@ def _add_array_segment_values(
                 sum_horiz_by_locus.get(locus_key, 0.0) + float(value)
             )
             sum_vert_by_locus.setdefault(locus_key, 0.0)
+        if stats is not None:
+            stats.horizontal_seconds += time.perf_counter() - horizontal_start
 
 
 def _diag_lookup(
@@ -277,6 +345,7 @@ class LocalSearch:
         self._array_sum_horiz: np.ndarray | None = None
         self.loaded_partition_count: int | None = None
         self.loaded_row_count: int | None = None
+        self.precompute_stats = LocalSearchPrecomputeStats()
 
         self.dynamic_delete = True
         self.init_complete = False
@@ -480,7 +549,12 @@ class LocalSearch:
     def _init_search_array(self) -> None:
         """Precompute local-search deltas with exact legacy locus semantics."""
         log_debug("Start local search init (array)")
+        self.precompute_stats = LocalSearchPrecomputeStats()
+        load_start = time.perf_counter()
         partitions = self._local_covariance_partitions()
+        self.precompute_stats.partition_load_seconds = (
+            time.perf_counter() - load_start
+        )
         self.loaded_partition_count = len(partitions)
         self.loaded_row_count = int(
             sum(partition.i_pos.size for partition in partitions)
@@ -523,8 +597,12 @@ class LocalSearch:
         self,
         partitions: tuple[CovariancePartition, ...],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        canonicalize_start = time.perf_counter()
         local_partitions = tuple(
             local_search_partition(partition) for partition in partitions
+        )
+        self.precompute_stats.canonicalize_seconds += (
+            time.perf_counter() - canonicalize_start
         )
         position_dtype = local_partitions[0].lo.dtype if local_partitions else np.int64
         active_lo = np.array([], dtype=position_dtype)
@@ -538,11 +616,19 @@ class LocalSearch:
         last_p_num = -1
         for p_num_init in range(len(local_partitions) - 1):
             if self.snp_bottom >= local_partitions[p_num_init + 1].start:
+                append_start = time.perf_counter()
                 active_lo, active_hi, active_shrink, active_loci = _append_partition(
                     active_lo,
                     active_hi,
                     active_shrink,
                     local_partitions[p_num_init],
+                )
+                self.precompute_stats.append_seconds += (
+                    time.perf_counter() - append_start
+                )
+                self.precompute_stats.active_rows_peak = max(
+                    self.precompute_stats.active_rows_peak,
+                    int(active_lo.size),
                 )
                 last_p_num = p_num_init
             else:
@@ -555,11 +641,17 @@ class LocalSearch:
         end_locus_index = -1
 
         for p_num in range(last_p_num + 1, len(local_partitions)):
+            append_start = time.perf_counter()
             active_lo, active_hi, active_shrink, active_loci = _append_partition(
                 active_lo,
                 active_hi,
                 active_shrink,
                 local_partitions[p_num],
+            )
+            self.precompute_stats.append_seconds += time.perf_counter() - append_start
+            self.precompute_stats.active_rows_peak = max(
+                self.precompute_stats.active_rows_peak,
+                int(active_lo.size),
             )
 
             if curr_locus < 0:
@@ -609,8 +701,12 @@ class LocalSearch:
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
+                diagonal_start = time.perf_counter()
                 diag_pos, diag_val = _active_diagonal(
                     active_lo, active_hi, active_shrink
+                )
+                self.precompute_stats.diagonal_seconds += (
+                    time.perf_counter() - diagonal_start
                 )
                 _add_array_segment_values(
                     segment_loci,
@@ -625,6 +721,7 @@ class LocalSearch:
                     self.initial_breakpoint_index == 0,
                     sum_vert_by_locus,
                     sum_horiz_by_locus,
+                    stats=self.precompute_stats,
                 )
 
                 if segment_end_idx < active_loci.size:

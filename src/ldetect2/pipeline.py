@@ -395,6 +395,10 @@ def _local_search_worker(
         total_seconds = time.perf_counter() - start_time
         row_count = getattr(ls, "loaded_row_count", None)
         partition_count = getattr(ls, "loaded_partition_count", len(ls.partitions))
+        precompute_stats = getattr(ls, "precompute_stats", None)
+        precompute_stats_text = (
+            f" {precompute_stats.log_fields()}" if precompute_stats is not None else ""
+        )
         rss = _max_rss_mib()
         rss_text = f" max_rss_mib={rss:.1f}" if rss is not None else ""
         log_debug(
@@ -402,7 +406,7 @@ def _local_search_worker(
             f"partitions={partition_count} rows={row_count} "
             f"precompute_seconds={init_seconds:.3f} "
             f"search_seconds={search_seconds:.3f} "
-            f"total_seconds={total_seconds:.3f}{rss_text}"
+            f"total_seconds={total_seconds:.3f}{rss_text}{precompute_stats_text}"
         )
         return (bp if bp is not None else breakpoint_loci[idx]), m
     except Exception as exc:

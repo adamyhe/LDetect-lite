@@ -94,7 +94,13 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
                 "[12:00:00] Running local search on Fourier breakpoints",
                 "[12:00:01] fourier_ls breakpoint idx=0 start=100 stop=200 "
                 "partitions=2 rows=12345 precompute_seconds=1.250 "
-                "search_seconds=0.050 total_seconds=1.310 max_rss_mib=512.5",
+                "search_seconds=0.050 total_seconds=1.310 max_rss_mib=512.5 "
+                "partition_load_seconds=0.010000 canonicalize_seconds=0.020000 "
+                "append_seconds=0.030000 diagonal_seconds=0.040000 "
+                "slice_seconds=0.050000 normalize_seconds=0.060000 "
+                "vertical_seconds=0.070000 horizontal_seconds=0.080000 "
+                "candidate_rows=1000 eligible_rows=800 normalized_rows=700 "
+                "chunks=2 segments=1 active_rows_peak=12345",
                 "[12:00:02] fourier_ls breakpoint idx=1 start=200 stop=300 "
                 "partitions=3 rows=None precompute_seconds=2.500 "
                 "search_seconds=0.100 total_seconds=2.650",
@@ -135,11 +141,17 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
     assert len(breakpoints) == 2
     assert breakpoints[0]["rows"] == "12345"
     assert breakpoints[0]["max_rss_mib"] == "512.5"
+    assert breakpoints[0]["slice_seconds"] == "0.050000"
+    assert breakpoints[0]["candidate_rows"] == "1000"
+    assert breakpoints[0]["active_rows_peak"] == "12345"
     assert breakpoints[1]["rows"] == ""
     assert by_chrom[0]["precompute_seconds"] == "3.750000"
     assert by_chrom[0]["search_seconds"] == "0.150000"
     assert by_chrom[0]["rows"] == "12345"
     assert by_chrom[0]["partitions"] == "5"
+    assert by_chrom[0]["slice_seconds"] == "0.050000"
+    assert by_chrom[0]["candidate_rows"] == "1000"
+    assert by_chrom[0]["active_rows_peak"] == "12345"
 
 
 def test_missing_debug_lines_produce_empty_local_search_rows(tmp_path: Path) -> None:

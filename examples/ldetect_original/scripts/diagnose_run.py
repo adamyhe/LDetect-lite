@@ -99,24 +99,36 @@ def summarise_vector(path: Path) -> dict[str, str]:
 
 def summarise_breakpoints(path: Path) -> dict[str, str]:
     data = json.loads(path.read_text())
-    fourier = data["fourier"]["loci"]
-    fourier_ls = data["fourier_ls"]["loci"]
-    uniform = data["uniform"]["loci"]
-    uniform_ls = data["uniform_ls"]["loci"]
+    fourier = _subset_loci(data, "fourier")
+    fourier_ls = _subset_loci(data, "fourier_ls")
+    uniform = _subset_loci(data, "uniform")
+    uniform_ls = _subset_loci(data, "uniform_ls")
     return {
         "n_bpoints": str(data["n_bpoints"]),
         "found_width": str(data["found_width"]),
-        "fourier_n": str(len(fourier)),
-        "fourier_ls_n": str(len(fourier_ls)),
-        "uniform_n": str(len(uniform)),
-        "uniform_ls_n": str(len(uniform_ls)),
-        "fourier_to_fourier_ls_exact": str(
-            sum(a == b for a, b in zip(fourier, fourier_ls))
-        ),
-        "uniform_to_uniform_ls_exact": str(
-            sum(a == b for a, b in zip(uniform, uniform_ls))
-        ),
+        "fourier_n": _subset_count(fourier),
+        "fourier_ls_n": _subset_count(fourier_ls),
+        "uniform_n": _subset_count(uniform),
+        "uniform_ls_n": _subset_count(uniform_ls),
+        "fourier_to_fourier_ls_exact": _pairwise_exact_count(fourier, fourier_ls),
+        "uniform_to_uniform_ls_exact": _pairwise_exact_count(uniform, uniform_ls),
     }
+
+
+def _subset_loci(data: dict, subset: str) -> list[int] | None:
+    if subset not in data:
+        return None
+    return data[subset]["loci"]
+
+
+def _subset_count(loci: list[int] | None) -> str:
+    return "" if loci is None else str(len(loci))
+
+
+def _pairwise_exact_count(left: list[int] | None, right: list[int] | None) -> str:
+    if left is None or right is None:
+        return ""
+    return str(sum(a == b for a, b in zip(left, right)))
 
 
 def summarise_covariance(run_dir: Path, chrom: str) -> dict[str, str]:

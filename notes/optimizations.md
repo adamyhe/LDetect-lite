@@ -157,6 +157,26 @@ precomputation issues. Several possible optimizations would improve runtime but
 could raise peak memory, which has been a previous operational risk for
 whole-chromosome runs.
 
+### Updated local-search profiling result
+
+Remote EUR chr21/chr22 profiling after the non-storage local-search changes
+shows that the remaining local-search cost is precompute and row-volume
+dominated, not candidate scoring:
+
+| Chrom | Wall time | Max RSS | Local search | Precompute | Search |
+|---|---:|---:|---:|---:|---:|
+| chr21 | 348.56 s | 10.79 GiB | 93.19 s | 70.58 s | 0.034 s |
+| chr22 | 481.50 s | 11.60 GiB | 158.76 s | 123.26 s | 0.032 s |
+
+Local search loaded 603.0M rows on chr21 and 920.1M rows on chr22 across 23
+breakpoint searches per chromosome. Precompute phase instrumentation has been
+added so the next remote profile can separate partition loading,
+canonicalization, row filtering, normalization, and aggregation. The next
+local-search optimization should use those counters to reduce precompute row
+volume before optimizing `_search_array()`, adding JIT, or parallelizing more
+aggressively. See `notes/local-search-memory-speed-handoff.md` for the detailed
+handoff.
+
 ### Lower memory-risk candidates
 
 #### Cache filter-width search counts
@@ -201,22 +221,31 @@ Memory guidance: implement groups so partitions are loaded, processed, and
 released within a bounded scope. Avoid retaining all grouped windows or all
 partition arrays at once.
 
-#### Precompute partition-level normalized rows
+Status: partially implemented for the single-process normal-float path by
+grouping breakpoints with identical partition ranges. Keep future grouping
+bounded by partition range; do not promote this into a chromosome-wide cache.
+
+#### Dense local accumulators
 
 **Affected code:** `src/ldetect2/_util/covariance_array.py` and
 `src/ldetect2/local_search.py`
 
-Local search repeatedly derives `r²` from `shrink_ld` and diagonal values.
-Precomputing normalized rows per partition could reduce repeated arithmetic and
-lookup work.
+Array local search still accumulates `sum_vert_by_locus` and
+`sum_horiz_by_locus` in dictionaries before materializing arrays. Replacing
+those with dense arrays scoped to the current local-search locus window could
+reduce Python object overhead without retaining extra chromosome-wide state.
 
-Memory guidance: this duplicates information already stored in `shrink_ld` plus
-diagonals. Treat it as moderate to high risk unless the precomputed rows are
-streamed, memory-mapped, or scoped to a small partition group.
+Memory guidance: only allocate dense arrays for the current breakpoint window
+or current bounded partition group. Do not allocate chromosome-wide dense
+accumulators.
 
-### Higher memory-risk candidates
+### Discarded or Default-No Optimizations
 
-#### Pass a chromosome covariance cache through `ldetect2 run`
+These ideas were considered, but should not be implemented as default
+optimizations because previous profiling and design review indicate memory or
+storage pressure would outweigh the likely runtime win.
+
+#### Pass a chromosome covariance cache through `ldetect2 run` by default
 
 **Affected code:** `src/ldetect2/_cli/cmd_run.py`,
 `MatrixAnalysis.calc_diag_lean`, and `find_breakpoints`
@@ -226,10 +255,11 @@ cache, but the end-to-end `run` command currently does not build and pass one.
 Passing a cache could avoid repeated partition reads across vector generation,
 metrics, and local search.
 
-Memory guidance: `load_chromosome_covariance()` retains raw partition arrays and
-metric arrays. On whole chromosomes this may hold most or all covariance data in
-RAM. Make this opt-in or guarded by a clearly documented "fast/high-memory"
-mode, not an unconditional default.
+Decision: do not make this a default optimization. `load_chromosome_covariance()`
+retains raw partition arrays plus metric arrays. On whole chromosomes this may
+hold most or all covariance data in RAM, exactly where memory is already the
+limiting risk. Revisit only as an explicit high-memory/debug mode or after a
+memory-mapped storage layer exists.
 
 #### Unify full and metric-only covariance caches
 
@@ -242,11 +272,11 @@ while `load_chromosome_covariance()` keeps raw partition arrays needed by
 matrix-to-vector and local search. A unified cache could reduce duplicate reads
 in fast runs.
 
-Memory guidance: preserving the metric-only path is important for low-memory
-runs. A unified cache should be opt-in and should not be combined with worker
-parallelism without explicit shared-memory or memory-mapping design.
+Decision: do not unify these caches. Preserving the metric-only path is
+important for low-memory runs. A unified cache would retain data that many
+pipeline stages do not need and would make worker parallelism more dangerous.
 
-#### Parallelize cached local search
+#### Parallelize cached local search by passing large caches to workers
 
 **Affected code:** `_run_local_search` in `src/ldetect2/pipeline.py`
 
@@ -254,7 +284,46 @@ The current code uses cached in-memory array local search in a single process.
 This avoids pickling or copying a large chromosome cache into multiple worker
 processes.
 
-Memory guidance: do not pass large covariance caches into a
-`ProcessPoolExecutor` casually. On many platforms this can copy the cache per
-worker. If cached local search is parallelized, prefer shared memory,
-memory-mapped arrays, or partition-group workers with bounded inputs.
+Decision: do not pass large covariance caches into a `ProcessPoolExecutor`.
+On many platforms this can copy the cache per worker. If parallel local search
+is revisited, use whole partition-group workers with bounded inputs, shared
+memory, or memory-mapped/chunked storage.
+
+#### Precompute full partition-level normalized rows in memory
+
+**Affected code:** `src/ldetect2/_util/covariance_array.py` and
+`src/ldetect2/local_search.py`
+
+Local search repeatedly derives `r²` from `shrink_ld` and diagonal values, so
+precomputing normalized rows is tempting. A full in-memory normalized row cache,
+however, duplicates information already stored in `shrink_ld` plus diagonals
+and can approach another covariance-sized array set.
+
+Decision: do not keep full normalized rows in memory. If normalized rows are
+needed, compute them in bounded chunks or store them in a chunked/memory-mapped
+format. The current next step is finer precompute instrumentation, not another
+large resident cache.
+
+#### Raw `.npy` side caches for local search
+
+**Affected code:** covariance storage and local-search loaders
+
+Raw `.npy` arrays would allow memory mapping, but they would store the compact
+hot-path arrays at roughly 16 bytes per covariance row, or about 32 bytes per
+row if both original and sorted local-search order are retained. For existing
+10-100 MB compressed `.npz` partitions, that likely means a 2-6x disk
+multiplier for the minimal cache and potentially 4-12x with a sorted duplicate.
+
+Decision: do not add raw `.npy` side caches. Prefer the planned HDF5/chunked
+storage migration if storage format changes are needed.
+
+#### JIT candidate scoring before precompute instrumentation
+
+**Affected code:** `LocalSearch._search_array()`
+
+EUR chr21/chr22 profiling shows candidate scoring is effectively free:
+`search_seconds` was about 0.03 seconds per chromosome while precompute took
+70-123 seconds.
+
+Decision: do not optimize or JIT `_search_array()` now. Focus on precompute
+instrumentation, row-volume reduction, and bounded storage/layout changes.

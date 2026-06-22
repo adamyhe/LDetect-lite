@@ -382,6 +382,10 @@ def test_float_local_search_uses_array_path_for_multiple_partitions(
 
     assert search._array_loci is not None
     assert len(search.precomputed["locus_list"]) > 0
+    assert search.precompute_stats.candidate_rows > 0
+    assert search.precompute_stats.eligible_rows > 0
+    assert search.precompute_stats.active_rows_peak > 0
+    assert search.precompute_stats.segments > 0
 
 
 def test_array_local_search_matches_legacy_across_compact_partitions(
