@@ -5,7 +5,7 @@ from __future__ import annotations
 import decimal
 from bisect import bisect_left
 
-from ldetect2._util.covariance_array import load_metric_covariance, metric_from_arrays
+from ldetect2._util.covariance_array import metric_from_files
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
@@ -87,15 +87,15 @@ class Metric:
         return self._calc_metric_lean()
 
     def _calc_metric_array(self) -> dict:
-        log_msg("Start metric (array)")
-        cov = load_metric_covariance(
+        log_msg("Start metric (streaming array)")
+        metric = metric_from_files(
             self.name,
             self.store,
             self.partitions,
             self.snp_first,
             self.snp_last,
+            self.breakpoints,
         )
-        metric = metric_from_arrays(cov, self.breakpoints)
         log_msg(f"Metric done: sum={metric['sum']}, N_zero={metric['N_zero']}")
         self.metric = metric
         self.calculation_complete = True

@@ -279,6 +279,159 @@ def load_metric_covariance(
     )
 
 
+def metric_from_files(
+    name: str,
+    store: CovarianceStore,
+    partitions: list[tuple[int, int]],
+    snp_first: int,
+    snp_last: int,
+    breakpoints: list[int],
+) -> dict:
+    """Compute the LD block metric without materializing chromosome-wide pairs.
+
+    The calculation streams covariance partitions twice: first to collect loci
+    and diagonal values, then to normalize eligible pairs and accumulate only
+    pairs that cross a requested breakpoint.  This keeps peak memory bounded by
+    the largest partition plus temporary masks instead of a full-chromosome
+    normalized pair array.
+    """
+    bp = np.asarray(breakpoints, dtype=np.int64)
+    if bp.size == 0:
+        return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
+
+    loci_chunks: list[np.ndarray] = []
+    diag_pos_chunks: list[np.ndarray] = []
+    diag_val_chunks: list[np.ndarray] = []
+
+    for p_index, (start, end) in enumerate(partitions):
+        path = store.partition_path(name, start, end)
+        i_pos, j_pos, shrink = _load_partition_arrays(path)
+        in_range = _owned_in_range_mask(
+            i_pos, j_pos, partitions, p_index, snp_first, snp_last
+        )
+        if not np.any(in_range):
+            continue
+
+        owned_i = i_pos[in_range]
+        owned_j = j_pos[in_range]
+        loci_chunks.append(np.unique(np.concatenate((owned_i, owned_j))))
+
+        diag_mask = in_range & (i_pos == j_pos)
+        if np.any(diag_mask):
+            diag_pos_chunks.append(i_pos[diag_mask])
+            diag_val_chunks.append(shrink[diag_mask])
+
+    if not loci_chunks:
+        return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
+
+    loci = np.unique(np.concatenate(loci_chunks))
+    n_zero = _metric_n_zero(loci, bp)
+    if not diag_pos_chunks:
+        return {"sum": 0.0, "N_nonzero": 0, "N_zero": n_zero}
+
+    diag_pos = np.concatenate(diag_pos_chunks)
+    diag_val = np.concatenate(diag_val_chunks)
+    order = np.argsort(diag_pos, kind="stable")
+    diag_pos = diag_pos[order]
+    diag_val = diag_val[order]
+    unique_diag_pos, unique_idx = np.unique(diag_pos, return_index=True)
+    unique_diag_val = diag_val[unique_idx]
+
+    total_sum = 0.0
+    n_nonzero = 0
+    for p_index, (start, end) in enumerate(partitions):
+        path = store.partition_path(name, start, end)
+        i_pos, j_pos, shrink = _load_partition_arrays(path)
+        in_range = _owned_in_range_mask(
+            i_pos, j_pos, partitions, p_index, snp_first, snp_last
+        )
+        pair_mask = in_range & (i_pos < j_pos)
+        if not np.any(pair_mask):
+            continue
+
+        pair_i = i_pos[pair_mask]
+        pair_j = j_pos[pair_mask]
+        pair_s = shrink[pair_mask]
+        pair_i, pair_j, pair_s = _deduplicate_metric_pairs(pair_i, pair_j, pair_s)
+
+        diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
+        diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
+        has_diag = (diag_i_idx < unique_diag_pos.size) & (
+            diag_j_idx < unique_diag_pos.size
+        )
+        safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
+        safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
+        has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
+            unique_diag_pos[safe_j_idx] == pair_j
+        )
+        if not np.any(has_diag):
+            continue
+
+        pair_i = pair_i[has_diag]
+        pair_j = pair_j[has_diag]
+        pair_s = pair_s[has_diag]
+        diag_i = unique_diag_val[diag_i_idx[has_diag]]
+        diag_j = unique_diag_val[diag_j_idx[has_diag]]
+
+        positive = (diag_i > 0.0) & (diag_j > 0.0)
+        if not np.any(positive):
+            continue
+
+        pair_i = pair_i[positive]
+        pair_j = pair_j[positive]
+        pair_s = pair_s[positive]
+        diag_i = diag_i[positive]
+        diag_j = diag_j[positive]
+
+        i_blocks = np.searchsorted(bp, pair_i, side="left")
+        j_blocks = np.searchsorted(bp, pair_j, side="left")
+        crossing = i_blocks != j_blocks
+        if not np.any(crossing):
+            continue
+
+        r2 = (
+            pair_s[crossing]
+            * pair_s[crossing]
+            / (diag_i[crossing] * diag_j[crossing])
+        )
+        total_sum += float(np.sum(r2))
+        n_nonzero += int(np.count_nonzero(crossing))
+
+    return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
+
+
+def _deduplicate_metric_pairs(
+    pair_i: np.ndarray,
+    pair_j: np.ndarray,
+    pair_s: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sort and deduplicate metric pairs, preserving first-pair semantics."""
+    if pair_i.size <= 1:
+        return pair_i, pair_j, pair_s
+    original_order = np.arange(pair_i.size, dtype=np.int64)
+    order = np.lexsort((original_order, pair_j, pair_i))
+    pair_i = pair_i[order]
+    pair_j = pair_j[order]
+    pair_s = pair_s[order]
+    keep = np.ones(pair_i.size, dtype=bool)
+    keep[1:] = (pair_i[1:] != pair_i[:-1]) | (pair_j[1:] != pair_j[:-1])
+    return pair_i[keep], pair_j[keep], pair_s[keep]
+
+
+def _metric_n_zero(loci: np.ndarray, breakpoints: np.ndarray) -> float:
+    """Return the block-area denominator used by array-backed metrics."""
+    metric_loci = loci[loci <= breakpoints[-1]]
+    block_ids = np.searchsorted(breakpoints, metric_loci, side="left")
+    block_widths = np.bincount(block_ids, minlength=len(breakpoints)).astype(
+        np.float64
+    )
+
+    if block_widths.size <= 1 or breakpoints.size <= 1:
+        return 0.0
+    total = float(block_widths.sum())
+    return float((total * total - np.sum(block_widths * block_widths)) / 2.0)
+
+
 def _load_chromosome_partitions(
     name: str,
     store: CovarianceStore,

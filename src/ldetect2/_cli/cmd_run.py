@@ -180,6 +180,7 @@ def _calc_partition(
 def _run(args: argparse.Namespace) -> int:
     import json
 
+    import ldetect2
     from ldetect2._util.logging import log_msg
     from ldetect2.io.bed import write_bed
     from ldetect2.io.partitions import CovarianceStore, read_partitions
@@ -195,6 +196,11 @@ def _run(args: argparse.Namespace) -> int:
     cov_dir.mkdir(exist_ok=True)
 
     store = CovarianceStore(root=output_dir)
+    log_msg(
+        "ldetect2 runtime: "
+        f"version={getattr(ldetect2, '__version__', 'unknown')} "
+        f"source={Path(ldetect2.__file__).resolve()}"
+    )
 
     # ------------------------------------------------------------------ #
     # Step 1: Partition chromosome                                         #

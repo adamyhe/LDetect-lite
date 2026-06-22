@@ -120,6 +120,7 @@ def test_metric_covariance_loader_does_not_retain_raw_partitions(
         load_chromosome_covariance,
         load_metric_covariance,
         metric_from_arrays,
+        metric_from_files,
     )
 
     loci = [100, 200, 300, 400, 500]
@@ -134,6 +135,39 @@ def test_metric_covariance_loader_does_not_retain_raw_partitions(
     assert metric_from_arrays(metric_only, [300]) == pytest.approx(
         metric_from_arrays(full, [300])
     )
+    assert metric_from_files(
+        "chr1", store, partitions, 100, 500, [300]
+    ) == pytest.approx(
+        metric_from_arrays(full, [300])
+    )
+
+
+def test_streaming_metric_matches_materialized_array_for_multiple_breakpoints(
+    tmp_path: Path,
+) -> None:
+    from ldetect2._util.covariance_array import (
+        load_metric_covariance,
+        metric_from_arrays,
+        metric_from_files,
+    )
+
+    loci = [100, 200, 300, 400, 500, 600]
+    r2 = {
+        (100, 300): 0.5,
+        (100, 500): 0.2,
+        (200, 400): 0.25,
+        (300, 500): 0.75,
+        (400, 600): 0.125,
+    }
+    partitions = [(100, 400), (200, 600)]
+    store = _make_store(tmp_path, loci, r2, partitions=partitions, compact=True)
+    breakpoints = [250, 450]
+
+    materialized = load_metric_covariance("chr1", store, partitions, 100, 600)
+
+    assert metric_from_files(
+        "chr1", store, partitions, 100, 600, breakpoints
+    ) == pytest.approx(metric_from_arrays(materialized, breakpoints))
 
 
 def test_metric_accepts_compact_covariance_partition(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ RAW_DIR = Path(config["raw_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
 RESULTS = Path(config["results_dir"])
+LDETECT2_CMD = config.get("ldetect2_command", "ldetect2")
 VCF_TMPL = config["vcf_filename_template"]
 RAW_VCF = str(RAW_DIR / VCF_TMPL)
 FILT_DIR = Path(config["results_dir"]) / "filtered_vcf"
@@ -307,11 +308,12 @@ rule diagnostic_run_ldetect2:
         high_precision=diag_flag_high_precision,
         local_search_workers=config.get("local_search_workers", 1),
         verbosity=config.get("profile_verbosity", "debug"),
+        ldetect2_cmd=LDETECT2_CMD,
     shell:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 -v {params.verbosity} run \
+        {params.ldetect2_cmd} -v {params.verbosity} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -407,11 +409,12 @@ rule diagnostic_run_ldetect2_omni:
         high_precision=diag_flag_high_precision,
         local_search_workers=config.get("local_search_workers", 1),
         verbosity=config.get("profile_verbosity", "debug"),
+        ldetect2_cmd=LDETECT2_CMD,
     shell:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 -v {params.verbosity} run \
+        {params.ldetect2_cmd} -v {params.verbosity} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \

@@ -17,7 +17,6 @@ from ldetect2._util.covariance_array import (
     ChromosomeCovariance,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
     load_covariance_partitions,
-    load_metric_covariance,
     local_search_partition,
     metric_from_arrays,
 )
@@ -127,18 +126,8 @@ def find_breakpoints(
     fourier_loci = get_minima_loc(g, np_array_x)
 
     metric_cov = None if use_decimal else covariance_cache
-    if not use_decimal:
-        if metric_cov is None:
-            log_msg("Loading metric covariance arrays")
-            metric_cov = load_metric_covariance(
-                chr_name,
-                store,
-                get_final_partitions(store, chr_name, snp_first, snp_last),
-                snp_first,
-                snp_last,
-            )
-        else:
-            log_msg("Using cached covariance arrays for metrics")
+    if metric_cov is not None:
+        log_msg("Using cached covariance arrays for metrics")
 
     fourier_metric = None
     if needs_fourier_metric:
@@ -197,19 +186,6 @@ def find_breakpoints(
             use_decimal=use_decimal,
             covariance_cache=covariance_cache,
             subset_name="uniform_ls",
-        )
-    if (
-        not use_decimal
-        and metric_cov is None
-        and (needs_fourier_ls or needs_uniform_ls)
-    ):
-        log_msg("Reloading metric covariance arrays for final metric reuse")
-        metric_cov = load_metric_covariance(
-            chr_name,
-            store,
-            get_final_partitions(store, chr_name, snp_first, snp_last),
-            snp_first,
-            snp_last,
         )
     fourier_ls_metric = None
     if fourier_ls is not None:
