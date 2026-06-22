@@ -55,6 +55,20 @@ BREAKPOINT_COLS = [
     "active_rows_peak",
 ]
 
+GROUP_COLS = [
+    "profile_name",
+    "population",
+    "chrom",
+    "subset",
+    "group_index",
+    "breakpoints",
+    "partitions",
+    "rows",
+    "load_seconds",
+    "canonicalize_seconds",
+    "total_seconds",
+]
+
 BY_CHROM_COLS = [
     "profile_name",
     "population",
@@ -83,6 +97,14 @@ BY_CHROM_COLS = [
     "chunks",
     "segments",
     "active_rows_peak",
+    "group_count",
+    "group_breakpoints",
+    "group_rows",
+    "group_partitions",
+    "group_load_seconds",
+    "group_canonicalize_seconds",
+    "group_total_seconds",
+    "local_search_unaccounted_seconds",
 ]
 
 _BREAKPOINT_EXTRA_FLOAT_COLS = [
@@ -109,6 +131,7 @@ _SET_RE = re.compile(
     r"Local search (?P<subset>\S+) done: breakpoints=(?P<breakpoints>\d+) "
     r"elapsed_seconds=(?P<elapsed>[0-9.]+)"
 )
+_GROUP_RE = re.compile(r"Local search (?P<subset>\S+) group loaded: ")
 _BP_PREFIX_RE = re.compile(r"(?P<subset>\S+) breakpoint idx=")
 _KV_RE = re.compile(r"(?P<key>[A-Za-z_]+)=(?P<value>None|-?[0-9.]+)")
 
@@ -207,12 +230,15 @@ def _apply_mac_time_value(row: dict[str, str], key: str, value: str) -> None:
         row["filesystem_outputs"] = value
 
 
-def parse_ldetect2_log(path: Path) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+def parse_ldetect2_log(
+    path: Path,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
     """Parse local-search set and breakpoint diagnostics from ldetect2 logs."""
     sets: list[dict[str, str]] = []
+    groups: list[dict[str, str]] = []
     breakpoints: list[dict[str, str]] = []
     if not path.exists():
-        return sets, breakpoints
+        return sets, groups, breakpoints
 
     for line in path.read_text(errors="replace").splitlines():
         set_match = _SET_RE.search(line)
@@ -225,11 +251,47 @@ def parse_ldetect2_log(path: Path) -> tuple[list[dict[str, str]], list[dict[str,
                 }
             )
 
+        group_row = _parse_group_line(line, len(groups))
+        if group_row is not None:
+            groups.append(group_row)
+
         breakpoint_row = _parse_breakpoint_line(line)
         if breakpoint_row is not None:
             breakpoints.append(breakpoint_row)
 
-    return sets, breakpoints
+    return sets, groups, breakpoints
+
+
+def _parse_group_line(line: str, group_index: int) -> dict[str, str] | None:
+    """Parse one local-search partition-group timing line into TSV columns."""
+    group_match = _GROUP_RE.search(line)
+    if not group_match:
+        return None
+    values = {
+        key: _none_to_empty(value)
+        for key, value in _KV_RE.findall(line)
+        if key in GROUP_COLS
+    }
+    required = {
+        "breakpoints",
+        "partitions",
+        "rows",
+        "load_seconds",
+        "canonicalize_seconds",
+    }
+    if not required <= set(values):
+        return None
+
+    metadata_cols = {"profile_name", "population", "chrom"}
+    row = {col: "" for col in GROUP_COLS if col not in metadata_cols}
+    row.update(values)
+    row["subset"] = group_match.group("subset")
+    row["group_index"] = str(group_index)
+    total_seconds = _float(row["load_seconds"]) + _float(
+        row["canonicalize_seconds"]
+    )
+    row["total_seconds"] = f"{total_seconds:.6f}"
+    return row
 
 
 def _parse_breakpoint_line(line: str) -> dict[str, str] | None:
@@ -271,7 +333,12 @@ def profile_chromosome(
     population: str,
     chrom: str,
     profile_name: str,
-) -> tuple[dict[str, str], list[dict[str, str]], list[dict[str, str]]]:
+) -> tuple[
+    dict[str, str],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+]:
     """Parse timing and ldetect2 logs for one diagnostic chromosome."""
     log_dir = diagnostic_root / str(chrom) / "logs"
     run_row = parse_time_log(log_dir / "timing.log")
@@ -279,8 +346,10 @@ def profile_chromosome(
         {"profile_name": profile_name, "population": population, "chrom": f"chr{chrom}"}
     )
 
-    set_rows, breakpoint_rows = parse_ldetect2_log(log_dir / "ldetect2.log")
-    for row in set_rows + breakpoint_rows:
+    set_rows, group_rows, breakpoint_rows = parse_ldetect2_log(
+        log_dir / "ldetect2.log"
+    )
+    for row in set_rows + group_rows + breakpoint_rows:
         row.update(
             {
                 "profile_name": profile_name,
@@ -288,29 +357,40 @@ def profile_chromosome(
                 "chrom": f"chr{chrom}",
             }
         )
-    return run_row, set_rows, breakpoint_rows
+    return run_row, set_rows, group_rows, breakpoint_rows
 
 
 def aggregate_by_chrom(
     set_rows: list[dict[str, str]],
+    group_rows: list[dict[str, str]],
     breakpoint_rows: list[dict[str, str]],
 ) -> list[dict[str, str]]:
     """Aggregate per-breakpoint local-search profiling rows by chrom/subset."""
     grouped: dict[tuple[str, str, str, str], list[dict[str, str]]] = defaultdict(list)
+    grouped_groups: dict[tuple[str, str, str, str], list[dict[str, str]]] = (
+        defaultdict(list)
+    )
     set_elapsed: dict[tuple[str, str, str, str], dict[str, str]] = {}
     for row in breakpoint_rows:
         key = (row["profile_name"], row["population"], row["chrom"], row["subset"])
         grouped[key].append(row)
+    for row in group_rows:
+        key = (row["profile_name"], row["population"], row["chrom"], row["subset"])
+        grouped_groups[key].append(row)
     for row in set_rows:
         key = (row["profile_name"], row["population"], row["chrom"], row["subset"])
         set_elapsed[key] = row
 
-    keys = sorted(set(grouped) | set(set_elapsed))
+    keys = sorted(set(grouped) | set(grouped_groups) | set(set_elapsed))
     out: list[dict[str, str]] = []
     for key in keys:
         profile_name, population, chrom, subset = key
         rows = grouped.get(key, [])
+        groups = grouped_groups.get(key, [])
         set_row = set_elapsed.get(key, {})
+        set_seconds = set_row.get("set_elapsed_seconds", "")
+        breakpoint_total = _sum_field(rows, "total_seconds")
+        group_total = _sum_field(groups, "total_seconds")
         out_row = {
             "profile_name": profile_name,
             "population": population,
@@ -321,7 +401,7 @@ def aggregate_by_chrom(
             "breakpoint_count": str(len(rows)),
             "precompute_seconds": _sum_field(rows, "precompute_seconds"),
             "search_seconds": _sum_field(rows, "search_seconds"),
-            "total_seconds": _sum_field(rows, "total_seconds"),
+            "total_seconds": breakpoint_total,
             "max_rss_mib": _max_field(rows, "max_rss_mib"),
             "rows": _sum_int_field(rows, "rows"),
             "partitions": _sum_int_field(rows, "partitions"),
@@ -331,12 +411,29 @@ def aggregate_by_chrom(
         for field in _BREAKPOINT_EXTRA_INT_COLS:
             out_row[field] = _sum_int_field(rows, field)
         out_row["active_rows_peak"] = _max_int_field(rows, "active_rows_peak")
+        out_row["group_count"] = str(len(groups)) if groups else ""
+        out_row["group_breakpoints"] = _sum_int_field(groups, "breakpoints")
+        out_row["group_rows"] = _sum_int_field(groups, "rows")
+        out_row["group_partitions"] = _sum_int_field(groups, "partitions")
+        out_row["group_load_seconds"] = _sum_field(groups, "load_seconds")
+        out_row["group_canonicalize_seconds"] = _sum_field(
+            groups, "canonicalize_seconds"
+        )
+        out_row["group_total_seconds"] = group_total
+        accounted = _optional_sum(breakpoint_total, group_total)
+        if set_seconds and accounted:
+            out_row["local_search_unaccounted_seconds"] = (
+                f"{_float(set_seconds) - accounted:.6f}"
+            )
+        else:
+            out_row["local_search_unaccounted_seconds"] = ""
         out.append(out_row)
     return out
 
 
 def _sum_field(rows: list[dict[str, str]], field: str) -> str:
-    return f"{sum(float(row[field]) for row in rows if row.get(field)):.6f}"
+    values = [float(row[field]) for row in rows if row.get(field)]
+    return f"{sum(values):.6f}" if values else ""
 
 
 def _sum_int_field(rows: list[dict[str, str]], field: str) -> str:
@@ -352,6 +449,17 @@ def _max_field(rows: list[dict[str, str]], field: str) -> str:
 def _max_int_field(rows: list[dict[str, str]], field: str) -> str:
     values = [int(row[field]) for row in rows if row.get(field)]
     return str(max(values)) if values else ""
+
+
+def _float(value: str) -> float:
+    return float(value) if value else 0.0
+
+
+def _optional_sum(*values: str) -> float | None:
+    present = [value for value in values if value]
+    if not present:
+        return None
+    return sum(float(value) for value in present)
 
 
 def write_tsv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
@@ -451,10 +559,13 @@ def _plot_stacked_local_search(plt, path: Path, rows) -> None:
     plot_rows = [row for row in rows if row.get("precompute_seconds")]
     labels = [f"{row['chrom']} {row['subset']}" for row in plot_rows]
     precompute = [float(row["precompute_seconds"]) for row in plot_rows]
+    group = [float(row["group_total_seconds"] or 0.0) for row in plot_rows]
     search = [float(row["search_seconds"] or 0.0) for row in plot_rows]
     fig, ax = plt.subplots(figsize=(9, 4.5))
     ax.bar(labels, precompute, label="precompute")
-    ax.bar(labels, search, bottom=precompute, label="search")
+    ax.bar(labels, group, bottom=precompute, label="group load/canonicalize")
+    group_bottom = [pre + grp for pre, grp in zip(precompute, group)]
+    ax.bar(labels, search, bottom=group_bottom, label="search")
     ax.set_title("Local-search time by chromosome")
     ax.set_ylabel("Seconds")
     ax.tick_params(axis="x", rotation=30)
@@ -518,6 +629,7 @@ def main() -> None:
     parser.add_argument("--profile-name", default="default")
     parser.add_argument("--chromosomes", nargs="+", required=True)
     parser.add_argument("--run-summary", required=True, type=Path)
+    parser.add_argument("--local-search-groups", required=True, type=Path)
     parser.add_argument("--local-search-breakpoints", required=True, type=Path)
     parser.add_argument("--local-search-by-chrom", required=True, type=Path)
     parser.add_argument("--plot-dir", required=True, type=Path)
@@ -527,9 +639,15 @@ def main() -> None:
 
     run_rows: list[dict[str, str]] = []
     set_rows: list[dict[str, str]] = []
+    group_rows: list[dict[str, str]] = []
     breakpoint_rows: list[dict[str, str]] = []
     for chrom in args.chromosomes:
-        run_row, chrom_set_rows, chrom_breakpoint_rows = profile_chromosome(
+        (
+            run_row,
+            chrom_set_rows,
+            chrom_group_rows,
+            chrom_breakpoint_rows,
+        ) = profile_chromosome(
             args.diagnostic_root,
             args.population,
             chrom,
@@ -537,10 +655,12 @@ def main() -> None:
         )
         run_rows.append(run_row)
         set_rows.extend(chrom_set_rows)
+        group_rows.extend(chrom_group_rows)
         breakpoint_rows.extend(chrom_breakpoint_rows)
 
-    by_chrom_rows = aggregate_by_chrom(set_rows, breakpoint_rows)
+    by_chrom_rows = aggregate_by_chrom(set_rows, group_rows, breakpoint_rows)
     write_tsv(args.run_summary, RUN_COLS, run_rows)
+    write_tsv(args.local_search_groups, GROUP_COLS, group_rows)
     write_tsv(args.local_search_breakpoints, BREAKPOINT_COLS, breakpoint_rows)
     write_tsv(args.local_search_by_chrom, BY_CHROM_COLS, by_chrom_rows)
     write_plots(args.plot_dir, run_rows, breakpoint_rows, by_chrom_rows, args.plots)

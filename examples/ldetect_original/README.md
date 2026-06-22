@@ -185,8 +185,12 @@ Useful outputs:
 - `results/diagnostics/{POP}/profiling/local_search_breakpoints.tsv`:
   per-breakpoint local-search timing, partition counts, row counts, and RSS
   parsed from debug logs.
+- `results/diagnostics/{POP}/profiling/local_search_groups.tsv`:
+  per-partition-group local-search load and canonicalization timing parsed
+  from debug logs.
 - `results/diagnostics/{POP}/profiling/local_search_by_chrom.tsv`: aggregated
-  local-search timing by chromosome and subset.
+  local-search timing by chromosome and subset, including breakpoint totals,
+  group totals, and unaccounted elapsed time.
 - `results/diagnostics/{POP}/profiling/plots/`: PNG plots when matplotlib is
   installed, or a `SKIPPED.txt` marker when plots are unavailable.
 - `results/diagnostics/reference_bed_consistency.tsv`: comparison of

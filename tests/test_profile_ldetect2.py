@@ -92,6 +92,9 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
         "\n".join(
             [
                 "[12:00:00] Running local search on Fourier breakpoints",
+                "[12:00:00] Local search fourier_ls group loaded: "
+                "breakpoints=2 partitions=5 rows=22222 load_seconds=0.250 "
+                "canonicalize_seconds=0.750",
                 "[12:00:01] fourier_ls breakpoint idx=0 start=100 stop=200 "
                 "partitions=2 rows=12345 precompute_seconds=1.250 "
                 "search_seconds=0.050 total_seconds=1.310 max_rss_mib=512.5 "
@@ -110,7 +113,7 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
         )
     )
 
-    sets, breakpoints = profile.parse_ldetect2_log(path)
+    sets, groups, breakpoints = profile.parse_ldetect2_log(path)
     by_chrom = profile.aggregate_by_chrom(
         [
             {
@@ -119,6 +122,15 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
                 "population": "EUR",
                 "chrom": "chr22",
             }
+        ],
+        [
+            {
+                **row,
+                "profile_name": "test",
+                "population": "EUR",
+                "chrom": "chr22",
+            }
+            for row in groups
         ],
         [
             {
@@ -138,6 +150,18 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
             "set_elapsed_seconds": "4.000",
         }
     ]
+    assert groups == [
+        {
+            "subset": "fourier_ls",
+            "group_index": "0",
+            "breakpoints": "2",
+            "partitions": "5",
+            "rows": "22222",
+            "load_seconds": "0.250",
+            "canonicalize_seconds": "0.750",
+            "total_seconds": "1.000000",
+        }
+    ]
     assert len(breakpoints) == 2
     assert breakpoints[0]["rows"] == "12345"
     assert breakpoints[0]["max_rss_mib"] == "512.5"
@@ -152,6 +176,11 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
     assert by_chrom[0]["slice_seconds"] == "0.050000"
     assert by_chrom[0]["candidate_rows"] == "1000"
     assert by_chrom[0]["active_rows_peak"] == "12345"
+    assert by_chrom[0]["group_count"] == "1"
+    assert by_chrom[0]["group_load_seconds"] == "0.250000"
+    assert by_chrom[0]["group_canonicalize_seconds"] == "0.750000"
+    assert by_chrom[0]["group_total_seconds"] == "1.000000"
+    assert by_chrom[0]["local_search_unaccounted_seconds"] == "-0.960000"
 
 
 def test_missing_debug_lines_produce_empty_local_search_rows(tmp_path: Path) -> None:
@@ -162,7 +191,7 @@ def test_missing_debug_lines_produce_empty_local_search_rows(tmp_path: Path) -> 
     (log_dir / "timing.log").write_text("Exit status: 0\n")
     (log_dir / "ldetect2.log").write_text("[12:00:00] Step 1\n")
 
-    run_row, set_rows, breakpoint_rows = profile.profile_chromosome(
+    run_row, set_rows, group_rows, breakpoint_rows = profile.profile_chromosome(
         root,
         "EUR",
         "22",
@@ -172,5 +201,50 @@ def test_missing_debug_lines_produce_empty_local_search_rows(tmp_path: Path) -> 
     assert run_row["chrom"] == "chr22"
     assert run_row["exit_status"] == "0"
     assert set_rows == []
+    assert group_rows == []
     assert breakpoint_rows == []
-    assert profile.aggregate_by_chrom(set_rows, breakpoint_rows) == []
+    assert profile.aggregate_by_chrom(set_rows, group_rows, breakpoint_rows) == []
+
+
+def test_missing_optional_phase_fields_stay_blank(tmp_path: Path) -> None:
+    profile = _load_profile_module()
+    path = tmp_path / "ldetect2.log"
+    path.write_text(
+        "\n".join(
+            [
+                "[12:00:01] fourier_ls breakpoint idx=0 start=100 stop=200 "
+                "partitions=2 rows=12345 precompute_seconds=1.250 "
+                "search_seconds=0.050 total_seconds=1.310 max_rss_mib=512.5",
+                "[12:00:02] Local search fourier_ls done: breakpoints=1 "
+                "elapsed_seconds=1.400",
+            ]
+        )
+    )
+
+    sets, groups, breakpoints = profile.parse_ldetect2_log(path)
+    by_chrom = profile.aggregate_by_chrom(
+        [
+            {
+                **sets[0],
+                "profile_name": "test",
+                "population": "EUR",
+                "chrom": "chr21",
+            }
+        ],
+        groups,
+        [
+            {
+                **breakpoints[0],
+                "profile_name": "test",
+                "population": "EUR",
+                "chrom": "chr21",
+            }
+        ],
+    )
+
+    assert breakpoints[0]["partition_load_seconds"] == ""
+    assert by_chrom[0]["partition_load_seconds"] == ""
+    assert by_chrom[0]["canonicalize_seconds"] == ""
+    assert by_chrom[0]["candidate_rows"] == ""
+    assert by_chrom[0]["group_total_seconds"] == ""
+    assert by_chrom[0]["local_search_unaccounted_seconds"] == "0.090000"

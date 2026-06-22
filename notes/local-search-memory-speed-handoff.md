@@ -184,9 +184,10 @@ include:
 - chunk count, segment count, and peak active rows.
 
 The profiling parser now preserves these fields in
-`local_search_breakpoints.tsv`, aggregates them in
-`local_search_by_chrom.tsv`, and emits a phase-breakdown plot when matplotlib
-is available.
+`local_search_breakpoints.tsv`, records partition-group load/canonicalization
+timing in `local_search_groups.tsv`, aggregates both breakpoint and group
+timing in `local_search_by_chrom.tsv`, and emits a phase-breakdown plot when
+matplotlib is available.
 
 Expected benefit:
 

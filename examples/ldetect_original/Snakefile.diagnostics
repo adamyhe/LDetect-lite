@@ -88,6 +88,7 @@ def profile_targets():
         return []
     targets = [
         str(PROFILE_ROOT / "run_summary.tsv"),
+        str(PROFILE_ROOT / "local_search_groups.tsv"),
         str(PROFILE_ROOT / "local_search_breakpoints.tsv"),
         str(PROFILE_ROOT / "local_search_by_chrom.tsv"),
     ]
@@ -527,6 +528,7 @@ rule diagnostic_profile_summary:
         script="scripts/profile_ldetect2.py",
     output:
         run_summary=str(PROFILE_ROOT / "run_summary.tsv"),
+        groups=str(PROFILE_ROOT / "local_search_groups.tsv"),
         breakpoints=str(PROFILE_ROOT / "local_search_breakpoints.tsv"),
         by_chrom=str(PROFILE_ROOT / "local_search_by_chrom.tsv"),
         plots=directory(str(PROFILE_ROOT / "plots")),
@@ -544,6 +546,7 @@ rule diagnostic_profile_summary:
             --profile-name {params.profile_name} \
             --chromosomes {params.chromosomes} \
             --run-summary {output.run_summary} \
+            --local-search-groups {output.groups} \
             --local-search-breakpoints {output.breakpoints} \
             --local-search-by-chrom {output.by_chrom} \
             --plot-dir {output.plots} \
