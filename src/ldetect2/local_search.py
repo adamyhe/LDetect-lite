@@ -88,6 +88,89 @@ def _append_partition(
     return lo, hi, shrink, _unique_sorted(lo)
 
 
+def _active_loci_from_partitions(
+    partitions: list[LocalSearchPartition],
+    active_min_lo: int,
+) -> np.ndarray:
+    """Return sorted unique active ``lo`` loci across canonical partitions."""
+    loci_arrays = []
+    for partition in partitions:
+        left = int(np.searchsorted(partition.loci, active_min_lo, side="left"))
+        if left < partition.loci.size:
+            loci_arrays.append(partition.loci[left:])
+    if not loci_arrays:
+        return np.array([], dtype=np.int64)
+    loci = np.concatenate(loci_arrays).astype(np.int64, copy=False)
+    loci.sort()
+    return _unique_sorted(loci)
+
+
+def _active_row_count_from_partitions(
+    partitions: list[LocalSearchPartition],
+    active_min_lo: int,
+) -> int:
+    """Return the non-deduplicated active row count for instrumentation."""
+    total = 0
+    for partition in partitions:
+        left = int(np.searchsorted(partition.lo, active_min_lo, side="left"))
+        total += int(partition.lo.size - left)
+    return total
+
+
+def _segment_rows_from_partitions(
+    partitions: list[LocalSearchPartition],
+    active_min_lo: int,
+    lo_min: int,
+    lo_max: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return canonical rows for a segment from active canonical partitions."""
+    min_lo = max(active_min_lo, lo_min)
+    lo_parts: list[np.ndarray] = []
+    hi_parts: list[np.ndarray] = []
+    shrink_parts: list[np.ndarray] = []
+    for partition in partitions:
+        left = int(np.searchsorted(partition.lo, min_lo, side="left"))
+        right = int(np.searchsorted(partition.lo, lo_max, side="right"))
+        if left >= right:
+            continue
+        lo_parts.append(partition.lo[left:right])
+        hi_parts.append(partition.hi[left:right])
+        shrink_parts.append(partition.shrink_ld[left:right])
+
+    if not lo_parts:
+        return (
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.float64),
+        )
+    lo = np.concatenate(lo_parts)
+    hi = np.concatenate(hi_parts)
+    shrink = np.concatenate(shrink_parts)
+    return canonical_local_search_rows(lo, hi, shrink)
+
+
+def _active_diagonal_from_partitions(
+    partitions: list[LocalSearchPartition],
+    active_min_lo: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return active canonical diagonal rows with partition-order first wins."""
+    pos_parts: list[np.ndarray] = []
+    val_parts: list[np.ndarray] = []
+    for partition in partitions:
+        left = int(np.searchsorted(partition.diag_pos, active_min_lo, side="left"))
+        if left >= partition.diag_pos.size:
+            continue
+        pos_parts.append(partition.diag_pos[left:])
+        val_parts.append(partition.diag_val[left:])
+
+    if not pos_parts:
+        return np.array([], dtype=np.int32), np.array([], dtype=np.float64)
+    pos = np.concatenate(pos_parts)
+    val = np.concatenate(val_parts)
+    diag_pos, _, diag_val = canonical_local_search_rows(pos, pos, val)
+    return diag_pos, diag_val
+
+
 def _unique_sorted(values: np.ndarray) -> np.ndarray:
     """Return unique values from an already sorted array."""
     if values.size <= 1:
@@ -311,6 +394,7 @@ class LocalSearch:
         store: CovarianceStore,
         use_decimal: bool = False,
         covariance_cache: ChromosomeCovariance | None = None,
+        local_search_partitions: tuple[LocalSearchPartition, ...] | None = None,
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -331,6 +415,7 @@ class LocalSearch:
 
         self.store = store
         self.covariance_cache = covariance_cache
+        self.local_search_partitions = local_search_partitions
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -550,16 +635,30 @@ class LocalSearch:
         """Precompute local-search deltas with exact legacy locus semantics."""
         log_debug("Start local search init (array)")
         self.precompute_stats = LocalSearchPrecomputeStats()
-        load_start = time.perf_counter()
-        partitions = self._local_covariance_partitions()
-        self.precompute_stats.partition_load_seconds = (
-            time.perf_counter() - load_start
-        )
-        self.loaded_partition_count = len(partitions)
-        self.loaded_row_count = int(
-            sum(partition.i_pos.size for partition in partitions)
-        )
-        loci, sum_vert, sum_horiz = self._precompute_array_from_partitions(partitions)
+        if self.local_search_partitions is None:
+            load_start = time.perf_counter()
+            partitions = self._local_covariance_partitions()
+            self.precompute_stats.partition_load_seconds = (
+                time.perf_counter() - load_start
+            )
+            self.loaded_partition_count = len(partitions)
+            self.loaded_row_count = int(
+                sum(partition.i_pos.size for partition in partitions)
+            )
+            loci, sum_vert, sum_horiz = self._precompute_array_from_partitions(
+                partitions
+            )
+        else:
+            self.loaded_partition_count = len(self.local_search_partitions)
+            self.loaded_row_count = int(
+                sum(
+                    partition.source_row_count
+                    for partition in self.local_search_partitions
+                )
+            )
+            loci, sum_vert, sum_horiz = self._precompute_array_from_local_partitions(
+                self.local_search_partitions
+            )
 
         self._array_loci = loci
         self._array_sum_vert = sum_vert
@@ -604,10 +703,15 @@ class LocalSearch:
         self.precompute_stats.canonicalize_seconds += (
             time.perf_counter() - canonicalize_start
         )
-        position_dtype = local_partitions[0].lo.dtype if local_partitions else np.int64
-        active_lo = np.array([], dtype=position_dtype)
-        active_hi = np.array([], dtype=position_dtype)
-        active_shrink = np.array([], dtype=np.float64)
+        return self._precompute_array_from_local_partitions(local_partitions)
+
+    def _precompute_array_from_local_partitions(
+        self,
+        local_partitions: tuple[LocalSearchPartition, ...],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Precompute local-search arrays from canonical partition slices."""
+        active_partitions: list[LocalSearchPartition] = []
+        active_min_lo = -2**63
         active_loci = np.array([], dtype=np.int64)
         precomputed_loci: list[int] = []
         sum_vert_by_locus: dict[int, float] = {}
@@ -617,18 +721,18 @@ class LocalSearch:
         for p_num_init in range(len(local_partitions) - 1):
             if self.snp_bottom >= local_partitions[p_num_init + 1].start:
                 append_start = time.perf_counter()
-                active_lo, active_hi, active_shrink, active_loci = _append_partition(
-                    active_lo,
-                    active_hi,
-                    active_shrink,
-                    local_partitions[p_num_init],
+                active_partitions.append(local_partitions[p_num_init])
+                active_loci = _active_loci_from_partitions(
+                    active_partitions, active_min_lo
                 )
                 self.precompute_stats.append_seconds += (
                     time.perf_counter() - append_start
                 )
                 self.precompute_stats.active_rows_peak = max(
                     self.precompute_stats.active_rows_peak,
-                    int(active_lo.size),
+                    _active_row_count_from_partitions(
+                        active_partitions, active_min_lo
+                    ),
                 )
                 last_p_num = p_num_init
             else:
@@ -642,16 +746,14 @@ class LocalSearch:
 
         for p_num in range(last_p_num + 1, len(local_partitions)):
             append_start = time.perf_counter()
-            active_lo, active_hi, active_shrink, active_loci = _append_partition(
-                active_lo,
-                active_hi,
-                active_shrink,
-                local_partitions[p_num],
+            active_partitions.append(local_partitions[p_num])
+            active_loci = _active_loci_from_partitions(
+                active_partitions, active_min_lo
             )
             self.precompute_stats.append_seconds += time.perf_counter() - append_start
             self.precompute_stats.active_rows_peak = max(
                 self.precompute_stats.active_rows_peak,
-                int(active_lo.size),
+                _active_row_count_from_partitions(active_partitions, active_min_lo),
             )
 
             if curr_locus < 0:
@@ -701,9 +803,22 @@ class LocalSearch:
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
+                lo_min = int(segment_loci[0])
+                lo_max = int(segment_loci[-1])
+                append_start = time.perf_counter()
+                active_lo, active_hi, active_shrink = _segment_rows_from_partitions(
+                    active_partitions,
+                    active_min_lo,
+                    lo_min,
+                    lo_max,
+                )
+                self.precompute_stats.append_seconds += (
+                    time.perf_counter() - append_start
+                )
                 diagonal_start = time.perf_counter()
-                diag_pos, diag_val = _active_diagonal(
-                    active_lo, active_hi, active_shrink
+                diag_pos, diag_val = _active_diagonal_from_partitions(
+                    active_partitions,
+                    active_min_lo,
                 )
                 self.precompute_stats.diagonal_seconds += (
                     time.perf_counter() - diagonal_start
@@ -731,11 +846,15 @@ class LocalSearch:
                     log_debug("curr_locus_index out of bounds")
                     break
 
-            keep = active_lo >= end_locus
-            active_lo = active_lo[keep]
-            active_hi = active_hi[keep]
-            active_shrink = active_shrink[keep]
-            active_loci = _unique_sorted(active_lo)
+            active_min_lo = end_locus
+            active_partitions = [
+                partition
+                for partition in active_partitions
+                if partition.end >= active_min_lo
+            ]
+            active_loci = _active_loci_from_partitions(
+                active_partitions, active_min_lo
+            )
 
         loci = np.asarray(precomputed_loci, dtype=np.int64)
         sum_vert = np.asarray(

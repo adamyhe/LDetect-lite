@@ -28,13 +28,17 @@ class LocalSearchPartition:
 
     Rows use lower/upper endpoints, are sorted by ``(lo, hi)``, and keep the
     first value for duplicate endpoint pairs to match the legacy array path.
+    ``loci`` contains the sorted unique row ``lo`` values and is used to build
+    active local-search segment boundaries without rebuilding full row arrays.
     """
 
     start: int
     end: int
+    source_row_count: int
     lo: np.ndarray
     hi: np.ndarray
     shrink_ld: np.ndarray
+    loci: np.ndarray
     diag_pos: np.ndarray
     diag_val: np.ndarray
 
@@ -103,12 +107,25 @@ def local_search_partition(partition: CovariancePartition) -> LocalSearchPartiti
     return LocalSearchPartition(
         start=partition.start,
         end=partition.end,
+        source_row_count=int(partition.i_pos.size),
         lo=lo,
         hi=hi,
         shrink_ld=shrink,
+        loci=_unique_sorted(lo),
         diag_pos=lo[diag_mask],
         diag_val=shrink[diag_mask],
     )
+
+
+def _unique_sorted(values: np.ndarray) -> np.ndarray:
+    """Return unique values from an already sorted array as int64 positions."""
+    if values.size == 0:
+        return np.array([], dtype=np.int64)
+    if values.size == 1:
+        return values.astype(np.int64, copy=False)
+    keep = np.ones(values.size, dtype=bool)
+    keep[1:] = values[1:] != values[:-1]
+    return values[keep].astype(np.int64, copy=False)
 
 
 def canonical_local_search_rows(

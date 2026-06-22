@@ -250,6 +250,10 @@ def test_local_search_partition_canonicalizes_rows_exactly() -> None:
         canonical.diag_pos, np.array([100, 200, 400], dtype=np.int32)
     )
     np.testing.assert_array_equal(canonical.diag_val, np.array([1.0, 1.2, 0.0]))
+    np.testing.assert_array_equal(
+        canonical.loci, np.array([100, 200, 400], dtype=np.int64)
+    )
+    assert canonical.source_row_count == 6
 
 
 def test_local_search_matches_legacy_with_duplicate_pairs(
@@ -272,6 +276,39 @@ def test_local_search_matches_legacy_with_duplicate_pairs(
 
     assert bp is None or 100 <= bp <= 400
     assert metric is not None
+
+
+def test_local_search_matches_legacy_with_cross_partition_duplicate_pairs(
+    tmp_path: Path,
+) -> None:
+    partitions = {
+        (100, 400): [
+            (100, 100, 1.0),
+            (200, 200, 1.0),
+            (300, 300, 1.0),
+            (400, 400, 1.0),
+            (200, 400, 0.7),
+        ],
+        (200, 500): [
+            (200, 200, 1.0),
+            (300, 300, 1.0),
+            (400, 400, 1.0),
+            (500, 500, 1.0),
+            (400, 200, 0.2),
+            (300, 500, 0.8),
+        ],
+    }
+    store = _make_custom_partitioned_store(tmp_path, partitions)
+
+    _assert_precompute_matches_legacy(
+        store,
+        [200, 400],
+        0,
+        100,
+        400,
+        first=100,
+        last=500,
+    )
 
 
 def test_array_local_search_keeps_unchanged_breakpoint(tmp_path: Path) -> None:

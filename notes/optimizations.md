@@ -165,17 +165,24 @@ dominated, not candidate scoring:
 
 | Chrom | Wall time | Max RSS | Local search | Precompute | Search |
 |---|---:|---:|---:|---:|---:|
-| chr21 | 348.56 s | 10.79 GiB | 93.19 s | 70.58 s | 0.034 s |
-| chr22 | 481.50 s | 11.60 GiB | 158.76 s | 123.26 s | 0.032 s |
+| chr21 | 347.91 s | 10.76 GiB | 93.87 s | 71.09 s | 0.035 s |
+| chr22 | 479.42 s | 11.60 GiB | 158.71 s | 123.07 s | 0.031 s |
 
 Local search loaded 603.0M rows on chr21 and 920.1M rows on chr22 across 23
-breakpoint searches per chromosome. Precompute phase instrumentation has been
-added so the next remote profile can separate partition loading,
-canonicalization, row filtering, normalization, and aggregation. The next
-local-search optimization should use those counters to reduce precompute row
-volume before optimizing `_search_array()`, adding JIT, or parallelizing more
-aggressively. See `notes/local-search-memory-speed-handoff.md` for the detailed
-handoff.
+breakpoint searches per chromosome. Precompute phase instrumentation showed
+that append/recanonicalization dominates the remaining cost:
+
+| Chrom | Append | Canonicalize | Horizontal | Normalize |
+|---|---:|---:|---:|---:|
+| chr21 | 30.27 s | 18.89 s | 11.84 s | 7.19 s |
+| chr22 | 62.47 s | 34.47 s | 13.54 s | 8.16 s |
+
+The next local-search optimization therefore caches canonical partitions within
+single-worker partition groups and uses segment-scoped active row slices instead
+of repeatedly rebuilding one full active array. Continue deferring
+`_search_array()` optimization and JIT until append/canonicalize improvements
+are remotely validated. See `notes/local-search-memory-speed-handoff.md` for
+the detailed handoff.
 
 ### Lower memory-risk candidates
 

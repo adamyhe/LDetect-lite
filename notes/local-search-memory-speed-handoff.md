@@ -199,6 +199,40 @@ Memory risk status:
 - Low. The change records scalar counters/timers only and does not retain
   additional row arrays.
 
+#### Cache Canonical Partitions and Slice Active Rows by Segment
+
+**Affected code:** `src/ldetect2/local_search.py`,
+`src/ldetect2/_util/covariance_array.py`, `src/ldetect2/pipeline.py`
+
+Implemented the next append/canonicalize reduction pass for the normal float,
+single-worker grouped path.
+
+Key changes:
+
+- `LocalSearchPartition` now carries sorted unique `loci` plus
+  `source_row_count`.
+- Grouped local search canonicalizes each loaded covariance partition once per
+  partition group and passes those canonical partitions into each breakpoint
+  search.
+- Array precompute no longer rebuilds and recanonicalizes one full active row
+  array after every partition append. It maintains active canonical partitions,
+  builds active loci from partition-level `loci`, and canonicalizes only the
+  current segment row slice.
+- Active diagonals are built from partition-level diagonal arrays with the same
+  partition-order first-wins semantics as the legacy path.
+
+Expected benefit:
+
+- Lower per-breakpoint `canonicalize_seconds` because raw partitions are
+  canonicalized once per group instead of once per breakpoint.
+- Lower `append_seconds` because the active full-row array is not repeatedly
+  concatenated, sorted, and deduplicated.
+
+Memory risk status:
+
+- Low to moderate. The implementation uses bounded segment row temporaries
+  instead of chromosome-wide caches or full active-array recanonicalization.
+
 ### Completed Exactness Coverage
 
 **Affected code:** `tests/test_local_search.py`,
@@ -212,7 +246,8 @@ Added/strengthened tests for:
 - exact selected breakpoint matching against Decimal local search;
 - exact `N_zero` matching against Decimal local search;
 - precompute parity for `loci`, `sum_vert`, and `sum_horiz` against the
-  Decimal legacy path on a multi-partition fixture.
+  Decimal legacy path on multi-partition fixtures, including cross-partition
+  duplicate pairs.
 
 Validation run after implementation:
 
@@ -222,7 +257,7 @@ uv run ruff check src/ldetect2 tests
 git diff --check
 ```
 
-Result: all checks passed (`154 passed`).
+Result: all checks passed (`160 passed` after the append/canonicalize pass).
 
 ## Profiling Findings: EUR chr21/chr22
 
@@ -239,59 +274,61 @@ number of covariance rows loaded and aggregated per breakpoint.
 
 | Chrom | Wall time | Max RSS | Local search | LS % wall | Precompute | Search |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| chr21 | 348.56 s | 10.79 GiB | 93.19 s | 26.7% | 70.58 s | 0.034 s |
-| chr22 | 481.50 s | 11.60 GiB | 158.76 s | 33.0% | 123.26 s | 0.032 s |
+| chr21 | 347.91 s | 10.76 GiB | 93.87 s | 27.0% | 71.09 s | 0.035 s |
+| chr22 | 479.42 s | 11.60 GiB | 158.71 s | 33.1% | 123.07 s | 0.031 s |
 
 Rows loaded and precompute time scale closely:
 
 - chr21 loaded 603.0M rows across 23 breakpoint searches.
 - chr22 loaded 920.1M rows across 23 breakpoint searches.
-- observed precompute throughput was roughly 7.5-8.5M rows/sec.
+- chr21 filtered 603.0M loaded rows to 327.3M candidate rows and 181.9M
+  eligible rows.
+- chr22 filtered 920.1M loaded rows to 375.9M candidate rows and 205.1M
+  eligible rows.
+
+Phase timing identified active-array append/recanonicalization as the dominant
+remaining cost:
+
+| Chrom | Append | Canonicalize | Horizontal | Normalize |
+| --- | ---: | ---: | ---: | ---: |
+| chr21 | 30.27 s (42.6%) | 18.89 s (26.6%) | 11.84 s (16.6%) | 7.19 s (10.1%) |
+| chr22 | 62.47 s (50.8%) | 34.47 s (28.0%) | 13.54 s (11.0%) | 8.16 s (6.6%) |
 
 Worst breakpoint windows in the chr21/chr22 profile:
 
-| Chrom | Index | Rows | Partitions | Precompute |
-| --- | ---: | ---: | ---: | ---: |
-| chr22 | 15 | 134.4M | 9 | 22.414 s |
-| chr22 | 16 | 139.9M | 10 | 19.749 s |
-| chr22 | 14 | 108.4M | 11 | 15.402 s |
-| chr22 | 9 | 76.2M | 11 | 10.817 s |
-| chr21 | 10 | 58.0M | 16 | 7.753 s |
+| Chrom | Index | Rows | Candidate | Eligible | Partitions | Precompute |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| chr22 | 15 | 134.4M | 39.3M | 30.3M | 9 | 22.592 s |
+| chr22 | 16 | 139.9M | 29.5M | 11.3M | 10 | 19.772 s |
+| chr22 | 14 | 108.4M | 20.9M | 7.4M | 11 | 15.311 s |
+| chr22 | 9 | 76.2M | 32.4M | 18.2M | 11 | 10.700 s |
+| chr21 | 10 | 58.0M | 29.9M | 18.6M | 16 | 7.747 s |
 
 Implications:
 
 - Do not prioritize `_search_array()` candidate scoring. It is effectively
   free at this scale.
-- Do not add JIT yet; first add finer instrumentation inside precompute to
-  identify whether time is in `.npz` inflation, canonicalization, diagonal
-  lookup, `r²` normalization, vertical aggregation, or horizontal aggregation.
-- The highest leverage next changes should reduce rows loaded per window or
-  repeated row processing.
-- Dense accumulators and horizontal grouped reductions may still help, but they
-  are second-order until row-volume/precompute substeps are measured.
+- Do not add JIT yet.
+- The highest leverage changes are reducing repeated active-row append and
+  canonicalization work.
+- Horizontal aggregation is the next numeric target after append/canonicalize
+  improvements are remotely validated.
 
 ## Non-Storage To-Dos
 
-### 1. Row-Volume Reduction Before Numeric Micro-Optimization
+### 1. Remote Validation of Append/Canonicalize Reduction
 
-Use the precompute instrumentation to reduce loaded/processed row counts before
-optimizing candidate scoring.
-
-Candidate approaches:
-
-- narrow partition loads by local-search window bounds as early as possible;
-- avoid re-canonicalizing rows that are already canonical inside a partition
-  group;
-- add lightweight per-partition row-range metadata in memory for the current
-  group so each breakpoint reads only relevant `lo` ranges;
-- avoid retaining chromosome-wide covariance caches.
+Validate the canonical partition cache and segment-slice precompute path on
+remote chr21/chr22 before pursuing deeper numeric changes.
 
 Acceptance criteria:
 
 - final `fourier_ls` BED remains byte-identical;
 - max RSS does not increase;
-- rows processed per breakpoint decreases on chr21/chr22 or chr10/chr11 remote
-  profiles.
+- `canonicalize_seconds` drops substantially because group partitions are
+  canonicalized once;
+- `append_seconds` drops substantially because full active arrays are not
+  repeatedly recanonicalized.
 
 ### 2. Representative chr10/chr11 Validation
 

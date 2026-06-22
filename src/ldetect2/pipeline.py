@@ -18,6 +18,7 @@ from ldetect2._util.covariance_array import (
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
     load_covariance_partitions,
     load_metric_covariance,
+    local_search_partition,
     metric_from_arrays,
 )
 from ldetect2._util.logging import log_msg
@@ -360,6 +361,7 @@ def _local_search_worker(
     store: CovarianceStore,
     use_decimal: bool,
     covariance_cache: ChromosomeCovariance | None = None,
+    local_search_partitions=None,
     subset_name: str = "local_search",
 ) -> tuple[int, dict | None]:
     """Run one breakpoint refinement and emit debug timing/memory diagnostics.
@@ -385,6 +387,7 @@ def _local_search_worker(
             store,
             use_decimal=use_decimal,
             covariance_cache=covariance_cache,
+            local_search_partitions=local_search_partitions,
         )
         init_start = time.perf_counter()
         ls.init_search()
@@ -478,8 +481,8 @@ def _run_local_search(
                 total_n,
                 store,
                 use_decimal,
-                covariance_cache,
-                subset_name,
+                covariance_cache=covariance_cache,
+                subset_name=subset_name,
             )
     elif workers == 1:
         if use_decimal:
@@ -501,10 +504,27 @@ def _run_local_search(
                 chr_name, tasks, breakpoint_loci, store
             )
             for partition_bounds, group in grouped_tasks:
+                group_load_start = time.perf_counter()
                 partition_arrays = load_covariance_partitions(
                     chr_name,
                     store,
                     list(partition_bounds),
+                )
+                group_load_seconds = time.perf_counter() - group_load_start
+                group_canonical_start = time.perf_counter()
+                group_local_partitions = tuple(
+                    local_search_partition(partition) for partition in partition_arrays
+                )
+                group_canonical_seconds = time.perf_counter() - group_canonical_start
+                group_row_count = sum(
+                    partition.i_pos.size for partition in partition_arrays
+                )
+                log_msg(
+                    f"Local search {subset_name} group loaded: "
+                    f"breakpoints={len(group)} partitions={len(partition_bounds)} "
+                    f"rows={group_row_count} "
+                    f"load_seconds={group_load_seconds:.3f} "
+                    f"canonicalize_seconds={group_canonical_seconds:.3f}"
                 )
                 group_cache = ChromosomeCovariance(
                     loci=np.array([], dtype=np.int64),
@@ -525,8 +545,9 @@ def _run_local_search(
                         total_n,
                         store,
                         use_decimal,
-                        group_cache,
-                        subset_name,
+                        covariance_cache=group_cache,
+                        local_search_partitions=group_local_partitions,
+                        subset_name=subset_name,
                     )
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
