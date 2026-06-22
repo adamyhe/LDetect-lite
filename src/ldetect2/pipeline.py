@@ -5,6 +5,8 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -23,6 +25,8 @@ from ldetect2.find_minima import custom_binary_search_with_trackback
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
 from ldetect2.local_search import LocalSearch
 from ldetect2.metric import Metric
+
+_VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -44,17 +48,18 @@ def find_breakpoints(
     use_decimal: bool = False,
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
+    subsets: set[str] | None = None,
 ) -> None:
-    """Run the full minima-detection pipeline and write breakpoints to a JSON file.
+    """Run minima detection and write selected breakpoint subsets to JSON.
 
     Pipeline stages:
     1. Read the correlation-sum vector.
     2. Binary-search for the Hanning filter width that yields the target number
        of breakpoints.
     3. Apply the filter and extract minima positions.
-    4. Compute the global LD metric for Fourier and uniform breakpoints.
-    5. Run local search on both sets.
-    6. Write results to *output_path* as JSON.
+    4. Compute the requested raw Fourier/uniform metrics.
+    5. Run requested local-search refinements.
+    6. Write computed subsets and explicit skip metadata to *output_path*.
 
     Args:
         input_path: Gzipped vector file (position \\t corr_sum).
@@ -76,7 +81,15 @@ def find_breakpoints(
             *n_snps_bw_bpoints* is ignored.
         covariance_cache: Optional in-memory chromosome covariance cache reused
             for normal float metrics.
+        subsets: Optional breakpoint subsets to compute and write.  ``None``
+            preserves the historical behavior and writes all four subsets.
     """
+    requested_subsets, explicit_subsets = _normalise_subsets(subsets)
+    needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
+    needs_uniform = bool(requested_subsets & {"uniform", "uniform_ls"})
+    needs_fourier_ls = "fourier_ls" in requested_subsets
+    needs_uniform_ls = "uniform_ls" in requested_subsets
+
     snp_first, snp_last = first_last(chr_name, store, snp_first, snp_last)
 
     # 1. Read vector
@@ -125,51 +138,69 @@ def find_breakpoints(
         else:
             log_msg("Using cached covariance arrays for metrics")
 
-    # 5a. Metric for Fourier breakpoints
-    log_msg("Computing Fourier metric")
-    fourier_metric = _apply_metric(
-        chr_name, snp_first, snp_last, store, fourier_loci, use_decimal, metric_cov
-    )
-    _log_metric(fourier_metric)
+    fourier_metric = None
+    if needs_fourier_metric:
+        log_msg("Computing Fourier metric")
+        fourier_metric = _apply_metric(
+            chr_name, snp_first, snp_last, store, fourier_loci, use_decimal, metric_cov
+        )
+        _log_metric(fourier_metric)
 
-    # 5b. Uniform breakpoints + metric
-    log_msg("Computing uniform breakpoints")
-    step = int(len(raw_x) / (len(fourier_loci) + 1))
-    uniform_loci = [raw_x[i] for i in range(step, len(raw_x) - step + 1, step)]
-    uniform_metric = _apply_metric(
-        chr_name, snp_first, snp_last, store, uniform_loci, use_decimal, metric_cov
-    )
-    _log_metric(uniform_metric)
+    uniform_loci = None
+    uniform_metric = None
+    if needs_uniform:
+        log_msg("Computing uniform breakpoints")
+        step = int(len(raw_x) / (len(fourier_loci) + 1))
+        uniform_loci = [raw_x[i] for i in range(step, len(raw_x) - step + 1, step)]
+        log_msg("Computing uniform metric")
+        uniform_metric = _apply_metric(
+            chr_name, snp_first, snp_last, store, uniform_loci, use_decimal, metric_cov
+        )
+        _log_metric(uniform_metric)
     if covariance_cache is None:
         metric_cov = None
 
     # 6. Local search on Fourier
-    log_msg("Running local search on Fourier breakpoints")
-    fourier_ls = _run_local_search(
-        chr_name,
-        fourier_loci,
-        snp_first,
-        snp_last,
-        store,
-        fourier_metric,
-        workers=workers,
-        use_decimal=use_decimal,
-        covariance_cache=covariance_cache,
-    )
+    fourier_ls = None
+    if needs_fourier_ls:
+        if fourier_metric is None:
+            raise RuntimeError("Fourier local search requires the Fourier metric")
+        log_msg("Running local search on Fourier breakpoints")
+        fourier_ls = _run_local_search(
+            chr_name,
+            fourier_loci,
+            snp_first,
+            snp_last,
+            store,
+            fourier_metric,
+            workers=workers,
+            use_decimal=use_decimal,
+            covariance_cache=covariance_cache,
+            subset_name="fourier_ls",
+        )
     # 7. Local search on uniform
-    log_msg("Running local search on uniform breakpoints")
-    uniform_ls = _run_local_search(
-        chr_name,
-        uniform_loci,
-        snp_first,
-        snp_last,
-        store,
-        uniform_metric,
-        workers=workers,
-        use_decimal=use_decimal,
-        covariance_cache=covariance_cache,
-    )
-    if not use_decimal and metric_cov is None:
+    uniform_ls = None
+    if needs_uniform_ls:
+        if uniform_loci is None or uniform_metric is None:
+            raise RuntimeError("Uniform local search requires uniform breakpoints")
+        log_msg("Running local search on uniform breakpoints")
+        uniform_ls = _run_local_search(
+            chr_name,
+            uniform_loci,
+            snp_first,
+            snp_last,
+            store,
+            uniform_metric,
+            workers=workers,
+            use_decimal=use_decimal,
+            covariance_cache=covariance_cache,
+            subset_name="uniform_ls",
+        )
+    if (
+        not use_decimal
+        and metric_cov is None
+        and (needs_fourier_ls or needs_uniform_ls)
+    ):
         log_msg("Reloading metric covariance arrays for final metric reuse")
         metric_cov = load_metric_covariance(
             chr_name,
@@ -178,46 +209,66 @@ def find_breakpoints(
             snp_first,
             snp_last,
         )
-    fourier_ls_metric = _apply_metric(
-        chr_name,
-        snp_first,
-        snp_last,
-        store,
-        fourier_ls["loci"],
-        use_decimal,
-        metric_cov,
-    )
-    uniform_ls_metric = _apply_metric(
-        chr_name,
-        snp_first,
-        snp_last,
-        store,
-        uniform_ls["loci"],
-        use_decimal,
-        metric_cov,
-    )
+    fourier_ls_metric = None
+    if fourier_ls is not None:
+        fourier_ls_metric = _apply_metric(
+            chr_name,
+            snp_first,
+            snp_last,
+            store,
+            fourier_ls["loci"],
+            use_decimal,
+            metric_cov,
+        )
+    uniform_ls_metric = None
+    if uniform_ls is not None:
+        uniform_ls_metric = _apply_metric(
+            chr_name,
+            snp_first,
+            snp_last,
+            store,
+            uniform_ls["loci"],
+            use_decimal,
+            metric_cov,
+        )
 
     # 8. Serialise to JSON
     result = {
         "n_bpoints": n_bpoints,
         "found_width": found_width,
-        "fourier": {
+        "computed_subsets": sorted(requested_subsets),
+        "skipped_subsets": sorted(_VALID_SUBSETS - requested_subsets)
+        if explicit_subsets
+        else [],
+    }
+    if "fourier" in requested_subsets:
+        if fourier_metric is None:
+            raise RuntimeError("Fourier output requires the Fourier metric")
+        result["fourier"] = {
             "loci": fourier_loci,
             "metric": _metric_to_json(fourier_metric),
-        },
-        "fourier_ls": {
+        }
+    if "fourier_ls" in requested_subsets:
+        if fourier_ls is None or fourier_ls_metric is None:
+            raise RuntimeError("Fourier local-search output was not computed")
+        result["fourier_ls"] = {
             "loci": fourier_ls["loci"],
             "metric": _metric_to_json(fourier_ls_metric),
-        },
-        "uniform": {
+        }
+    if "uniform" in requested_subsets:
+        if uniform_loci is None or uniform_metric is None:
+            raise RuntimeError("Uniform output requires the uniform metric")
+        result["uniform"] = {
             "loci": uniform_loci,
             "metric": _metric_to_json(uniform_metric),
-        },
-        "uniform_ls": {
+        }
+    if "uniform_ls" in requested_subsets:
+        if uniform_ls is None or uniform_ls_metric is None:
+            raise RuntimeError("Uniform local-search output was not computed")
+        result["uniform_ls"] = {
             "loci": uniform_ls["loci"],
             "metric": _metric_to_json(uniform_ls_metric),
-        },
-    }
+        }
 
     output_path.write_text(json.dumps(result, indent=2))
     log_msg(f"Breakpoints written to {output_path}")
@@ -243,6 +294,28 @@ def _read_vector(path: Path) -> tuple[list[float], list[int]]:
             positions.append(int(row[0]))
             vals.append(float(row[1]))
     return vals, positions
+
+
+def _normalise_subsets(subsets: set[str] | None) -> tuple[set[str], bool]:
+    """Validate requested subsets and add dependencies for local-search outputs.
+
+    Returns the expanded subset set plus a flag indicating whether the caller
+    explicitly requested a subset selection.  ``None`` means historical full
+    output and is not treated as an explicit selection.
+    """
+    if subsets is None:
+        return set(_VALID_SUBSETS), False
+    invalid = set(subsets) - _VALID_SUBSETS
+    if invalid:
+        raise ValueError(f"Invalid breakpoint subset(s): {', '.join(sorted(invalid))}")
+    if not subsets:
+        raise ValueError("At least one breakpoint subset must be requested")
+    requested = set(subsets)
+    if "fourier_ls" in requested:
+        requested.add("fourier")
+    if "uniform_ls" in requested:
+        requested.add("uniform")
+    return requested, True
 
 
 def _apply_metric(
@@ -286,11 +359,20 @@ def _local_search_worker(
     store: CovarianceStore,
     use_decimal: bool,
     covariance_cache: ChromosomeCovariance | None = None,
+    subset_name: str = "local_search",
 ) -> tuple[int, dict | None]:
-    """Run a single LocalSearch in a worker process (module-level for pickling)."""
-    from ldetect2._util.logging import log_msg
+    """Run one breakpoint refinement and emit debug timing/memory diagnostics.
 
+    This function is module-level so it can be submitted to
+    :class:`ProcessPoolExecutor`.  It keeps the previous fail-soft behavior:
+    errors are logged and the original breakpoint is returned unchanged.
+    """
+    from ldetect2._util.logging import log_debug, log_msg
+
+    init_seconds = 0.0
+    search_seconds = 0.0
     try:
+        start_time = time.perf_counter()
         ls = LocalSearch(
             chr_name,
             start,
@@ -303,10 +385,31 @@ def _local_search_worker(
             use_decimal=use_decimal,
             covariance_cache=covariance_cache,
         )
+        init_start = time.perf_counter()
+        ls.init_search()
+        init_seconds = time.perf_counter() - init_start
+        search_start = time.perf_counter()
         bp, m = ls.search()
+        search_seconds = time.perf_counter() - search_start
+        total_seconds = time.perf_counter() - start_time
+        row_count = getattr(ls, "loaded_row_count", None)
+        partition_count = getattr(ls, "loaded_partition_count", len(ls.partitions))
+        rss = _max_rss_mib()
+        rss_text = f" max_rss_mib={rss:.1f}" if rss is not None else ""
+        log_debug(
+            f"{subset_name} breakpoint idx={idx} start={start} stop={stop} "
+            f"partitions={partition_count} rows={row_count} "
+            f"precompute_seconds={init_seconds:.3f} "
+            f"search_seconds={search_seconds:.3f} "
+            f"total_seconds={total_seconds:.3f}{rss_text}"
+        )
         return (bp if bp is not None else breakpoint_loci[idx]), m
     except Exception as exc:
-        log_msg(f"LocalSearch error at index {idx}: {exc}; keeping original")
+        log_msg(
+            f"LocalSearch error at index {idx} after "
+            f"precompute_seconds={init_seconds:.3f} "
+            f"search_seconds={search_seconds:.3f}: {exc}; keeping original"
+        )
         return breakpoint_loci[idx], None
 
 
@@ -320,7 +423,16 @@ def _run_local_search(
     workers: int = 1,
     use_decimal: bool = False,
     covariance_cache: ChromosomeCovariance | None = None,
+    subset_name: str = "local_search",
 ) -> dict:
+    """Refine all breakpoints for one subset and log aggregate elapsed time.
+
+    Each breakpoint search is independent.  The function runs them sequentially
+    or through a process pool depending on *workers*, except that an in-memory
+    covariance cache is intentionally kept single-process to avoid copying a
+    large cache into worker processes.
+    """
+    run_start = time.perf_counter()
     total_sum = metric_out["sum"]
     total_n = metric_out["N_zero"]
 
@@ -362,6 +474,7 @@ def _run_local_search(
                 store,
                 use_decimal,
                 covariance_cache,
+                subset_name,
             )
     elif workers == 1:
         for idx, start, stop in tasks:
@@ -375,6 +488,7 @@ def _run_local_search(
                 total_n,
                 store,
                 use_decimal,
+                subset_name=subset_name,
             )
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -390,6 +504,7 @@ def _run_local_search(
                     total_n,
                     store,
                     use_decimal,
+                    subset_name=subset_name,
                 ): idx
                 for idx, start, stop in tasks
             }
@@ -400,7 +515,31 @@ def _run_local_search(
     new_loci = [results[i][0] for i in range(len(breakpoint_loci))]
     new_metrics = [results[i][1] for i in range(len(breakpoint_loci))]
 
+    elapsed = time.perf_counter() - run_start
+    log_msg(
+        f"Local search {subset_name} done: breakpoints={len(breakpoint_loci)} "
+        f"elapsed_seconds={elapsed:.3f}"
+    )
+
     return {"loci": new_loci, "metrics": new_metrics}
+
+
+def _max_rss_mib() -> float | None:
+    """Return current process maximum RSS in MiB when the platform exposes it."""
+    try:
+        import resource
+    except Exception:
+        return None
+
+    try:
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except Exception:
+        return None
+    if rss <= 0:
+        return None
+    if sys.platform == "darwin":
+        return rss / (1024.0 * 1024.0)
+    return rss / 1024.0
 
 
 def _metric_to_json(metric_out: dict) -> dict:

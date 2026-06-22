@@ -9,6 +9,7 @@ import numpy as np
 from ldetect2._cli.cmd_run import (
     _COMPACT_COVARIANCE_KEYS,
     _FULL_COVARIANCE_KEYS,
+    _breakpoint_subsets_for_run,
     _is_valid_covariance_partition,
 )
 
@@ -57,3 +58,11 @@ def test_invalid_covariance_partition_missing_shrink_ld(tmp_path: Path) -> None:
     )
 
     assert not _is_valid_covariance_partition(path, _COMPACT_COVARIANCE_KEYS)
+
+
+def test_run_subset_requests_only_final_breakpoint_subset() -> None:
+    assert _breakpoint_subsets_for_run("fourier_ls", False) == {"fourier_ls"}
+
+
+def test_run_all_breakpoint_subsets_preserves_full_output() -> None:
+    assert _breakpoint_subsets_for_run("fourier_ls", True) is None

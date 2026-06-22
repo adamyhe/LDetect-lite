@@ -48,7 +48,8 @@ Options:
 - `--covariance-cache {compact,full}` — partition cache schema for `ldetect2 run` (default: `compact`). Compact caches write only `i_pos`, `j_pos`, and `shrink_ld`, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
-- `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which of the four breakpoint sets to write to the BED file (default: `fourier_ls`; see Step 4 below)
+- `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which breakpoint set to compute and write to the BED file (default: `fourier_ls`; see Step 4 below)
+- `--all-breakpoint-subsets` — compute all four breakpoint sets in `breakpoints-{chrom}.json`; by default `run` computes only the requested `--subset` and its dependencies to avoid unused local-search work
 - `--workers N` — parallel workers for covariance calculation (default: 1); set to the number of available cores to speed up step 2 significantly
 - `--local-search-workers N` — parallel workers for local search (default: 1). Higher values can multiply RAM use because each worker loads its own covariance window.
 
@@ -148,6 +149,7 @@ Arguments:
 - `--init-search-loc` — initial filter width for the binary search (default: 1000)
 - `--workers N` — parallel workers for the local search phase
 - `--high-precision` — use 50-digit Decimal arithmetic throughout (default: only in the final metric comparison; slower)
+- `--subset {fourier,fourier_ls,uniform,uniform_ls}` — compute only the requested breakpoint subset; repeat to request multiple subsets. By default, standalone `find-minima` keeps the historical behavior and writes all subsets.
 
 ---
 

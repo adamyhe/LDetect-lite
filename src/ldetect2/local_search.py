@@ -95,6 +95,115 @@ def _add_array_locus_values(
         sum_vert_by_locus.setdefault(key, 0.0)
 
 
+def _add_array_segment_values(
+    segment_loci: np.ndarray,
+    active_lo: np.ndarray,
+    active_hi: np.ndarray,
+    active_shrink: np.ndarray,
+    snp_first: int,
+    snp_last: int,
+    snp_top: int,
+    include_snp_first: bool,
+    sum_vert_by_locus: dict[int, float],
+    sum_horiz_by_locus: dict[int, float],
+    chunk_size: int = 2_000_000,
+) -> None:
+    """Aggregate local-search vertical/horizontal r² sums for one locus segment.
+
+    This is the array-backed replacement for calling
+    :func:`_add_array_locus_values` once per locus.  It preserves the same
+    effective row eligibility rules, but scans the active covariance rows once
+    per segment and accumulates per-locus sums in bounded chunks.
+    """
+    if segment_loci.size == 0:
+        return
+
+    for locus in segment_loci:
+        locus_key = int(locus)
+        sum_vert_by_locus.setdefault(locus_key, 0.0)
+        sum_horiz_by_locus.setdefault(locus_key, 0.0)
+
+    diag_mask = active_lo == active_hi
+    if not np.any(diag_mask):
+        return
+
+    diag_pos = active_lo[diag_mask]
+    diag_val = active_shrink[diag_mask]
+    order = np.argsort(diag_pos, kind="stable")
+    diag_pos = diag_pos[order]
+    diag_val = diag_val[order]
+    diag_pos, unique_idx = np.unique(diag_pos, return_index=True)
+    diag_val = diag_val[unique_idx]
+    if diag_pos.size == 0:
+        return
+
+    lo_min = int(segment_loci[0])
+    lo_max = int(segment_loci[-1])
+    eligible = (
+        (active_lo >= lo_min)
+        & (active_lo <= lo_max)
+        & (active_lo <= snp_last)
+        & (active_hi <= snp_top)
+    )
+    if include_snp_first:
+        eligible &= active_lo >= snp_first
+    else:
+        eligible &= active_lo > snp_first
+    eligible_idx = np.flatnonzero(eligible)
+    if eligible_idx.size == 0:
+        return
+
+    for chunk_start in range(0, eligible_idx.size, chunk_size):
+        chunk = eligible_idx[chunk_start : chunk_start + chunk_size]
+        row_lo = active_lo[chunk]
+        row_hi = active_hi[chunk]
+        row_shrink = active_shrink[chunk]
+
+        diag_lo_idx = np.searchsorted(diag_pos, row_lo)
+        diag_hi_idx = np.searchsorted(diag_pos, row_hi)
+        has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
+        safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
+        safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
+        has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (
+            diag_pos[safe_hi_idx] == row_hi
+        )
+        if not np.any(has_diag):
+            continue
+
+        row_lo = row_lo[has_diag]
+        row_hi = row_hi[has_diag]
+        row_shrink = row_shrink[has_diag]
+        diag_lo = diag_val[diag_lo_idx[has_diag]]
+        diag_hi = diag_val[diag_hi_idx[has_diag]]
+        positive = (diag_lo > 0.0) & (diag_hi > 0.0)
+        if not np.any(positive):
+            continue
+
+        row_lo = row_lo[positive]
+        row_hi = row_hi[positive]
+        r2 = (
+            row_shrink[positive]
+            * row_shrink[positive]
+            / (diag_lo[positive] * diag_hi[positive])
+        )
+
+        vert_loci, vert_inverse = np.unique(row_lo, return_inverse=True)
+        vert_sums = np.bincount(vert_inverse, weights=r2)
+        for locus, value in zip(vert_loci, vert_sums):
+            sum_vert_by_locus[int(locus)] = (
+                sum_vert_by_locus.get(int(locus), 0.0) + float(value)
+            )
+
+        horiz_loci, horiz_inverse = np.unique(row_hi, return_inverse=True)
+        horiz_sums = np.bincount(horiz_inverse, weights=r2)
+        for locus, value in zip(horiz_loci, horiz_sums):
+            locus_key = int(locus)
+            sum_horiz_by_locus[locus_key] = (
+                sum_horiz_by_locus.get(locus_key, 0.0) + float(value)
+            )
+            sum_vert_by_locus.setdefault(locus_key, 0.0)
+
+
 def _diag_lookup(
     lo: np.ndarray, hi: np.ndarray, shrink: np.ndarray
 ) -> dict[int, float]:
@@ -163,6 +272,8 @@ class LocalSearch:
         self._array_loci: np.ndarray | None = None
         self._array_sum_vert: np.ndarray | None = None
         self._array_sum_horiz: np.ndarray | None = None
+        self.loaded_partition_count: int | None = None
+        self.loaded_row_count: int | None = None
 
         self.dynamic_delete = True
         self.init_complete = False
@@ -367,6 +478,10 @@ class LocalSearch:
         """Precompute local-search deltas with exact legacy locus semantics."""
         log_debug("Start local search init (array)")
         partitions = self._local_covariance_partitions()
+        self.loaded_partition_count = len(partitions)
+        self.loaded_row_count = int(
+            sum(partition.i_pos.size for partition in partitions)
+        )
         loci, sum_vert, sum_horiz = self._precompute_array_from_partitions(partitions)
 
         self._array_loci = loci
@@ -482,30 +597,27 @@ class LocalSearch:
                     end_locus_index = 0
                     end_locus = int(active_loci[0])
 
-            diag_lookup = _diag_lookup(active_lo, active_hi, active_shrink)
-            while curr_locus <= end_locus:
-                precomputed_loci.append(curr_locus)
+            segment_end_idx = int(
+                np.searchsorted(active_loci, end_locus, side="right")
+            )
+            if curr_locus_index < segment_end_idx:
+                segment_loci = active_loci[curr_locus_index:segment_end_idx]
+                precomputed_loci.extend(int(locus) for locus in segment_loci)
+                _add_array_segment_values(
+                    segment_loci,
+                    active_lo,
+                    active_hi,
+                    active_shrink,
+                    self.snp_first,
+                    self.snp_last,
+                    self.snp_top,
+                    self.initial_breakpoint_index == 0,
+                    sum_vert_by_locus,
+                    sum_horiz_by_locus,
+                )
 
-                in_range = (
-                    curr_locus > self.snp_first or self.initial_breakpoint_index == 0
-                ) and curr_locus <= self.snp_last
-                if in_range:
-                    _add_array_locus_values(
-                        curr_locus,
-                        active_lo,
-                        active_hi,
-                        active_shrink,
-                        diag_lookup,
-                        self.snp_top,
-                        sum_vert_by_locus,
-                        sum_horiz_by_locus,
-                    )
-                else:
-                    sum_vert_by_locus.setdefault(curr_locus, 0.0)
-                    sum_horiz_by_locus.setdefault(curr_locus, 0.0)
-
-                if curr_locus_index + 1 < active_loci.size:
-                    curr_locus_index += 1
+                if segment_end_idx < active_loci.size:
+                    curr_locus_index = segment_end_idx
                     curr_locus = int(active_loci[curr_locus_index])
                 else:
                     log_debug("curr_locus_index out of bounds")

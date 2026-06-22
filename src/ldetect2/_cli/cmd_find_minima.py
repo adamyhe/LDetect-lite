@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+_VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     p = subparsers.add_parser(
@@ -96,6 +98,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         metavar="N",
         help="Direct target breakpoint count (overrides --n-snps-bw-bpoints).",
     )
+    p.add_argument(
+        "--subset",
+        choices=_VALID_SUBSETS,
+        action="append",
+        default=None,
+        metavar="SUBSET",
+        help=(
+            "Breakpoint subset to compute. Repeat to compute multiple subsets. "
+            "By default, all subsets are computed for backward compatibility."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -118,5 +131,6 @@ def _run(args: argparse.Namespace) -> int:
         workers=args.workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
+        subsets=set(args.subset) if args.subset else None,
     )
     return 0

@@ -101,6 +101,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         help="Breakpoint set for final BED output (default: fourier_ls).",
     )
     p.add_argument(
+        "--all-breakpoint-subsets",
+        action="store_true",
+        help=(
+            "Compute all four breakpoint subsets in the JSON output. By default, "
+            "only the subset requested by --subset and its dependencies are "
+            "computed to avoid unused local-search work."
+        ),
+    )
+    p.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -280,6 +289,7 @@ def _run(args: argparse.Namespace) -> int:
         workers=args.local_search_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
+        subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
     )
 
     # ------------------------------------------------------------------ #
@@ -288,6 +298,14 @@ def _run(args: argparse.Namespace) -> int:
     bed_path = output_dir / f"{chrom}-ld-blocks.bed"
     log_msg(f"Step 5: Extracting {args.subset} breakpoints to {bed_path}")
     data = json.loads(breakpoints_path.read_text())
+    if args.subset not in data:
+        computed = ", ".join(data.get("computed_subsets", [])) or "(none)"
+        print(
+            f"Error: requested subset {args.subset!r} was not computed. "
+            f"Computed subset(s): {computed}",
+            file=sys.stderr,
+        )
+        return 1
     loci: list[int] = data[args.subset]["loci"]
 
     write_bed(
@@ -305,6 +323,18 @@ def _count_individuals(path: Path) -> int:
             if line.strip():
                 count += 1
     return count
+
+
+def _breakpoint_subsets_for_run(
+    subset: str, all_breakpoint_subsets: bool
+) -> set[str] | None:
+    """Return the breakpoint subset request passed from ``run`` to the pipeline.
+
+    ``None`` intentionally preserves the full historical JSON output; otherwise
+    ``run`` asks the pipeline to compute only the final BED subset and its
+    dependencies.
+    """
+    return None if all_breakpoint_subsets else {subset}
 
 
 def _is_valid_covariance_partition(
