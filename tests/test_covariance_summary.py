@@ -10,10 +10,11 @@ import numpy as np
 
 from ldetect2._cli.main import main
 from ldetect2._util.covariance_summary import summarize_covariance
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 
 
-def _write_npz_partition(
+def _write_hdf5_partition(
     root: Path,
     name: str,
     start: int,
@@ -22,20 +23,20 @@ def _write_npz_partition(
 ) -> None:
     chrom_dir = root / name
     chrom_dir.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        chrom_dir / f"{name}.{start}.{end}.npz",
+    write_covariance_partition_hdf5(
+        chrom_dir / f"{name}.{start}.{end}.h5",
         i_pos=np.array([row[0] for row in rows], dtype=np.int64),
         j_pos=np.array([row[1] for row in rows], dtype=np.int64),
+        shrink_ld=np.ones(len(rows)),
         i_gpos=np.zeros(len(rows)),
         j_gpos=np.zeros(len(rows)),
         naive_ld=np.ones(len(rows)),
-        shrink_ld=np.ones(len(rows)),
         i_id=np.array([f"snp{row[0]}" for row in rows]),
         j_id=np.array([f"snp{row[1]}" for row in rows]),
     )
 
 
-def _make_npz_store(
+def _make_hdf5_store(
     tmp_path: Path,
     partitions: list[tuple[int, int]],
     rows_by_partition: dict[tuple[int, int], list[tuple[int, int]]],
@@ -46,12 +47,14 @@ def _make_npz_store(
         "\n".join(f"{start} {end}" for start, end in partitions) + "\n"
     )
     for start, end in partitions:
-        _write_npz_partition(root, "chr1", start, end, rows_by_partition[(start, end)])
+        _write_hdf5_partition(
+            root, "chr1", start, end, rows_by_partition[(start, end)]
+        )
     return CovarianceStore(root=root)
 
 
-def test_summarize_covariance_single_npz_partition(tmp_path: Path) -> None:
-    store = _make_npz_store(
+def test_summarize_covariance_single_hdf5_partition(tmp_path: Path) -> None:
+    store = _make_hdf5_store(
         tmp_path,
         [(100, 300)],
         {
@@ -102,7 +105,7 @@ def test_summarize_covariance_uses_overlap_ownership(tmp_path: Path) -> None:
             (500, 500),
         ],
     }
-    store = _make_npz_store(tmp_path, [(100, 400), (200, 500)], rows)
+    store = _make_hdf5_store(tmp_path, [(100, 400), (200, 500)], rows)
 
     parts, total = summarize_covariance("chr1", store)
 
@@ -112,7 +115,7 @@ def test_summarize_covariance_uses_overlap_ownership(tmp_path: Path) -> None:
 
 
 def test_summarize_covariance_respects_snp_range(tmp_path: Path) -> None:
-    store = _make_npz_store(
+    store = _make_hdf5_store(
         tmp_path,
         [(100, 500)],
         {
@@ -161,7 +164,7 @@ def test_summarize_covariance_reads_legacy_gzip_partition(tmp_path: Path) -> Non
 
 
 def test_covariance_summary_cli_writes_tsv(tmp_path: Path) -> None:
-    store = _make_npz_store(
+    store = _make_hdf5_store(
         tmp_path,
         [(100, 300)],
         {(100, 300): [(100, 100), (100, 200), (200, 200), (200, 300)]},
@@ -189,7 +192,7 @@ def test_covariance_summary_cli_writes_tsv(tmp_path: Path) -> None:
 
 
 def test_covariance_summary_cli_writes_json(tmp_path: Path) -> None:
-    store = _make_npz_store(
+    store = _make_hdf5_store(
         tmp_path,
         [(100, 300)],
         {(100, 300): [(100, 100), (100, 200), (200, 200), (200, 300)]},

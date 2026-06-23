@@ -8,19 +8,32 @@ from pathlib import Path
 
 import numpy as np
 
+from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.shrinkage import calc_covariance, partition_chromosome
 
-_FULL_COVARIANCE_KEYS = {
-    "i_pos",
-    "j_pos",
-    "i_gpos",
-    "j_gpos",
-    "naive_ld",
-    "shrink_ld",
-    "i_id",
-    "j_id",
+_FULL_HDF5_DATASETS = {
+    "covariance/lo",
+    "covariance/hi",
+    "covariance/naive_ld",
+    "covariance/shrink_ld",
+    "metadata/i_gpos",
+    "metadata/j_gpos",
+    "metadata/i_id",
+    "metadata/j_id",
+    "index/diag_pos",
+    "index/diag_val",
+    "index/lo_values",
+    "index/lo_offsets",
 }
-_COMPACT_COVARIANCE_KEYS = {"i_pos", "j_pos", "shrink_ld"}
+_COMPACT_HDF5_DATASETS = {
+    "covariance/lo",
+    "covariance/hi",
+    "covariance/shrink_ld",
+    "index/diag_pos",
+    "index/diag_val",
+    "index/lo_values",
+    "index/lo_offsets",
+}
 
 
 def _write_map(path: Path) -> None:
@@ -58,7 +71,7 @@ def test_calc_covariance_skips_population_monomorphic_variant(tmp_path: Path) ->
     individuals_path = tmp_path / "inds.txt"
     _write_individuals(individuals_path)
 
-    out_path = tmp_path / "cov.npz"
+    out_path = tmp_path / "cov.h5"
     calc_covariance(
         vcf_stream=_vcf_stream(),
         genetic_map_path=map_path,
@@ -67,8 +80,9 @@ def test_calc_covariance_skips_population_monomorphic_variant(tmp_path: Path) ->
         cutoff=1e-7,
     )
 
-    cov = np.load(out_path)
-    positions = set(cov["i_pos"]) | set(cov["j_pos"])
+    with open_covariance_reader(out_path, 100, 300) as reader:
+        rows = reader.read_all()
+    positions = set(rows.lo) | set(rows.hi)
 
     assert 100 not in positions
     assert {200, 300}.issubset(positions)
@@ -80,7 +94,7 @@ def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:
     individuals_path = tmp_path / "inds.txt"
     _write_individuals(individuals_path)
 
-    out_path = tmp_path / "full.npz"
+    out_path = tmp_path / "full.h5"
     calc_covariance(
         vcf_stream=_vcf_stream(),
         genetic_map_path=map_path,
@@ -89,8 +103,15 @@ def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:
         cutoff=1e-7,
     )
 
-    with np.load(out_path) as cov:
-        assert set(cov.files) == _FULL_COVARIANCE_KEYS
+    import h5py
+
+    with h5py.File(out_path, "r") as cov:
+        datasets = {
+            path
+            for path in _FULL_HDF5_DATASETS
+            if path in cov
+        }
+        assert datasets == _FULL_HDF5_DATASETS
 
 
 def test_calc_covariance_compact_output_writes_only_compact_schema(
@@ -101,7 +122,7 @@ def test_calc_covariance_compact_output_writes_only_compact_schema(
     individuals_path = tmp_path / "inds.txt"
     _write_individuals(individuals_path)
 
-    out_path = tmp_path / "compact.npz"
+    out_path = tmp_path / "compact.h5"
     calc_covariance(
         vcf_stream=_vcf_stream(),
         genetic_map_path=map_path,
@@ -111,11 +132,19 @@ def test_calc_covariance_compact_output_writes_only_compact_schema(
         compact_output=True,
     )
 
-    with np.load(out_path) as cov:
-        assert set(cov.files) == _COMPACT_COVARIANCE_KEYS
-        assert cov["i_pos"].dtype == np.int32
-        assert cov["j_pos"].dtype == np.int32
-        assert cov["shrink_ld"].dtype == np.float64
+    import h5py
+
+    with h5py.File(out_path, "r") as cov:
+        datasets = {
+            path
+            for path in _COMPACT_HDF5_DATASETS
+            if path in cov
+        }
+        assert datasets == _COMPACT_HDF5_DATASETS
+        assert "metadata/i_id" not in cov
+        assert cov["covariance/lo"].dtype == np.int32
+        assert cov["covariance/hi"].dtype == np.int32
+        assert cov["covariance/shrink_ld"].dtype == np.float64
 
 
 def test_partition_chromosome_clamps_uncut_window_to_last_snp(

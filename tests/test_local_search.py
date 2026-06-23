@@ -12,6 +12,7 @@ from ldetect2._util.covariance_array import (
     load_chromosome_covariance,
     local_search_partition,
 )
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.local_search import LocalSearch
 from ldetect2.metric import Metric
@@ -49,7 +50,17 @@ def _make_store(
                 "j_id": np.array([f"snp{r[1]}" for r in rows]),
             }
         )
-    np.savez_compressed(chrom_dir / f"chr1.{loci[0]}.{loci[-1]}.npz", **output)
+    write_covariance_partition_hdf5(
+        chrom_dir / f"chr1.{loci[0]}.{loci[-1]}.h5",
+        i_pos=output["i_pos"],
+        j_pos=output["j_pos"],
+        shrink_ld=output["shrink_ld"],
+        naive_ld=output.get("naive_ld"),
+        i_gpos=output.get("i_gpos"),
+        j_gpos=output.get("j_gpos"),
+        i_id=output.get("i_id"),
+        j_id=output.get("j_id"),
+    )
     return CovarianceStore(root=root)
 
 
@@ -90,7 +101,17 @@ def _make_partitioned_store(
                     "j_id": np.array([f"snp{r[1]}" for r in rows]),
                 }
             )
-        np.savez_compressed(chrom_dir / f"chr1.{start}.{end}.npz", **output)
+        write_covariance_partition_hdf5(
+            chrom_dir / f"chr1.{start}.{end}.h5",
+            i_pos=output["i_pos"],
+            j_pos=output["j_pos"],
+            shrink_ld=output["shrink_ld"],
+            naive_ld=output.get("naive_ld"),
+            i_gpos=output.get("i_gpos"),
+            j_gpos=output.get("j_gpos"),
+            i_id=output.get("i_id"),
+            j_id=output.get("j_id"),
+        )
     return CovarianceStore(root=root)
 
 
@@ -106,8 +127,8 @@ def _make_custom_partitioned_store(
             f.write(f"{start} {end}\n")
 
     for (start, end), rows in partitions.items():
-        np.savez_compressed(
-            chrom_dir / f"chr1.{start}.{end}.npz",
+        write_covariance_partition_hdf5(
+            chrom_dir / f"chr1.{start}.{end}.h5",
             i_pos=np.array([row[0] for row in rows], dtype=np.int32),
             j_pos=np.array([row[1] for row in rows], dtype=np.int32),
             shrink_ld=np.array([row[2] for row in rows], dtype=np.float64),

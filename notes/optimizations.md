@@ -184,6 +184,86 @@ of repeatedly rebuilding one full active array. Continue deferring
 are remotely validated. See `notes/local-search-memory-speed-handoff.md` for
 the detailed handoff.
 
+### chr10/chr11 memory failure update
+
+New chr10/chr11 remote failures, even with one chromosome at a time on 128 GiB
+nodes, indicate that the memory bottleneck is not only local-search
+precompute. The normal float metric path also materialized whole-chromosome
+normalized pair arrays before local search and reloaded them after local search
+for final scoring.
+
+Implemented follow-up:
+
+- `metric_from_files()` streams metric calculation from covariance partitions;
+- `Metric.calc_metric()` uses the streaming array path by default;
+- normal `find_breakpoints()` no longer eagerly loads/reloads metric covariance
+  arrays unless an explicit caller-supplied covariance cache is provided.
+
+Expected effect:
+
+- lower peak RSS for whole chromosomes, especially chr10/chr11;
+- no change to selected breakpoint loci or BED output;
+- possible runtime penalty from rereading partitions, accepted because the
+  current failure mode is memory exhaustion.
+
+Validation priority:
+
+1. remote chr21/chr22 with byte-identical `fourier_ls` BED output;
+2. remote chr10 and chr11 one at a time;
+3. compare RSS and wall time against the previous materialized metric path.
+
+If chr10/chr11 still fail after the streaming metric path, promote the HDF5
+chunked covariance cache from later storage work to the next major
+implementation phase.
+
+Compatibility decision: existing intermediate `.npz` covariance files do not
+need to remain readable. The HDF5 migration can replace `.npz` as the
+production cache format for both `ldetect2 run` and standalone
+`calc-covariance`.
+
+Implementation outline:
+
+1. Add `h5py` as a normal dependency.
+2. Change covariance partition paths from `.npz` to `.h5`.
+3. Write canonical sorted `(lo, hi, shrink_ld)` datasets plus diagonal and
+   `lo_offsets` indexes during covariance calculation.
+4. Route metric, local search, and matrix-to-vector through one HDF5 chunked
+   reader interface.
+5. Remove production dual-format support; regenerate intermediates instead of
+   reading old `.npz` files.
+6. Validate exact BED/local-search loci on toy and remote chr21/22, then rerun
+   chr11.
+
+Status: baseline implementation is complete locally. HDF5 is now the
+production intermediate covariance format, metric calculation streams HDF5 row
+chunks, and grouped single-worker local search reads segment row ranges from
+HDF5 instead of preloading full partition groups. Remote profiling is still
+needed to choose chunk sizes and confirm chr11 RSS.
+
+### Post-append optimization order
+
+After append and segment row assembly are validated remotely, the next local
+search targets should be chosen from the phase ratios, not guessed. In the
+current chr21/chr22 profile, the likely order is:
+
+1. horizontal aggregation, because `np.unique(row_hi, return_inverse=True)` plus
+   `np.bincount()` is still material and allocation-heavy;
+2. normalization, especially repeated diagonal lookup via `np.searchsorted()`;
+3. group load/canonicalization outside breakpoint rows, using
+   `group_total_seconds` and `local_search_unaccounted_seconds`;
+4. metric recomputation around local search, now routed through streaming
+   metrics and worth timing separately if wall time shifts there;
+5. filter-width search count caching with `{width: minima_count}` only;
+6. matrix-to-vector instrumentation if wall time outside local search remains
+   high.
+
+For each profile, inspect `append_seconds / precompute_seconds`,
+`horizontal_seconds / precompute_seconds`,
+`normalize_seconds / precompute_seconds`, `group_total_seconds`,
+`local_search_unaccounted_seconds`, and wall time outside local search
+(`elapsed_seconds - set_elapsed_seconds`). See the detailed checklist in
+`notes/local-search-memory-speed-handoff.md`.
+
 ### Lower memory-risk candidates
 
 #### Cache filter-width search counts
@@ -283,6 +363,11 @@ Decision: do not unify these caches. Preserving the metric-only path is
 important for low-memory runs. A unified cache would retain data that many
 pipeline stages do not need and would make worker parallelism more dangerous.
 
+Updated decision: normal metric calculation should now prefer streaming from
+files rather than any resident chromosome-wide metric cache. Keep
+`load_metric_covariance()` only for tests, explicit caller-supplied caches, and
+small/debug workflows.
+
 #### Parallelize cached local search by passing large caches to workers
 
 **Affected code:** `_run_local_search` in `src/ldetect2/pipeline.py`
@@ -323,6 +408,21 @@ multiplier for the minimal cache and potentially 4-12x with a sorted duplicate.
 
 Decision: do not add raw `.npy` side caches. Prefer the planned HDF5/chunked
 storage migration if storage format changes are needed.
+
+#### Delay HDF5 until after non-storage memory validation
+
+**Affected code:** covariance storage, metric readers, local-search loaders
+
+Earlier planning treated HDF5 as a later local-search optimization. The
+chr10/chr11 failures change the priority: HDF5 should be considered earlier if
+streaming metrics and current local-search row-slicing still cannot keep RSS
+under control.
+
+Decision: validate the streaming metric fix first because it is smaller,
+format-compatible, and directly removes a full-chromosome allocation. If
+chr10/chr11 still fail, start HDF5 before dense accumulators, JIT, or broader
+multiprocessing. The HDF5 goal should be bounded chunk reads for both metrics
+and local search, not a large resident cache.
 
 #### JIT candidate scoring before precompute instrumentation
 

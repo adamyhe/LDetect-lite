@@ -6,9 +6,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
-_REQUIRED_NPZ_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
+_DEFAULT_CHUNK_ROWS = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -75,25 +76,26 @@ def _load_partition_arrays(path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. Array-backed covariance "
-            "operations require .npz covariance partitions; regenerate covariance "
+            "operations require HDF5 covariance partitions; regenerate covariance "
             "with `ldetect2 run` or `ldetect2 calc-covariance`."
         )
 
-    with np.load(path) as data:
-        missing = _REQUIRED_NPZ_KEYS - set(data.files)
-        if missing:
-            raise ValueError(
-                f"Covariance partition {path} is not a valid ldetect2 .npz file. "
-                f"Missing key(s): {', '.join(sorted(missing))}. "
-                f"Available keys: {', '.join(data.files) or '(none)'}. "
-                "Delete this partition file or rerun ldetect2 run so it can be "
-                "regenerated."
-            )
+    start, end = _partition_bounds_from_path(path)
+    with open_covariance_reader(path, start, end) as reader:
+        rows = reader.read_all()
         return (
-            _position_array(data["i_pos"]),
-            _position_array(data["j_pos"]),
-            np.asarray(data["shrink_ld"], dtype=np.float64),
+            _position_array(rows.lo),
+            _position_array(rows.hi),
+            np.asarray(rows.shrink_ld, dtype=np.float64),
         )
+
+
+def _partition_bounds_from_path(path) -> tuple[int, int]:
+    try:
+        parts = path.stem.split(".")
+        return int(parts[-2]), int(parts[-1])
+    except Exception as exc:
+        raise ValueError(f"Cannot infer partition bounds from {path}") from exc
 
 
 def local_search_partition(partition: CovariancePartition) -> LocalSearchPartition:
@@ -305,21 +307,29 @@ def metric_from_files(
 
     for p_index, (start, end) in enumerate(partitions):
         path = store.partition_path(name, start, end)
-        i_pos, j_pos, shrink = _load_partition_arrays(path)
-        in_range = _owned_in_range_mask(
-            i_pos, j_pos, partitions, p_index, snp_first, snp_last
+        lower_min, lower_max, include_lower_min = _owned_bounds(
+            partitions, p_index, snp_first, snp_last
         )
-        if not np.any(in_range):
-            continue
-
-        owned_i = i_pos[in_range]
-        owned_j = j_pos[in_range]
-        loci_chunks.append(np.unique(np.concatenate((owned_i, owned_j))))
-
-        diag_mask = in_range & (i_pos == j_pos)
-        if np.any(diag_mask):
-            diag_pos_chunks.append(i_pos[diag_mask])
-            diag_val_chunks.append(shrink[diag_mask])
+        with open_covariance_reader(path, start, end) as reader:
+            diag_pos, diag_val = reader.read_diagonal()
+            diag_in_range = (
+                (diag_pos >= snp_first)
+                & (diag_pos <= snp_last)
+                & (diag_pos >= lower_min if include_lower_min else diag_pos > lower_min)
+                & (diag_pos <= lower_max)
+            )
+            if np.any(diag_in_range):
+                diag_pos_chunks.append(diag_pos[diag_in_range])
+                diag_val_chunks.append(diag_val[diag_in_range])
+            for chunk in reader.iter_owned_rows(
+                lower_min,
+                lower_max,
+                snp_first,
+                snp_last,
+                _DEFAULT_CHUNK_ROWS,
+                include_lower_min=include_lower_min,
+            ):
+                loci_chunks.append(np.unique(np.concatenate((chunk.lo, chunk.hi))))
 
     if not loci_chunks:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
@@ -341,63 +351,83 @@ def metric_from_files(
     n_nonzero = 0
     for p_index, (start, end) in enumerate(partitions):
         path = store.partition_path(name, start, end)
-        i_pos, j_pos, shrink = _load_partition_arrays(path)
-        in_range = _owned_in_range_mask(
-            i_pos, j_pos, partitions, p_index, snp_first, snp_last
+        lower_min, lower_max, include_lower_min = _owned_bounds(
+            partitions, p_index, snp_first, snp_last
         )
-        pair_mask = in_range & (i_pos < j_pos)
-        if not np.any(pair_mask):
-            continue
+        with open_covariance_reader(path, start, end) as reader:
+            for chunk in reader.iter_owned_rows(
+                lower_min,
+                lower_max,
+                snp_first,
+                snp_last,
+                _DEFAULT_CHUNK_ROWS,
+                include_lower_min=include_lower_min,
+            ):
+                pair_mask = chunk.lo < chunk.hi
+                if not np.any(pair_mask):
+                    continue
+                pair_i = chunk.lo[pair_mask]
+                pair_j = chunk.hi[pair_mask]
+                pair_s = chunk.shrink_ld[pair_mask]
 
-        pair_i = i_pos[pair_mask]
-        pair_j = j_pos[pair_mask]
-        pair_s = shrink[pair_mask]
-        pair_i, pair_j, pair_s = _deduplicate_metric_pairs(pair_i, pair_j, pair_s)
+                diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
+                diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
+                has_diag = (diag_i_idx < unique_diag_pos.size) & (
+                    diag_j_idx < unique_diag_pos.size
+                )
+                safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
+                safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
+                has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
+                    unique_diag_pos[safe_j_idx] == pair_j
+                )
+                if not np.any(has_diag):
+                    continue
 
-        diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
-        diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
-        has_diag = (diag_i_idx < unique_diag_pos.size) & (
-            diag_j_idx < unique_diag_pos.size
-        )
-        safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
-        safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
-        has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
-            unique_diag_pos[safe_j_idx] == pair_j
-        )
-        if not np.any(has_diag):
-            continue
+                pair_i = pair_i[has_diag]
+                pair_j = pair_j[has_diag]
+                pair_s = pair_s[has_diag]
+                diag_i = unique_diag_val[diag_i_idx[has_diag]]
+                diag_j = unique_diag_val[diag_j_idx[has_diag]]
 
-        pair_i = pair_i[has_diag]
-        pair_j = pair_j[has_diag]
-        pair_s = pair_s[has_diag]
-        diag_i = unique_diag_val[diag_i_idx[has_diag]]
-        diag_j = unique_diag_val[diag_j_idx[has_diag]]
+                positive = (diag_i > 0.0) & (diag_j > 0.0)
+                if not np.any(positive):
+                    continue
 
-        positive = (diag_i > 0.0) & (diag_j > 0.0)
-        if not np.any(positive):
-            continue
+                pair_i = pair_i[positive]
+                pair_j = pair_j[positive]
+                pair_s = pair_s[positive]
+                diag_i = diag_i[positive]
+                diag_j = diag_j[positive]
 
-        pair_i = pair_i[positive]
-        pair_j = pair_j[positive]
-        pair_s = pair_s[positive]
-        diag_i = diag_i[positive]
-        diag_j = diag_j[positive]
+                i_blocks = np.searchsorted(bp, pair_i, side="left")
+                j_blocks = np.searchsorted(bp, pair_j, side="left")
+                crossing = i_blocks != j_blocks
+                if not np.any(crossing):
+                    continue
 
-        i_blocks = np.searchsorted(bp, pair_i, side="left")
-        j_blocks = np.searchsorted(bp, pair_j, side="left")
-        crossing = i_blocks != j_blocks
-        if not np.any(crossing):
-            continue
-
-        r2 = (
-            pair_s[crossing]
-            * pair_s[crossing]
-            / (diag_i[crossing] * diag_j[crossing])
-        )
-        total_sum += float(np.sum(r2))
-        n_nonzero += int(np.count_nonzero(crossing))
+                r2 = (
+                    pair_s[crossing]
+                    * pair_s[crossing]
+                    / (diag_i[crossing] * diag_j[crossing])
+                )
+                total_sum += float(np.sum(r2))
+                n_nonzero += int(np.count_nonzero(crossing))
 
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
+
+
+def _owned_bounds(
+    partitions: list[tuple[int, int]],
+    p_index: int,
+    snp_first: int,
+    snp_last: int,
+) -> tuple[int, int, bool]:
+    start = partitions[p_index][0]
+    lower_min = snp_first if p_index == 0 else start
+    lower_max = (
+        partitions[p_index + 1][0] if p_index + 1 < len(partitions) else snp_last
+    )
+    return lower_min, lower_max, p_index == 0
 
 
 def _deduplicate_metric_pairs(

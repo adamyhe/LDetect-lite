@@ -25,6 +25,7 @@ from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
+from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 
 _PREC = 50
@@ -66,6 +67,40 @@ class LocalSearchPrecomputeStats:
             f"chunks={self.chunks} "
             f"segments={self.segments} "
             f"active_rows_peak={self.active_rows_peak}"
+        )
+
+
+@dataclass(frozen=True)
+class LocalSearchHDF5Partition:
+    """Small HDF5 partition handle metadata used for chunked local search."""
+
+    start: int
+    end: int
+    path: object
+    source_row_count: int
+    loci: np.ndarray
+    diag_pos: np.ndarray
+    diag_val: np.ndarray
+
+
+def local_search_hdf5_partition(
+    name: str,
+    store: CovarianceStore,
+    start: int,
+    end: int,
+) -> LocalSearchHDF5Partition:
+    """Load only HDF5 index metadata for one local-search partition."""
+    path = store.partition_path(name, start, end)
+    with open_covariance_reader(path, start, end) as reader:
+        diag_pos, diag_val = reader.read_diagonal()
+        return LocalSearchHDF5Partition(
+            start=start,
+            end=end,
+            path=path,
+            source_row_count=reader.row_count,
+            loci=reader.read_loci(),
+            diag_pos=diag_pos,
+            diag_val=diag_val,
         )
 
 
@@ -151,6 +186,91 @@ def _segment_rows_from_partitions(
 
 def _active_diagonal_from_partitions(
     partitions: list[LocalSearchPartition],
+    active_min_lo: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return active canonical diagonal rows with partition-order first wins."""
+    pos_parts: list[np.ndarray] = []
+    val_parts: list[np.ndarray] = []
+    for partition in partitions:
+        left = int(np.searchsorted(partition.diag_pos, active_min_lo, side="left"))
+        if left >= partition.diag_pos.size:
+            continue
+        pos_parts.append(partition.diag_pos[left:])
+        val_parts.append(partition.diag_val[left:])
+
+    if not pos_parts:
+        return np.array([], dtype=np.int32), np.array([], dtype=np.float64)
+    pos = np.concatenate(pos_parts)
+    val = np.concatenate(val_parts)
+    diag_pos, _, diag_val = canonical_local_search_rows(pos, pos, val)
+    return diag_pos, diag_val
+
+
+def _active_loci_from_hdf5_partitions(
+    partitions: list[LocalSearchHDF5Partition],
+    active_min_lo: int,
+) -> np.ndarray:
+    """Return sorted unique active ``lo`` loci across HDF5 partition indexes."""
+    loci_arrays = []
+    for partition in partitions:
+        left = int(np.searchsorted(partition.loci, active_min_lo, side="left"))
+        if left < partition.loci.size:
+            loci_arrays.append(partition.loci[left:])
+    if not loci_arrays:
+        return np.array([], dtype=np.int64)
+    loci = np.concatenate(loci_arrays).astype(np.int64, copy=False)
+    loci.sort()
+    return _unique_sorted(loci)
+
+
+def _active_row_count_from_hdf5_partitions(
+    partitions: list[LocalSearchHDF5Partition],
+    active_min_lo: int,
+) -> int:
+    """Return an approximate active row count from HDF5 indexes."""
+    total = 0
+    for partition in partitions:
+        left = int(np.searchsorted(partition.loci, active_min_lo, side="left"))
+        if left < partition.loci.size:
+            total += partition.source_row_count
+    return total
+
+
+def _segment_rows_from_hdf5_partitions(
+    partitions: list[LocalSearchHDF5Partition],
+    active_min_lo: int,
+    lo_min: int,
+    lo_max: int,
+    chunk_rows: int = 1_000_000,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return canonical segment rows by reading bounded HDF5 row chunks."""
+    min_lo = max(active_min_lo, lo_min)
+    lo_parts: list[np.ndarray] = []
+    hi_parts: list[np.ndarray] = []
+    shrink_parts: list[np.ndarray] = []
+    for partition in partitions:
+        with open_covariance_reader(
+            partition.path, partition.start, partition.end
+        ) as reader:
+            for chunk in reader.iter_rows(min_lo, lo_max, chunk_rows):
+                lo_parts.append(chunk.lo)
+                hi_parts.append(chunk.hi)
+                shrink_parts.append(chunk.shrink_ld)
+
+    if not lo_parts:
+        return (
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.float64),
+        )
+    lo = np.concatenate(lo_parts)
+    hi = np.concatenate(hi_parts)
+    shrink = np.concatenate(shrink_parts)
+    return canonical_local_search_rows(lo, hi, shrink)
+
+
+def _active_diagonal_from_hdf5_partitions(
+    partitions: list[LocalSearchHDF5Partition],
     active_min_lo: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return active canonical diagonal rows with partition-order first wins."""
@@ -395,6 +515,8 @@ class LocalSearch:
         use_decimal: bool = False,
         covariance_cache: ChromosomeCovariance | None = None,
         local_search_partitions: tuple[LocalSearchPartition, ...] | None = None,
+        local_search_hdf5_partitions: tuple[LocalSearchHDF5Partition, ...]
+        | None = None,
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -416,6 +538,7 @@ class LocalSearch:
         self.store = store
         self.covariance_cache = covariance_cache
         self.local_search_partitions = local_search_partitions
+        self.local_search_hdf5_partitions = local_search_hdf5_partitions
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -635,7 +758,18 @@ class LocalSearch:
         """Precompute local-search deltas with exact legacy locus semantics."""
         log_debug("Start local search init (array)")
         self.precompute_stats = LocalSearchPrecomputeStats()
-        if self.local_search_partitions is None:
+        if self.local_search_hdf5_partitions is not None:
+            self.loaded_partition_count = len(self.local_search_hdf5_partitions)
+            self.loaded_row_count = int(
+                sum(
+                    partition.source_row_count
+                    for partition in self.local_search_hdf5_partitions
+                )
+            )
+            loci, sum_vert, sum_horiz = self._precompute_array_from_hdf5_partitions(
+                self.local_search_hdf5_partitions
+            )
+        elif self.local_search_partitions is None:
             load_start = time.perf_counter()
             partitions = self._local_covariance_partitions()
             self.precompute_stats.partition_load_seconds = (
@@ -853,6 +987,176 @@ class LocalSearch:
                 if partition.end >= active_min_lo
             ]
             active_loci = _active_loci_from_partitions(
+                active_partitions, active_min_lo
+            )
+
+        loci = np.asarray(precomputed_loci, dtype=np.int64)
+        sum_vert = np.asarray(
+            [sum_vert_by_locus.get(int(locus), 0.0) for locus in loci],
+            dtype=np.float64,
+        )
+        sum_horiz = np.asarray(
+            [sum_horiz_by_locus.get(int(locus), 0.0) for locus in loci],
+            dtype=np.float64,
+        )
+        self.start_locus = start_locus
+        self.start_locus_index = start_locus_index
+        self.end_locus = end_locus
+        self.end_locus_index = end_locus_index
+        return loci, sum_vert, sum_horiz
+
+    def _precompute_array_from_hdf5_partitions(
+        self,
+        local_partitions: tuple[LocalSearchHDF5Partition, ...],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Precompute local-search arrays from HDF5 partition row chunks."""
+        active_partitions: list[LocalSearchHDF5Partition] = []
+        active_min_lo = -2**63
+        active_loci = np.array([], dtype=np.int64)
+        precomputed_loci: list[int] = []
+        sum_vert_by_locus: dict[int, float] = {}
+        sum_horiz_by_locus: dict[int, float] = {}
+
+        last_p_num = -1
+        for p_num_init in range(len(local_partitions) - 1):
+            if self.snp_bottom >= local_partitions[p_num_init + 1].start:
+                append_start = time.perf_counter()
+                active_partitions.append(local_partitions[p_num_init])
+                active_loci = _active_loci_from_hdf5_partitions(
+                    active_partitions, active_min_lo
+                )
+                self.precompute_stats.append_seconds += (
+                    time.perf_counter() - append_start
+                )
+                self.precompute_stats.active_rows_peak = max(
+                    self.precompute_stats.active_rows_peak,
+                    _active_row_count_from_hdf5_partitions(
+                        active_partitions, active_min_lo
+                    ),
+                )
+                last_p_num = p_num_init
+            else:
+                break
+
+        curr_locus = -1
+        start_locus = -1
+        start_locus_index = -1
+        end_locus = -1
+        end_locus_index = -1
+
+        for p_num in range(last_p_num + 1, len(local_partitions)):
+            append_start = time.perf_counter()
+            active_partitions.append(local_partitions[p_num])
+            active_loci = _active_loci_from_hdf5_partitions(
+                active_partitions, active_min_lo
+            )
+            self.precompute_stats.append_seconds += time.perf_counter() - append_start
+            self.precompute_stats.active_rows_peak = max(
+                self.precompute_stats.active_rows_peak,
+                _active_row_count_from_hdf5_partitions(
+                    active_partitions, active_min_lo
+                ),
+            )
+
+            if curr_locus < 0:
+                if active_loci.size == 0:
+                    raise RuntimeError("locus_list is empty")
+                curr_locus_index = int(
+                    np.searchsorted(active_loci, self.snp_bottom, side="left")
+                )
+                if curr_locus_index >= active_loci.size:
+                    log_debug(
+                        "Warning: curr_locus not found in partition "
+                        f"{self.partitions[p_num]} (snp_bottom={self.snp_bottom}); "
+                        "skipping"
+                    )
+                    continue
+                curr_locus = int(active_loci[curr_locus_index])
+                start_locus = curr_locus
+                start_locus_index = curr_locus_index
+            else:
+                curr_locus_index = int(
+                    np.searchsorted(active_loci, curr_locus, side="left")
+                )
+                if (
+                    curr_locus_index >= active_loci.size
+                    or int(active_loci[curr_locus_index]) != curr_locus
+                ):
+                    if active_loci.size == 0:
+                        raise RuntimeError("locus_list is empty")
+                    curr_locus_index = 0
+                    curr_locus = int(active_loci[0])
+
+            if p_num + 1 < len(local_partitions):
+                end_locus = local_partitions[p_num + 1].start
+                end_locus_index = -1
+            else:
+                end_idx = int(np.searchsorted(active_loci, self.snp_last, side="right"))
+                if end_idx > 0:
+                    end_locus_index = end_idx - 1
+                    end_locus = int(active_loci[end_locus_index])
+                else:
+                    end_locus_index = 0
+                    end_locus = int(active_loci[0])
+
+            segment_end_idx = int(
+                np.searchsorted(active_loci, end_locus, side="right")
+            )
+            if curr_locus_index < segment_end_idx:
+                segment_loci = active_loci[curr_locus_index:segment_end_idx]
+                precomputed_loci.extend(int(locus) for locus in segment_loci)
+                lo_min = int(segment_loci[0])
+                lo_max = int(segment_loci[-1])
+                append_start = time.perf_counter()
+                active_lo, active_hi, active_shrink = (
+                    _segment_rows_from_hdf5_partitions(
+                        active_partitions,
+                        active_min_lo,
+                        lo_min,
+                        lo_max,
+                    )
+                )
+                self.precompute_stats.append_seconds += (
+                    time.perf_counter() - append_start
+                )
+                diagonal_start = time.perf_counter()
+                diag_pos, diag_val = _active_diagonal_from_hdf5_partitions(
+                    active_partitions,
+                    active_min_lo,
+                )
+                self.precompute_stats.diagonal_seconds += (
+                    time.perf_counter() - diagonal_start
+                )
+                _add_array_segment_values(
+                    segment_loci,
+                    active_lo,
+                    active_hi,
+                    active_shrink,
+                    diag_pos,
+                    diag_val,
+                    self.snp_first,
+                    self.snp_last,
+                    self.snp_top,
+                    self.initial_breakpoint_index == 0,
+                    sum_vert_by_locus,
+                    sum_horiz_by_locus,
+                    stats=self.precompute_stats,
+                )
+
+                if segment_end_idx < active_loci.size:
+                    curr_locus_index = segment_end_idx
+                    curr_locus = int(active_loci[curr_locus_index])
+                else:
+                    log_debug("curr_locus_index out of bounds")
+                    break
+
+            active_min_lo = end_locus
+            active_partitions = [
+                partition
+                for partition in active_partitions
+                if partition.end >= active_min_lo
+            ]
+            active_loci = _active_loci_from_hdf5_partitions(
                 active_partitions, active_min_lo
             )
 

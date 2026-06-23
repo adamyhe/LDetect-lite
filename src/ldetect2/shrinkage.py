@@ -10,6 +10,8 @@ from typing import IO
 
 import numpy as np
 
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
+
 # ---------------------------------------------------------------------------
 # Pairwise LD kernel (Numba-accelerated when available)
 # ---------------------------------------------------------------------------
@@ -233,10 +235,9 @@ def calc_covariance(
             data rows).
         genetic_map_path: Gzipped genetic map (columns: chr, position, cM).
         individuals_path: Plain-text file; one individual ID per line.
-        output_path: Compressed NumPy output (``.npz``) with named arrays:
-            ``i_pos``, ``j_pos``, ``i_gpos``, ``j_gpos``, ``naive_ld``,
-            ``shrink_ld``, ``i_id``, ``j_id``. When ``compact_output`` is true,
-            only ``i_pos``, ``j_pos``, and ``shrink_ld`` are written.
+        output_path: HDF5 covariance partition output. When ``compact_output``
+            is true, only canonical positions, shrinkage values, and indexes
+            are written.
         ne: Effective population size.
         cutoff: Pairs whose ``|Ds2| < cutoff`` are not written.
         compact_output: Write the compact restartable cache schema used by
@@ -341,7 +342,7 @@ def calc_covariance(
     i_pos = pos_arr[ii]
     j_pos = pos_arr[jj]
     if compact_output:
-        np.savez_compressed(
+        write_covariance_partition_hdf5(
             output_path,
             i_pos=i_pos,
             j_pos=j_pos,
@@ -351,14 +352,14 @@ def calc_covariance(
 
     gpos_flat = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)
     rs_arr = np.array(all_rs)
-    np.savez_compressed(
+    write_covariance_partition_hdf5(
         output_path,
         i_pos=i_pos,
         j_pos=j_pos,
+        shrink_ld=ds2_arr,
         i_gpos=gpos_flat[ii],
         j_gpos=gpos_flat[jj],
         naive_ld=d_naive_arr,
-        shrink_ld=ds2_arr,
         i_id=rs_arr[ii],
         j_id=rs_arr[jj],
     )

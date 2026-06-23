@@ -8,13 +8,9 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
+from ldetect2.io.covariance_hdf5 import validate_covariance_hdf5
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
-_COMPACT_COVARIANCE_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
-_FULL_COVARIANCE_KEYS = frozenset(
-    {"i_pos", "j_pos", "i_gpos", "j_gpos", "naive_ld", "shrink_ld", "i_id", "j_id"}
-)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -218,9 +214,6 @@ def _run(args: argparse.Namespace) -> int:
     # Step 2: Calculate covariance for each partition                     #
     # ------------------------------------------------------------------ #
     compact_output = args.covariance_cache == "compact"
-    required_covariance_keys = (
-        _COMPACT_COVARIANCE_KEYS if compact_output else _FULL_COVARIANCE_KEYS
-    )
     log_msg(
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache})"
@@ -234,7 +227,9 @@ def _run(args: argparse.Namespace) -> int:
         if not partition_path.exists():
             pending.append((start, end))
             continue
-        if not _is_valid_covariance_partition(partition_path, required_covariance_keys):
+        if not _is_valid_covariance_partition(
+            partition_path, require_full=not compact_output
+        ):
             invalid += 1
             partition_path.unlink()
             pending.append((start, end))
@@ -344,10 +339,6 @@ def _breakpoint_subsets_for_run(
 
 
 def _is_valid_covariance_partition(
-    path: Path, required_keys: frozenset[str] = _FULL_COVARIANCE_KEYS
+    path: Path, require_full: bool = True
 ) -> bool:
-    try:
-        with np.load(path) as data:
-            return required_keys.issubset(data.files)
-    except Exception:
-        return False
+    return validate_covariance_hdf5(path, require_full=require_full)

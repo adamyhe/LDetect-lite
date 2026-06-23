@@ -16,15 +16,13 @@ from ldetect2._util.binary_search import find_ge_ind, find_le_ind
 from ldetect2._util.covariance_array import (
     ChromosomeCovariance,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
-    load_covariance_partitions,
-    local_search_partition,
     metric_from_arrays,
 )
 from ldetect2._util.logging import log_msg
 from ldetect2.filters import apply_filter, apply_filter_get_minima, get_minima_loc
 from ldetect2.find_minima import custom_binary_search_with_trackback
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
-from ldetect2.local_search import LocalSearch
+from ldetect2.local_search import LocalSearch, local_search_hdf5_partition
 from ldetect2.metric import Metric
 
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
@@ -338,6 +336,7 @@ def _local_search_worker(
     use_decimal: bool,
     covariance_cache: ChromosomeCovariance | None = None,
     local_search_partitions=None,
+    local_search_hdf5_partitions=None,
     subset_name: str = "local_search",
 ) -> tuple[int, dict | None]:
     """Run one breakpoint refinement and emit debug timing/memory diagnostics.
@@ -364,6 +363,7 @@ def _local_search_worker(
             use_decimal=use_decimal,
             covariance_cache=covariance_cache,
             local_search_partitions=local_search_partitions,
+            local_search_hdf5_partitions=local_search_hdf5_partitions,
         )
         init_start = time.perf_counter()
         ls.init_search()
@@ -481,26 +481,20 @@ def _run_local_search(
             )
             for partition_bounds, group in grouped_tasks:
                 group_load_start = time.perf_counter()
-                partition_arrays = load_covariance_partitions(
-                    chr_name,
-                    store,
-                    list(partition_bounds),
+                group_hdf5_partitions = tuple(
+                    local_search_hdf5_partition(chr_name, store, start, end)
+                    for start, end in partition_bounds
                 )
                 group_load_seconds = time.perf_counter() - group_load_start
-                group_canonical_start = time.perf_counter()
-                group_local_partitions = tuple(
-                    local_search_partition(partition) for partition in partition_arrays
-                )
-                group_canonical_seconds = time.perf_counter() - group_canonical_start
                 group_row_count = sum(
-                    partition.i_pos.size for partition in partition_arrays
+                    partition.source_row_count for partition in group_hdf5_partitions
                 )
                 log_msg(
                     f"Local search {subset_name} group loaded: "
                     f"breakpoints={len(group)} partitions={len(partition_bounds)} "
                     f"rows={group_row_count} "
                     f"load_seconds={group_load_seconds:.3f} "
-                    f"canonicalize_seconds={group_canonical_seconds:.3f}"
+                    "canonicalize_seconds=0.000"
                 )
                 group_cache = ChromosomeCovariance(
                     loci=np.array([], dtype=np.int64),
@@ -508,7 +502,7 @@ def _run_local_search(
                     j_pos=np.array([], dtype=np.int64),
                     r2=np.array([], dtype=np.float64),
                     partitions=partition_bounds,
-                    partition_arrays=partition_arrays,
+                    partition_arrays=(),
                 )
                 for idx, start, stop in group:
                     results[idx] = _local_search_worker(
@@ -522,7 +516,7 @@ def _run_local_search(
                         store,
                         use_decimal,
                         covariance_cache=group_cache,
-                        local_search_partitions=group_local_partitions,
+                        local_search_hdf5_partitions=group_hdf5_partitions,
                         subset_name=subset_name,
                     )
     else:

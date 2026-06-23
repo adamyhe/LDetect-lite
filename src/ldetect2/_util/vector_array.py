@@ -9,9 +9,8 @@ from pathlib import Path
 import numpy as np
 
 from ldetect2._util.covariance_array import ChromosomeCovariance
+from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
-
-_REQUIRED_NPZ_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
 
 
 def _position_array(arr: np.ndarray) -> np.ndarray:
@@ -37,7 +36,7 @@ def write_diag_vector_array(
     out_path: Path,
     covariance_cache: ChromosomeCovariance | None = None,
 ) -> None:
-    """Write the diagonal correlation-sum vector from ``.npz`` partitions."""
+    """Write the diagonal correlation-sum vector from HDF5 partitions."""
     out_path.unlink(missing_ok=True)
     pending_sums: dict[int, float] = {}
     current_locus = snp_first
@@ -58,7 +57,7 @@ def write_diag_vector_array(
 
         if partition_arrays is None:
             path = store.partition_path(name, start, end)
-            i_pos, j_pos, shrink = _load_npz_partition(path)
+            i_pos, j_pos, shrink = _load_hdf5_partition(path, start, end)
         else:
             partition = partition_arrays[p_index]
             i_pos = partition.i_pos
@@ -148,25 +147,22 @@ def write_diag_vector_array(
                 pending_sums.pop(int(locus), None)
 
 
-def _load_npz_partition(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_hdf5_partition(
+    path: Path, start: int, end: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. The array-backed "
-            "matrix-to-vector path requires .npz covariance partitions; "
+            "matrix-to-vector path requires HDF5 covariance partitions; "
             "regenerate covariance with `ldetect2 run` or `ldetect2 calc-covariance`."
         )
 
-    with np.load(path) as data:
-        missing = sorted(_REQUIRED_NPZ_KEYS - set(data.files))
-        if missing:
-            raise ValueError(
-                f"Covariance partition {path} is missing required field(s): "
-                f"{', '.join(missing)}"
-            )
+    with open_covariance_reader(path, start, end) as reader:
+        rows = reader.read_all()
         return (
-            _position_array(data["i_pos"]),
-            _position_array(data["j_pos"]),
-            np.asarray(data["shrink_ld"], dtype=np.float64),
+            _position_array(rows.lo),
+            _position_array(rows.hi),
+            np.asarray(rows.shrink_ld, dtype=np.float64),
         )
 
 

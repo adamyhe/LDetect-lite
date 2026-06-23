@@ -16,6 +16,7 @@ from ldetect2.io.covariance import (
     read_partition_into_matrix,
     read_partition_into_matrix_lean,
 )
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.matrix_analysis import MatrixAnalysis
 
@@ -30,15 +31,15 @@ def _make_store(tmp_path: Path) -> tuple[CovarianceStore, list[tuple[int, int]]]
     root.mkdir(parents=True)
     (root / "testchr").mkdir()
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    npz_path = root / "testchr" / "testchr.100.300.npz"
-    np.savez_compressed(
-        npz_path,
+    h5_path = root / "testchr" / "testchr.100.300.h5"
+    write_covariance_partition_hdf5(
+        h5_path,
         i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
         j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9]),
         i_gpos=np.array([1.0, 1.0, 2.0, 2.0, 3.0]),
         j_gpos=np.array([1.0, 2.0, 2.0, 3.0, 3.0]),
         naive_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9]),
-        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9]),
         i_id=np.array(["snpA", "snpA", "snpB", "snpB", "snpC"]),
         j_id=np.array(["snpA", "snpB", "snpB", "snpC", "snpC"]),
     )
@@ -55,9 +56,9 @@ def _make_compact_store(
     root.mkdir(parents=True)
     (root / "testchr").mkdir()
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    npz_path = root / "testchr" / "testchr.100.300.npz"
-    np.savez_compressed(
-        npz_path,
+    h5_path = root / "testchr" / "testchr.100.300.h5"
+    write_covariance_partition_hdf5(
+        h5_path,
         i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
         j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
         shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64),
@@ -114,7 +115,17 @@ def _make_two_partition_store(
                     "j_id": np.array([f"snp{row[1]}" for row in rows]),
                 }
             )
-        np.savez_compressed(chrom_dir / f"testchr.{start}.{end}.npz", **output)
+        write_covariance_partition_hdf5(
+            chrom_dir / f"testchr.{start}.{end}.h5",
+            i_pos=output["i_pos"],
+            j_pos=output["j_pos"],
+            shrink_ld=output["shrink_ld"],
+            naive_ld=output.get("naive_ld"),
+            i_gpos=output.get("i_gpos"),
+            j_gpos=output.get("j_gpos"),
+            i_id=output.get("i_id"),
+            j_id=output.get("j_id"),
+        )
     return CovarianceStore(root=root), partitions
 
 
@@ -220,7 +231,7 @@ def test_read_partition_off_diagonal_values(tmp_path):
     assert matrix[200][300] == pytest.approx(0.1)
 
 
-def test_read_partition_lean_accepts_compact_npz(tmp_path):
+def test_read_partition_lean_accepts_compact_hdf5(tmp_path):
     store, partitions = _make_compact_store(tmp_path)
     matrix: dict = {}
     locus_list: list[int] = []
@@ -234,18 +245,18 @@ def test_read_partition_lean_accepts_compact_npz(tmp_path):
     assert matrix[300][300] == pytest.approx(0.9)
 
 
-def test_read_partition_full_rejects_compact_npz(tmp_path):
+def test_read_partition_full_rejects_compact_hdf5(tmp_path):
     store, partitions = _make_compact_store(tmp_path)
     matrix: dict = {}
     locus_list: list[int] = []
 
-    with pytest.raises(ValueError, match="compact covariance partition"):
+    with pytest.raises(ValueError, match="lacks full-metadata"):
         read_partition_into_matrix(
             partitions, 0, matrix, locus_list, "testchr", store, 100, 300
         )
 
 
-def test_matrix_to_vector_lean_accepts_compact_npz(tmp_path):
+def test_matrix_to_vector_lean_accepts_compact_hdf5(tmp_path):
     store, _ = _make_compact_store(tmp_path)
     output_path = tmp_path / "vector.txt.gz"
 
@@ -291,7 +302,7 @@ def test_matrix_to_vector_array_accepts_chromosome_covariance_cache(tmp_path):
     _assert_vectors_close(cached_path, file_path)
 
 
-def test_matrix_to_vector_array_accepts_full_npz(tmp_path):
+def test_matrix_to_vector_array_accepts_full_hdf5(tmp_path):
     store, _ = _make_two_partition_store(tmp_path, compact=False)
     output_path = tmp_path / "vector.txt.gz"
 
@@ -323,8 +334,8 @@ def test_matrix_to_vector_array_skips_rows_without_positive_diagonal(
     chrom_dir = root / "testchr"
     chrom_dir.mkdir(parents=True)
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    np.savez_compressed(
-        chrom_dir / "testchr.100.300.npz",
+    write_covariance_partition_hdf5(
+        chrom_dir / "testchr.100.300.h5",
         i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
         j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
         shrink_ld=np.array([1.0, 0.5, 0.0, 0.2, 1.0], dtype=np.float64),
@@ -336,7 +347,7 @@ def test_matrix_to_vector_array_skips_rows_without_positive_diagonal(
     assert _read_vector(output_path) == {100: pytest.approx(1.0)}
 
 
-def test_matrix_to_vector_array_requires_npz_partition(tmp_path):
+def test_matrix_to_vector_array_requires_hdf5_partition(tmp_path):
     root = tmp_path / "cov"
     chrom_dir = root / "testchr"
     chrom_dir.mkdir(parents=True)
@@ -344,7 +355,7 @@ def test_matrix_to_vector_array_requires_npz_partition(tmp_path):
     with gzip.open(chrom_dir / "testchr.100.300.gz", "wt") as f:
         f.write("snpA snpA 100 100 0 0 1 1\n")
 
-    with pytest.raises(FileNotFoundError, match="requires .npz covariance"):
+    with pytest.raises(FileNotFoundError, match="requires HDF5 covariance"):
         MatrixAnalysis("testchr", CovarianceStore(root=root)).calc_diag_array(
             tmp_path / "vector.txt.gz"
         )

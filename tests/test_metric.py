@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.metric import Metric
 
@@ -49,7 +50,17 @@ def _make_store(
                     "j_id": np.array([f"snp{r[1]}" for r in rows]),
                 }
             )
-        np.savez_compressed(chrom_dir / f"chr1.{start}.{end}.npz", **output)
+        write_covariance_partition_hdf5(
+            chrom_dir / f"chr1.{start}.{end}.h5",
+            i_pos=output["i_pos"],
+            j_pos=output["j_pos"],
+            shrink_ld=output["shrink_ld"],
+            naive_ld=output.get("naive_ld"),
+            i_gpos=output.get("i_gpos"),
+            j_gpos=output.get("j_gpos"),
+            i_id=output.get("i_id"),
+            j_id=output.get("j_id"),
+        )
     return CovarianceStore(root=root)
 
 

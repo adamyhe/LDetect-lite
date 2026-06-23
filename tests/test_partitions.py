@@ -26,7 +26,7 @@ def test_partitions_path():
 def test_partition_path():
     store = CovarianceStore(root=Path("/data/cov"))
     assert store.partition_path("chr2", 100, 200) == Path(
-        "/data/cov/chr2/chr2.100.200.npz"
+        "/data/cov/chr2/chr2.100.200.h5"
     )
 
 
