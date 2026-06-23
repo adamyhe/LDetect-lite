@@ -12,14 +12,14 @@ ref/cov_matrix/{chrom}/{chrom}.{start}.{end}.gz
 
 That file is the legacy ldetect 8-column gzipped text covariance format. The
 workflow treats it as a reference input only and converts it to the current
-ldetect2 NumPy partition format before running `ldetect2 matrix-to-vector`:
+ldetect2 HDF5 partition format before running `ldetect2 matrix-to-vector`:
 
 ```text
-work/{chrom}/{chrom}.{start}.{end}.npz
+work/{chrom}/{chrom}.{start}.{end}.h5
 ```
 
 This is example-specific compatibility. The optimized core matrix-to-vector
-path remains `.npz`-only.
+path consumes HDF5 covariance partitions.
 
 ## Run
 

@@ -45,7 +45,7 @@ Options:
 
 - `--ne FLOAT` — effective population size Ne used by the Wen & Stephens shrinkage estimator (default: 11418.0, the CEU/HapMap II value; reproduction configs may override this for non-European populations)
 - `--cov-cutoff FLOAT` — LD pairs with shrinkage correlation below this threshold are not written to disk, reducing storage (default: 1e-7)
-- `--covariance-cache {compact,full}` — partition cache schema for `ldetect2 run` (default: `compact`). Compact caches write only `i_pos`, `j_pos`, and `shrink_ld`, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
+- `--covariance-cache {compact,full}` — HDF5 partition metadata schema for `ldetect2 run` (default: `compact`). Compact caches write canonical positions, shrinkage LD, and HDF5 indexes, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which breakpoint set to compute and write to the BED file (default: `fourier_ls`; see Step 4 below)
@@ -86,12 +86,12 @@ tabix -h 1000G.chr2.vcf.gz chr2:39967768-40067768 | \
   ldetect2 calc-covariance \
     --genetic-map chr2.interpolated_genetic_map.gz \
     --individuals eurinds.txt \
-    --output cov_matrix/chr2/chr2.39967768.40067768.npz
+    --output cov_matrix/chr2/chr2.39967768.40067768.h5
 ```
 
 This step must be run once per partition. `ldetect2 run --workers N` runs partitions in parallel automatically.
 
-Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is a compressed NumPy file (`.npz`) with arrays for SNP positions, genetic positions, naive LD, and shrinkage LD.
+Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 partition (`.h5`) with canonical SNP positions, shrinkage LD, and optional full debug metadata.
 
 Arguments:
 - `--genetic-map PATH` — gzipped 3-column map used to convert physical positions to genetic distances (cM) for the shrinkage estimator
@@ -113,7 +113,7 @@ ldetect2 matrix-to-vector \
 Assembles all partition matrices for a chromosome and reduces them to a 1-D signal: for each SNP position, the sum of squared shrinkage correlations with all other SNPs in its window (the diagonal of the assembled correlation matrix). This produces a `[position, diagonal_sum]` vector over the full chromosome. Positions with many strong LD partners have a high diagonal sum; positions near LD block boundaries where correlations decay have a low diagonal sum. These troughs are the candidate breakpoints detected in step 4.
 
 Arguments:
-- `--dataset-path PATH` — root directory containing the partition `.npz` files and the partition list
+- `--dataset-path PATH` — root directory containing the partition `.h5` files and the partition list
 - `--name TEXT` — chromosome name, used to locate files under `dataset-path`
 - `--snp-first / --snp-last INT` — restrict the vector to a sub-range of positions (auto-detected from partition boundaries if omitted)
 - `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output (requires `ldetect2[heatmap]`)

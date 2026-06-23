@@ -11,7 +11,7 @@ import math
 import statistics
 from pathlib import Path
 
-import numpy as np
+import h5py
 
 SUMMARY_COLS = [
     "population",
@@ -135,19 +135,18 @@ def summarise_covariance(run_dir: Path, chrom: str) -> dict[str, str]:
     cov_dir = run_dir / chrom
     if not cov_dir.exists():
         cov_dir = run_dir / "cov_matrix" / chrom
-    partitions = sorted(cov_dir.glob(f"{chrom}.*.*.npz"))
+    partitions = sorted(cov_dir.glob(f"{chrom}.*.*.h5"))
     rows = 0
     schemas: set[str] = set()
     total_bytes = 0
     for path in partitions:
         total_bytes += path.stat().st_size
-        with np.load(path) as data:
-            rows += len(data["i_pos"])
-            keys = set(data.files)
-            if {"i_pos", "j_pos", "shrink_ld"} == keys:
-                schemas.add("compact")
-            elif {"i_pos", "j_pos", "shrink_ld"}.issubset(keys):
+        with h5py.File(path, "r") as data:
+            rows += int(data["covariance/lo"].shape[0])
+            if "metadata/i_id" in data and "covariance/naive_ld" in data:
                 schemas.add("full")
+            elif "covariance/shrink_ld" in data:
+                schemas.add("compact")
             else:
                 schemas.add("unknown")
     return {
