@@ -29,7 +29,6 @@ from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 
 _PREC = 50
-HDF5_LOCAL_SEARCH_CHUNK_ROWS = 1_000_000
 
 
 @dataclass
@@ -98,7 +97,6 @@ class LocalSearchHDF5Partition:
     path: object
     source_row_count: int
     loci: np.ndarray
-    lo_offsets: np.ndarray
     diag_pos: np.ndarray
     diag_val: np.ndarray
 
@@ -112,15 +110,13 @@ def local_search_hdf5_partition(
     """Load only HDF5 index metadata for one local-search partition."""
     path = store.partition_path(name, start, end)
     with open_covariance_reader(path, start, end) as reader:
-        loci, lo_offsets = reader.read_lo_index()
         diag_pos, diag_val = reader.read_diagonal()
         return LocalSearchHDF5Partition(
             start=start,
             end=end,
             path=path,
             source_row_count=reader.row_count,
-            loci=loci,
-            lo_offsets=lo_offsets,
+            loci=reader.read_loci(),
             diag_pos=diag_pos,
             diag_val=diag_val,
         )
@@ -311,285 +307,6 @@ def _active_diagonal_from_hdf5_partitions(
     val = np.concatenate(val_parts)
     diag_pos, _, diag_val = canonical_local_search_rows(pos, pos, val)
     return diag_pos, diag_val
-
-
-def _hdf5_rows_in_lo_range(
-    partition: LocalSearchHDF5Partition,
-    lo_min: int,
-    lo_max: int,
-) -> int:
-    """Return the indexed row count for one HDF5 partition lo range."""
-    left_value = int(np.searchsorted(partition.loci, lo_min, side="left"))
-    right_value = int(np.searchsorted(partition.loci, lo_max, side="right"))
-    if left_value >= right_value:
-        return 0
-    return int(partition.lo_offsets[right_value] - partition.lo_offsets[left_value])
-
-
-def _hdf5_rows_in_active_range(
-    partitions: list[LocalSearchHDF5Partition],
-    active_min_lo: int,
-    lo_min: int,
-    lo_max: int,
-) -> int:
-    """Return the estimated active HDF5 rows for a candidate lo window."""
-    min_lo = max(active_min_lo, lo_min)
-    return sum(
-        _hdf5_rows_in_lo_range(partition, min_lo, lo_max)
-        for partition in partitions
-    )
-
-
-def _hdf5_locus_windows(
-    segment_loci: np.ndarray,
-    partitions: list[LocalSearchHDF5Partition],
-    active_min_lo: int,
-    target_rows: int,
-) -> list[tuple[int, int, np.ndarray]]:
-    """Split segment loci into row-budgeted lo windows for bounded assembly."""
-    if segment_loci.size == 0:
-        return []
-    target_rows = max(1, int(target_rows))
-    windows: list[tuple[int, int, np.ndarray]] = []
-    start_idx = 0
-    while start_idx < segment_loci.size:
-        lo_min = int(segment_loci[start_idx])
-        low = start_idx + 1
-        high = segment_loci.size
-        best = low
-        while low <= high:
-            mid = (low + high) // 2
-            lo_max = int(segment_loci[mid - 1])
-            row_count = _hdf5_rows_in_active_range(
-                partitions, active_min_lo, lo_min, lo_max
-            )
-            if row_count <= target_rows or mid == start_idx + 1:
-                best = mid
-                low = mid + 1
-            else:
-                high = mid - 1
-        window_loci = segment_loci[start_idx:best]
-        windows.append((int(window_loci[0]), int(window_loci[-1]), window_loci))
-        start_idx = best
-    return windows
-
-
-def _read_hdf5_window_rows(
-    partitions: list[LocalSearchHDF5Partition],
-    active_min_lo: int,
-    lo_min: int,
-    lo_max: int,
-    snp_first: int,
-    snp_last: int,
-    snp_top: int,
-    include_snp_first: bool,
-    stats: LocalSearchPrecomputeStats,
-    chunk_rows: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Read, early-filter, and canonicalize one bounded HDF5 lo window."""
-    min_lo = max(active_min_lo, lo_min)
-    lo_parts: list[np.ndarray] = []
-    hi_parts: list[np.ndarray] = []
-    shrink_parts: list[np.ndarray] = []
-    filtered_rows = 0
-
-    for partition in partitions:
-        with open_covariance_reader(
-            partition.path, partition.start, partition.end
-        ) as reader:
-            iterator = reader.iter_rows(min_lo, lo_max, chunk_rows)
-            while True:
-                read_start = time.perf_counter()
-                try:
-                    chunk = next(iterator)
-                except StopIteration:
-                    stats.hdf5_read_seconds += time.perf_counter() - read_start
-                    break
-                stats.hdf5_read_seconds += time.perf_counter() - read_start
-                stats.rows_read += int(chunk.lo.size)
-                stats.peak_chunk_rows = max(stats.peak_chunk_rows, int(chunk.lo.size))
-
-                filter_start = time.perf_counter()
-                eligible = (chunk.lo <= snp_last) & (chunk.hi <= snp_top)
-                if include_snp_first:
-                    eligible &= chunk.lo >= snp_first
-                else:
-                    eligible &= chunk.lo > snp_first
-                eligible_idx = np.flatnonzero(eligible)
-                stats.candidate_rows += int(chunk.lo.size)
-                stats.eligible_rows += int(eligible_idx.size)
-                stats.rows_after_filter += int(eligible_idx.size)
-                stats.chunk_filter_seconds += time.perf_counter() - filter_start
-                if eligible_idx.size == 0:
-                    continue
-
-                lo_parts.append(chunk.lo[eligible_idx])
-                hi_parts.append(chunk.hi[eligible_idx])
-                shrink_parts.append(chunk.shrink_ld[eligible_idx])
-                filtered_rows += int(eligible_idx.size)
-
-    if not lo_parts:
-        return (
-            np.array([], dtype=np.int32),
-            np.array([], dtype=np.int32),
-            np.array([], dtype=np.float64),
-        )
-
-    dedup_start = time.perf_counter()
-    lo = np.concatenate(lo_parts)
-    hi = np.concatenate(hi_parts)
-    shrink = np.concatenate(shrink_parts)
-    lo, hi, shrink = canonical_local_search_rows(lo, hi, shrink)
-    stats.rows_after_dedup += int(lo.size)
-    stats.duplicate_rows_skipped += int(filtered_rows - lo.size)
-    stats.dedup_seconds += time.perf_counter() - dedup_start
-    return lo, hi, shrink
-
-
-def _accumulate_sorted_rows(
-    row_lo: np.ndarray,
-    row_hi: np.ndarray,
-    row_shrink: np.ndarray,
-    diag_pos: np.ndarray,
-    diag_val: np.ndarray,
-    sum_vert_by_locus: dict[int, float],
-    sum_horiz_by_locus: dict[int, float],
-    chunk_size: int = 2_000_000,
-    stats: LocalSearchPrecomputeStats | None = None,
-) -> None:
-    """Normalize and aggregate already-filtered canonical rows."""
-    if row_lo.size == 0 or diag_pos.size == 0:
-        return
-
-    for chunk_start in range(0, row_lo.size, chunk_size):
-        chunk = slice(chunk_start, chunk_start + chunk_size)
-        lo_chunk = row_lo[chunk]
-        hi_chunk = row_hi[chunk]
-        shrink_chunk = row_shrink[chunk]
-        if stats is not None:
-            stats.chunks += 1
-
-        normalize_start = time.perf_counter()
-        diag_lo_idx = np.searchsorted(diag_pos, lo_chunk)
-        diag_hi_idx = np.searchsorted(diag_pos, hi_chunk)
-        has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
-        safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
-        safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
-        has_diag &= (diag_pos[safe_lo_idx] == lo_chunk) & (
-            diag_pos[safe_hi_idx] == hi_chunk
-        )
-        if not np.any(has_diag):
-            if stats is not None:
-                stats.normalize_seconds += time.perf_counter() - normalize_start
-            continue
-
-        lo_chunk = lo_chunk[has_diag]
-        hi_chunk = hi_chunk[has_diag]
-        shrink_chunk = shrink_chunk[has_diag]
-        diag_lo = diag_val[diag_lo_idx[has_diag]]
-        diag_hi = diag_val[diag_hi_idx[has_diag]]
-        positive = (diag_lo > 0.0) & (diag_hi > 0.0)
-        if not np.any(positive):
-            if stats is not None:
-                stats.normalize_seconds += time.perf_counter() - normalize_start
-            continue
-
-        lo_chunk = lo_chunk[positive]
-        hi_chunk = hi_chunk[positive]
-        r2 = (
-            shrink_chunk[positive]
-            * shrink_chunk[positive]
-            / (diag_lo[positive] * diag_hi[positive])
-        )
-        if stats is not None:
-            stats.normalized_rows += int(r2.size)
-            stats.normalize_seconds += time.perf_counter() - normalize_start
-
-        vertical_start = time.perf_counter()
-        group_starts = np.concatenate(
-            (
-                np.array([0], dtype=np.int64),
-                np.flatnonzero(lo_chunk[1:] != lo_chunk[:-1]) + 1,
-            )
-        )
-        vert_loci = lo_chunk[group_starts]
-        vert_sums = np.add.reduceat(r2, group_starts)
-        for locus, value in zip(vert_loci, vert_sums):
-            sum_vert_by_locus[int(locus)] = (
-                sum_vert_by_locus.get(int(locus), 0.0) + float(value)
-            )
-        if stats is not None:
-            stats.vertical_seconds += time.perf_counter() - vertical_start
-
-        horizontal_start = time.perf_counter()
-        horiz_loci, horiz_inverse = np.unique(hi_chunk, return_inverse=True)
-        horiz_sums = np.bincount(horiz_inverse, weights=r2)
-        for locus, value in zip(horiz_loci, horiz_sums):
-            locus_key = int(locus)
-            sum_horiz_by_locus[locus_key] = (
-                sum_horiz_by_locus.get(locus_key, 0.0) + float(value)
-            )
-            sum_vert_by_locus.setdefault(locus_key, 0.0)
-        if stats is not None:
-            stats.horizontal_seconds += time.perf_counter() - horizontal_start
-
-
-def _add_hdf5_segment_values(
-    segment_loci: np.ndarray,
-    partitions: list[LocalSearchHDF5Partition],
-    active_min_lo: int,
-    diag_pos: np.ndarray,
-    diag_val: np.ndarray,
-    snp_first: int,
-    snp_last: int,
-    snp_top: int,
-    include_snp_first: bool,
-    sum_vert_by_locus: dict[int, float],
-    sum_horiz_by_locus: dict[int, float],
-    stats: LocalSearchPrecomputeStats,
-    chunk_rows: int | None = None,
-) -> None:
-    """Stream bounded HDF5 row windows into local-search aggregations."""
-    if segment_loci.size == 0:
-        return
-    if chunk_rows is None:
-        chunk_rows = HDF5_LOCAL_SEARCH_CHUNK_ROWS
-    stats.segments += 1
-    for locus in segment_loci:
-        locus_key = int(locus)
-        sum_vert_by_locus.setdefault(locus_key, 0.0)
-        sum_horiz_by_locus.setdefault(locus_key, 0.0)
-    if diag_pos.size == 0:
-        return
-
-    windows = _hdf5_locus_windows(
-        segment_loci, partitions, active_min_lo, target_rows=chunk_rows
-    )
-    for lo_min, lo_max, _window_loci in windows:
-        row_lo, row_hi, row_shrink = _read_hdf5_window_rows(
-            partitions,
-            active_min_lo,
-            lo_min,
-            lo_max,
-            snp_first,
-            snp_last,
-            snp_top,
-            include_snp_first,
-            stats,
-            chunk_rows,
-        )
-        accumulator_start = time.perf_counter()
-        _accumulate_sorted_rows(
-            row_lo,
-            row_hi,
-            row_shrink,
-            diag_pos,
-            diag_val,
-            sum_vert_by_locus,
-            sum_horiz_by_locus,
-            stats=stats,
-        )
-        stats.accumulator_seconds += time.perf_counter() - accumulator_start
 
 
 def _unique_sorted(values: np.ndarray) -> np.ndarray:
@@ -1406,6 +1123,20 @@ class LocalSearch:
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
+                lo_min = int(segment_loci[0])
+                lo_max = int(segment_loci[-1])
+                append_start = time.perf_counter()
+                active_lo, active_hi, active_shrink = (
+                    _segment_rows_from_hdf5_partitions(
+                        active_partitions,
+                        active_min_lo,
+                        lo_min,
+                        lo_max,
+                    )
+                )
+                self.precompute_stats.append_seconds += (
+                    time.perf_counter() - append_start
+                )
                 diagonal_start = time.perf_counter()
                 diag_pos, diag_val = _active_diagonal_from_hdf5_partitions(
                     active_partitions,
@@ -1414,11 +1145,11 @@ class LocalSearch:
                 self.precompute_stats.diagonal_seconds += (
                     time.perf_counter() - diagonal_start
                 )
-                append_start = time.perf_counter()
-                _add_hdf5_segment_values(
+                _add_array_segment_values(
                     segment_loci,
-                    active_partitions,
-                    active_min_lo,
+                    active_lo,
+                    active_hi,
+                    active_shrink,
                     diag_pos,
                     diag_val,
                     self.snp_first,
@@ -1428,9 +1159,6 @@ class LocalSearch:
                     sum_vert_by_locus,
                     sum_horiz_by_locus,
                     stats=self.precompute_stats,
-                )
-                self.precompute_stats.append_seconds += (
-                    time.perf_counter() - append_start
                 )
 
                 if segment_end_idx < active_loci.size:

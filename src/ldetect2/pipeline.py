@@ -5,7 +5,6 @@ from __future__ import annotations
 import gzip
 import json
 import math
-import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -19,6 +18,7 @@ from ldetect2._util.covariance_array import (
     metric_from_arrays,
 )
 from ldetect2._util.logging import log_msg
+from ldetect2._util.memory import log_memory_checkpoint, max_rss_mib
 from ldetect2.filters import apply_filter, apply_filter_get_minima, get_minima_loc
 from ldetect2.find_minima import custom_binary_search_with_trackback
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
@@ -130,10 +130,12 @@ def find_breakpoints(
     fourier_metric = None
     if needs_fourier_metric:
         log_msg("Computing Fourier metric")
+        log_memory_checkpoint("fourier_metric_start")
         fourier_metric = _apply_metric(
             chr_name, snp_first, snp_last, store, fourier_loci, use_decimal, metric_cov
         )
         _log_metric(fourier_metric)
+        log_memory_checkpoint("fourier_metric_end")
 
     uniform_loci = None
     uniform_metric = None
@@ -142,10 +144,12 @@ def find_breakpoints(
         step = int(len(raw_x) / (len(fourier_loci) + 1))
         uniform_loci = [raw_x[i] for i in range(step, len(raw_x) - step + 1, step)]
         log_msg("Computing uniform metric")
+        log_memory_checkpoint("uniform_metric_start")
         uniform_metric = _apply_metric(
             chr_name, snp_first, snp_last, store, uniform_loci, use_decimal, metric_cov
         )
         _log_metric(uniform_metric)
+        log_memory_checkpoint("uniform_metric_end")
     if covariance_cache is None:
         metric_cov = None
 
@@ -155,6 +159,7 @@ def find_breakpoints(
         if fourier_metric is None:
             raise RuntimeError("Fourier local search requires the Fourier metric")
         log_msg("Running local search on Fourier breakpoints")
+        log_memory_checkpoint("fourier_local_search_start")
         fourier_ls = _run_local_search(
             chr_name,
             fourier_loci,
@@ -167,12 +172,14 @@ def find_breakpoints(
             covariance_cache=covariance_cache,
             subset_name="fourier_ls",
         )
+        log_memory_checkpoint("fourier_local_search_end")
     # 7. Local search on uniform
     uniform_ls = None
     if needs_uniform_ls:
         if uniform_loci is None or uniform_metric is None:
             raise RuntimeError("Uniform local search requires uniform breakpoints")
         log_msg("Running local search on uniform breakpoints")
+        log_memory_checkpoint("uniform_local_search_start")
         uniform_ls = _run_local_search(
             chr_name,
             uniform_loci,
@@ -185,8 +192,10 @@ def find_breakpoints(
             covariance_cache=covariance_cache,
             subset_name="uniform_ls",
         )
+        log_memory_checkpoint("uniform_local_search_end")
     fourier_ls_metric = None
     if fourier_ls is not None:
+        log_memory_checkpoint("fourier_ls_metric_start")
         fourier_ls_metric = _apply_metric(
             chr_name,
             snp_first,
@@ -196,8 +205,10 @@ def find_breakpoints(
             use_decimal,
             metric_cov,
         )
+        log_memory_checkpoint("fourier_ls_metric_end")
     uniform_ls_metric = None
     if uniform_ls is not None:
+        log_memory_checkpoint("uniform_ls_metric_start")
         uniform_ls_metric = _apply_metric(
             chr_name,
             snp_first,
@@ -207,6 +218,7 @@ def find_breakpoints(
             use_decimal,
             metric_cov,
         )
+        log_memory_checkpoint("uniform_ls_metric_end")
 
     # 8. Serialise to JSON
     result = {
@@ -378,7 +390,7 @@ def _local_search_worker(
         precompute_stats_text = (
             f" {precompute_stats.log_fields()}" if precompute_stats is not None else ""
         )
-        rss = _max_rss_mib()
+        rss = max_rss_mib()
         rss_text = f" max_rss_mib={rss:.1f}" if rss is not None else ""
         log_debug(
             f"{subset_name} breakpoint idx={idx} start={start} stop={stop} "
@@ -447,6 +459,8 @@ def _run_local_search(
                 "ignoring local-search worker parallelism"
             )
         for idx, start, stop in tasks:
+            if idx == 0:
+                log_memory_checkpoint(f"{subset_name}_breakpoint0_start")
             results[idx] = _local_search_worker(
                 chr_name,
                 start,
@@ -460,9 +474,13 @@ def _run_local_search(
                 covariance_cache=covariance_cache,
                 subset_name=subset_name,
             )
+            if idx == 0:
+                log_memory_checkpoint(f"{subset_name}_breakpoint0_end")
     elif workers == 1:
         if use_decimal:
             for idx, start, stop in tasks:
+                if idx == 0:
+                    log_memory_checkpoint(f"{subset_name}_breakpoint0_start")
                 results[idx] = _local_search_worker(
                     chr_name,
                     start,
@@ -475,6 +493,8 @@ def _run_local_search(
                     use_decimal,
                     subset_name=subset_name,
                 )
+                if idx == 0:
+                    log_memory_checkpoint(f"{subset_name}_breakpoint0_end")
         else:
             grouped_tasks = _group_local_search_tasks(
                 chr_name, tasks, breakpoint_loci, store
@@ -505,6 +525,8 @@ def _run_local_search(
                     partition_arrays=(),
                 )
                 for idx, start, stop in group:
+                    if idx == 0:
+                        log_memory_checkpoint(f"{subset_name}_breakpoint0_start")
                     results[idx] = _local_search_worker(
                         chr_name,
                         start,
@@ -519,6 +541,8 @@ def _run_local_search(
                         local_search_hdf5_partitions=group_hdf5_partitions,
                         subset_name=subset_name,
                     )
+                    if idx == 0:
+                        log_memory_checkpoint(f"{subset_name}_breakpoint0_end")
     else:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
@@ -578,24 +602,6 @@ def _group_local_search_tasks(
             order.append(partition_bounds)
         grouped[partition_bounds].append((idx, start, stop))
     return [(partition_bounds, grouped[partition_bounds]) for partition_bounds in order]
-
-
-def _max_rss_mib() -> float | None:
-    """Return current process maximum RSS in MiB when the platform exposes it."""
-    try:
-        import resource
-    except Exception:
-        return None
-
-    try:
-        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    except Exception:
-        return None
-    if rss <= 0:
-        return None
-    if sys.platform == "darwin":
-        return rss / (1024.0 * 1024.0)
-    return rss / 1024.0
 
 
 def _metric_to_json(metric_out: dict) -> dict:

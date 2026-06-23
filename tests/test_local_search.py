@@ -334,13 +334,9 @@ def test_local_search_matches_legacy_with_cross_partition_duplicate_pairs(
     )
 
 
-def test_hdf5_streaming_precompute_matches_legacy_with_tiny_chunks(
+def test_hdf5_precompute_matches_legacy_with_duplicate_pairs(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ldetect2.local_search as local_search_mod
-
-    monkeypatch.setattr(local_search_mod, "HDF5_LOCAL_SEARCH_CHUNK_ROWS", 2)
     partitions = {
         (100, 500): [
             (100, 100, 1.0),

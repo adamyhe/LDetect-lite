@@ -146,6 +146,7 @@ def _calc_partition(
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
     """
+    from ldetect2._util.memory import log_memory_checkpoint
     from ldetect2.shrinkage import calc_covariance
 
     region = f"{chrom}:{start}-{end}"
@@ -171,6 +172,7 @@ def _calc_partition(
             compact_output=compact_output,
         )
     tabix_proc.wait()
+    log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -178,6 +180,7 @@ def _run(args: argparse.Namespace) -> int:
 
     import ldetect2
     from ldetect2._util.logging import log_msg
+    from ldetect2._util.memory import log_memory_checkpoint
     from ldetect2.io.bed import write_bed
     from ldetect2.io.partitions import CovarianceStore, read_partitions
     from ldetect2.matrix_analysis import MatrixAnalysis
@@ -197,18 +200,21 @@ def _run(args: argparse.Namespace) -> int:
         f"version={getattr(ldetect2, '__version__', 'unknown')} "
         f"source={Path(ldetect2.__file__).resolve()}"
     )
+    log_memory_checkpoint("run_start")
 
     # ------------------------------------------------------------------ #
     # Step 1: Partition chromosome                                         #
     # ------------------------------------------------------------------ #
     partitions_path = output_dir / f"{chrom}_partitions.txt"
     log_msg("Step 1: Partitioning chromosome")
+    log_memory_checkpoint("step1_start")
     partition_chromosome(
         genetic_map_path=args.genetic_map,
         n_individuals=_count_individuals(args.individuals),
         output_path=partitions_path,
         ne=args.ne,
     )
+    log_memory_checkpoint("step1_end")
 
     # ------------------------------------------------------------------ #
     # Step 2: Calculate covariance for each partition                     #
@@ -218,6 +224,7 @@ def _run(args: argparse.Namespace) -> int:
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache})"
     )
+    log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
 
     pending = []
@@ -264,6 +271,7 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             log_msg(f"  Partition {start}-{end} done")
+    log_memory_checkpoint("step2_end")
 
     snp_first = partitions[0][0]
     snp_last = partitions[-1][1]
@@ -273,14 +281,17 @@ def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
     log_msg("Step 3: Converting matrix to vector")
+    log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
     analysis.calc_diag_lean(vector_path)
+    log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #
     # Step 4: Find minima                                                 #
     # ------------------------------------------------------------------ #
     breakpoints_path = output_dir / f"breakpoints-{chrom}.json"
     log_msg("Step 4: Finding breakpoints")
+    log_memory_checkpoint("step4_start")
     find_breakpoints(
         input_path=vector_path,
         chr_name=chrom,
@@ -292,12 +303,14 @@ def _run(args: argparse.Namespace) -> int:
         n_bpoints=args.n_bpoints,
         subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
     )
+    log_memory_checkpoint("step4_end")
 
     # ------------------------------------------------------------------ #
     # Step 5: Extract breakpoints to BED                                  #
     # ------------------------------------------------------------------ #
     bed_path = output_dir / f"{chrom}-ld-blocks.bed"
     log_msg(f"Step 5: Extracting {args.subset} breakpoints to {bed_path}")
+    log_memory_checkpoint("step5_start")
     data = json.loads(breakpoints_path.read_text())
     if args.subset not in data:
         computed = ", ".join(data.get("computed_subsets", [])) or "(none)"
@@ -314,6 +327,7 @@ def _run(args: argparse.Namespace) -> int:
     )
 
     log_msg(f"Done. BED file: {bed_path}")
+    log_memory_checkpoint("run_end")
     return 0
 
 

@@ -41,7 +41,7 @@ plan text.
 | Sequential breakpoint grouping | Implemented | `_group_local_search_tasks()` and grouped single-worker path in `_run_local_search()` |
 | Multiprocessing-aware grouping | To-do | `workers > 1` still uses per-breakpoint process-pool fallback |
 | Append/canonicalize reduction | Implemented | partition-slice precompute paths for canonical and HDF5 partitions |
-| Streaming HDF5 segment assembly | Implemented locally | HDF5 local search now splits segments into bounded `lo` windows before aggregation; remote profiling pending |
+| Streaming HDF5 segment assembly | Reverted | Improved chr11 local-search time but regressed wall time and did not reduce RSS |
 | Streaming metric calculation | Implemented | `metric_from_files()` default path in `Metric.calc_metric()` |
 | HDF5 chunked covariance reader | Implemented | `HDF5CovariancePartitionReader`, `iter_rows()`, `iter_owned_rows()` |
 | HDF5 writer invariant and duplicate-position handling | Implemented | validated writer fast path, duplicate-position collapse in `calc_covariance()` |
@@ -233,47 +233,31 @@ Memory risk status:
 - Low. The change records scalar counters/timers only and does not retain
   additional row arrays.
 
-#### Stream HDF5 Segment Assembly in Bounded Windows
+#### Bounded HDF5 Segment Assembly Experiment
 
 **Affected code:** `src/ldetect2/local_search.py`,
 `src/ldetect2/io/covariance_hdf5.py`,
 `examples/ldetect_original/scripts/profile_ldetect2.py`
 
-Implemented locally after the latest downloaded remote profile. The HDF5
-local-search path no longer materializes one full segment row array before
-aggregation. Instead, it:
+Implemented and remotely profiled, then reverted from the active path. The
+experiment split each local-search segment into bounded HDF5 `lo` windows and
+aggregated each window separately.
 
-- reads `/index/lo_values` plus `/index/lo_offsets` for each lightweight HDF5
-  partition handle;
-- splits each segment's loci into bounded `lo` windows using the indexed row
-  counts;
-- reads HDF5 rows chunk by chunk for each bounded window;
-- applies search-window eligibility filters before deduplication and
-  normalization;
-- canonicalizes only the bounded window, preserving partition-order
-  first-pair-wins duplicate semantics;
-- aggregates the bounded window and releases its row arrays before moving to
-  the next window.
+Remote result:
 
-Expected benefit:
+- chr11 local-search time improved from 1730.3 s to 1477.5 s, about 14.6%.
+- Whole-run chr11 wall time regressed from 5209 s to 5415 s.
+- Max RSS was unchanged: about 102.35 GB before versus 102.39 GB after.
+- System time and major page faults increased substantially.
 
-- Reduces the large `append_seconds` bucket by replacing full segment
-  concatenate/canonicalize work with bounded window assembly.
-- Reduces local-search peak temporaries for large chr10/chr11 windows, where a
-  single segment can otherwise involve hundreds of millions of candidate rows.
-- Keeps exactness semantics unchanged for duplicate pairs and zero/missing
-  diagonal values.
+Conclusion:
 
-Memory risk status:
-
-- Low to moderate and bounded by `HDF5_LOCAL_SEARCH_CHUNK_ROWS` plus one
-  bounded `lo` window. The current implementation does not add chromosome-wide
-  caches.
-
-Remote validation status:
-
-- Local unit/integration tests pass, but this change still needs remote
-  profiling on chr21/chr22 and then chr10/chr11.
+- Do not keep bounded-window segment assembly as the default.
+- The experiment moved cost into repeated HDF5 reads and did not address the
+  process RSS high-water mark.
+- Keep the extra parser/stat fields for now because they are useful when
+  comparing experimental profiles, but focus next on locating the current-RSS
+  chokepoint.
 
 #### Cache Canonical Partitions and Slice Active Rows by Segment
 
@@ -402,9 +386,10 @@ The latest downloaded remote profiling outputs are under:
 examples/ldetect_original/results/diagnostics/EUR/profiling/
 ```
 
-These results were generated before the bounded HDF5 streaming segment
-assembly patch in this branch, so use them as the baseline for the next remote
-comparison.
+The bounded HDF5 segment assembly experiment was run after this baseline. It
+improved chr11 local-search time but regressed whole-run wall time and did not
+reduce max RSS, so the active code path has been reverted to full segment
+assembly.
 
 The key finding is that local-search candidate scoring is not the bottleneck.
 The remaining cost is overwhelmingly local-search precompute, driven by the
@@ -473,17 +458,27 @@ Implications:
 - Do not prioritize `_search_array()` candidate scoring. It is effectively
   free at this scale.
 - Do not add JIT yet.
-- The highest leverage local-search runtime change is reducing HDF5 segment
-  row assembly, which the bounded streaming patch now targets.
-- Horizontal aggregation and normalization are the next numeric targets after
-  streaming segment assembly is remotely validated.
+- The highest leverage memory task is now locating the current-RSS jump. The
+  lifetime max RSS is already present by the first local-search breakpoint, so
+  local-search segment assembly is not proven to be the RSS chokepoint.
+- Horizontal aggregation and normalization remain possible runtime targets, but
+  should wait until the RSS chokepoint is understood.
 
-### Post-Streaming-Segment Profiling Targets
+### Next Profiling Targets
 
-After bounded HDF5 segment assembly is validated remotely, review the next
-profile in this order:
+Review the next remote profile in this order:
 
-1. Horizontal aggregation.
+1. Current RSS by pipeline stage.
+   Add and inspect `Memory checkpoint ... current_rss_mib=... max_rss_mib=...`
+   logs for Step 1 through Step 5, Fourier metric, Fourier local search,
+   breakpoint 0 start/end, final metric, and covariance partition worker ends.
+   The goal is to identify the first stage or child worker where current RSS
+   approaches the chr11 high-water mark.
+2. Segment assembly after RSS is localized.
+   The reverted bounded-window experiment showed that naively reducing
+   segment temporaries can trade runtime for HDF5 read overhead. Revisit only
+   if current RSS actually spikes inside local search.
+3. Horizontal aggregation.
    This was still material in the latest chr21/chr22 profile: about 13.2
    seconds for chr21 and 13.9 seconds for chr22. The current path uses
    `np.unique(row_hi, return_inverse=True)` plus `np.bincount()` per chunk,
@@ -491,30 +486,30 @@ profile in this order:
    reduction after sorting `hi` within the chunk, dense local accumulators
    indexed by the local locus window, or processing partition slices directly
    into accumulators.
-2. Normalization.
+4. Normalization.
    This was moderate: about 7.5 seconds for chr21 and 8.0 seconds for chr22.
    The current path does two `np.searchsorted()` calls into diagonal arrays per
    chunk, filters positive diagonals, then computes `r²`. Possible follow-ups
    are dense or dictionary-style diagonal lookup scoped to active segment loci,
    carrying per-partition diagonal lookup state, and combining eligibility plus
    diagonal filtering to shrink arrays earlier.
-3. Group load and canonicalization outside breakpoint rows.
+5. Group load and canonicalization outside breakpoint rows.
    Per-breakpoint phase totals still may not explain all local-search elapsed
    time. Use `local_search_groups.tsv`, `group_total_seconds`, and
    `local_search_unaccounted_seconds` to check whether HDF5 open/read overhead
    or group metadata setup has become significant. If it has, reduce redundant
    partition group loads, merge adjacent groups only when RSS allows it, or
    delay work for partitions that contribute only tiny row slices.
-4. Metric recomputation around local search.
+6. Metric recomputation around local search.
    This sits outside the per-breakpoint local-search rows but can affect wall
    time. The current plan is to validate streaming metrics first. If metric
    time becomes visible after the memory fix, instrument metric time
    separately before considering any cache reuse.
-5. Filter-width search.
+7. Filter-width search.
    For larger profiles, repeated width evaluations can be visible during
    exponential search, binary search, and trackback. A low-memory optimization
    is to cache `{width: minima_count}` only. Do not cache smoothed arrays.
-6. Matrix-to-vector.
+8. Matrix-to-vector.
    For larger chromosomes, matrix-to-vector conversion can be a major wall-time
    block outside local search. If profiling shows it dominates, add
    partition-level vector-conversion instrumentation, check for repeated reads,
@@ -531,14 +526,14 @@ Watch these ratios in each remote profiling run:
 - `normalize_seconds / precompute_seconds`;
 - `rows_after_dedup / rows_read`;
 - `peak_chunk_rows`;
+- `current_rss_mib` checkpoints;
 - `group_total_seconds`;
 - `local_search_unaccounted_seconds`;
 - wall time outside local search: `elapsed_seconds - set_elapsed_seconds`.
 
-If append/assembly drops as expected, horizontal aggregation and normalization
-are the next practical local-search targets. If `hdf5_read_seconds` dominates,
-review chunk sizing and HDF5 compression/read behavior before touching numeric
-kernels.
+If current RSS peaks before local search, prioritize that earlier stage. If it
+peaks during local search, revisit segment assembly with a design that reduces
+repeated HDF5 reads instead of forcing small bounded windows.
 
 ## Non-Storage To-Dos
 
@@ -560,24 +555,21 @@ Acceptance criteria:
 
 Run this remotely only; do not run real-data profiling from a local checkout.
 
-### 2. Remote Validation of Streaming HDF5 Segment Assembly
+### 2. Locate the RSS Chokepoint
 
-Validate the bounded HDF5 segment assembly path on remote chr21/chr22 before
-pursuing deeper numeric changes. Then run chr10/chr11 one at a time.
+Run remote chr11 with the reverted local-search segment path and current-RSS
+checkpoints enabled.
 
 Acceptance criteria:
 
 - final `fourier_ls` BED remains byte-identical;
-- max RSS does not increase;
-- `append_seconds` drops substantially because full segment row arrays are no
-  longer materialized;
-- `peak_chunk_rows` remains bounded and is much smaller than the old active
-  row peaks on chr10/chr11;
-- new HDF5 fields explain the assembly bucket:
-  `hdf5_read_seconds`, `chunk_filter_seconds`, `dedup_seconds`, and
-  `accumulator_seconds`;
-- `rows_after_dedup` and `duplicate_rows_skipped` confirm duplicate handling
-  remains active without full segment canonicalization.
+- logs show current and max RSS for Step 2, Step 3, Step 4, Fourier metric,
+  local-search start, breakpoint 0 start/end, local-search end, final metric,
+  Step 5, and each completed covariance worker partition;
+- identify the first checkpoint where current RSS approaches the eventual
+  100 GiB high-water mark;
+- do not pursue more local-search memory work unless the current-RSS spike is
+  shown to occur inside local search.
 
 ### 3. Representative chr10/chr11 Local-Search Validation
 
@@ -683,8 +675,7 @@ with `calc-covariance` or `run`.
   caches.
 - Metric calculation streams partition row chunks through the HDF5 reader.
 - Single-worker grouped local search caches only HDF5 partition metadata and
-  splits segment loci into bounded `lo` windows before reading and aggregating
-  HDF5 chunks.
+  reads HDF5 row chunks for each full segment range before aggregating.
 - Matrix-to-vector reads HDF5 partitions through the reader; it is still
   one-partition-at-a-time rather than fully segment-chunked.
 - Example workflows and diagnostics have been updated for HDF5.
@@ -791,17 +782,14 @@ Writer requirements and invariants:
   reads.
 - `iter_owned_rows()` applies the partition ownership rules used by metric and
   matrix-to-vector paths while streaming chunks.
-- `read_lo_index()` returns both `lo_values` and `lo_offsets` so local search
-  can estimate row counts for bounded `lo` windows before reading row data.
 - `read_diagonal()` and `read_loci()` are small enough to load eagerly per
   group or per chromosome pass.
 
 Local search, metric calculation, and matrix-to-vector all stream HDF5 rows in
 bounded chunks and discard chunk temporaries after aggregation. Local search
-additionally bounds segment assembly by indexed `lo` windows, so it no longer
-materializes and canonicalizes one full segment row array before aggregation.
-This replaced the earlier memory-heavy pattern of inflating full compressed
-arrays, then canonicalizing and slicing them in memory.
+currently assembles and canonicalizes each full segment row range before
+aggregation; a bounded-window replacement was tested and reverted because it
+increased whole-run wall time and did not reduce process max RSS.
 
 Correctness requirements remain strict: breakpoint loci, `N_zero`, final BED,
 and selected local-search breakpoint positions must remain exact. Metric sums
@@ -810,7 +798,8 @@ aggregation order.
 
 ### Validation Status and Remaining Work
 
-Local checks that passed after the latest streaming segment assembly update:
+Local checks after the bounded-window local-search revert and RSS checkpoint
+update:
 
 ```text
 UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache uv run pytest -q
@@ -820,12 +809,11 @@ git diff --check
 
 Real-data profiling remains remote-only. Next remote checks:
 
-1. Re-test chr21/chr22 for byte-identical `fourier_ls` BED output, neutral or
-   lower RSS, and lower/explainable segment assembly time.
-2. Re-run chr10/chr11 one at a time after chr21/chr22 are clean.
-3. Add current-RSS checkpoints around Step 2, Step 3, Step 4, local-search
-   start, first breakpoint start/end, and final metric if chr11 RSS remains
-   near 100 GiB.
+1. Re-run chr11 with current-RSS checkpoints and identify where current RSS
+   first approaches the high-water mark.
+2. Re-test chr21/chr22 only if the RSS checkpoint change needs smaller
+   validation before chr11.
+3. Re-run chr10 after the chr11 RSS chokepoint is understood.
 4. Tune `chunk_rows` only from remote profiles.
 5. Add HDF5 reader I/O or current-RSS diagnostics only if remote profiles show
    unexplained elapsed time or RSS.
