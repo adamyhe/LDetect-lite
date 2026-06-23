@@ -364,6 +364,14 @@ class HDF5CovariancePartitionReader:
             np.int64, copy=False
         )
 
+    def read_lo_index(self) -> tuple[np.ndarray, np.ndarray]:
+        """Read sorted unique ``lo`` loci and their row offsets."""
+        h5 = self.h5
+        return (
+            _position_array(h5["index/lo_values"][:]).astype(np.int64, copy=False),
+            np.asarray(h5["index/lo_offsets"][:], dtype=np.int64),
+        )
+
     def iter_rows(
         self,
         lo_min: int,

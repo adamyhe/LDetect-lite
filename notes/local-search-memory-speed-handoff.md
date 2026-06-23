@@ -1,6 +1,6 @@
 # Local Search Memory and Runtime Handoff
 
-Date: 2026-06-21
+Date: 2026-06-23
 
 ## Context
 
@@ -23,6 +23,31 @@ This handoff now has two tracks:
 The guiding constraint is that peak RSS must not increase for whole-chromosome
 runs. Any optimization that trades runtime for larger resident arrays should be
 opt-in or guarded by instrumentation.
+
+## Audited Status Summary
+
+This table is based on the current code and tests, not just the historical
+plan text.
+
+| Area | Status | Evidence |
+| --- | --- | --- |
+| Selective subset computation | Implemented | `find_breakpoints(subsets=...)`, `ldetect2 run --all-breakpoint-subsets`, integration subset tests |
+| Local-search phase instrumentation | Implemented | `LocalSearchPrecomputeStats`, per-breakpoint/group debug logs, `profile_ldetect2.py` parser tests |
+| Canonical local-search partitions | Implemented | `LocalSearchPartition`, `canonical_local_search_rows()`, local-search canonicalization tests |
+| Diagonal precompute per partition | Implemented | `diag_pos`/`diag_val` in local-search partitions and HDF5 indexes |
+| Sorted range slicing | Implemented | `np.searchsorted()` in `_add_array_segment_values()` and HDF5 segment helpers |
+| Vertical grouped reduction | Implemented | `np.add.reduceat()` vertical aggregation in `_add_array_segment_values()` |
+| Horizontal aggregation rewrite | To-do | Still uses conservative `np.unique(..., return_inverse=True)` plus `np.bincount()` |
+| Sequential breakpoint grouping | Implemented | `_group_local_search_tasks()` and grouped single-worker path in `_run_local_search()` |
+| Multiprocessing-aware grouping | To-do | `workers > 1` still uses per-breakpoint process-pool fallback |
+| Append/canonicalize reduction | Implemented | partition-slice precompute paths for canonical and HDF5 partitions |
+| Streaming HDF5 segment assembly | Implemented locally | HDF5 local search now splits segments into bounded `lo` windows before aggregation; remote profiling pending |
+| Streaming metric calculation | Implemented | `metric_from_files()` default path in `Metric.calc_metric()` |
+| HDF5 chunked covariance reader | Implemented | `HDF5CovariancePartitionReader`, `iter_rows()`, `iter_owned_rows()` |
+| HDF5 writer invariant and duplicate-position handling | Implemented | validated writer fast path, duplicate-position collapse in `calc_covariance()` |
+| Dense local accumulators | To-do | local search still uses `sum_vert_by_locus`/`sum_horiz_by_locus` dictionaries |
+| JIT for local-search numerics | Deferred | Candidate scoring is not hot in current profiles; revisit only after remote profiling |
+| Remote real-data validation | To-do | Must be run remotely; do not profile real data from local checkout |
 
 ## Non-Storage Optimization Status
 
@@ -129,8 +154,10 @@ Memory risk status:
 
 Implemented sequential grouping for the normal float, single-worker, uncached
 path. `_group_local_search_tasks()` groups tasks by required covariance
-partition bounds, loads each group once with `load_covariance_partitions()`,
-processes that group's breakpoints, then releases the group cache.
+partition bounds. In the current HDF5 path, each group opens lightweight HDF5
+partition metadata with `local_search_hdf5_partition()`, streams segment rows
+through `HDF5CovariancePartitionReader`, processes that group's breakpoints,
+then releases the group state.
 
 This is intentionally not used for:
 
@@ -140,14 +167,14 @@ This is intentionally not used for:
 
 Expected benefit:
 
-- Fewer repeated partition loads for adjacent breakpoint windows that touch
-  the same partition range.
+- Fewer repeated HDF5 partition opens/index reads for adjacent breakpoint
+  windows that touch the same partition range.
 - No additional memory multiplication across process workers.
 
 Memory risk status:
 
-- Moderate but bounded. One partition group is retained at a time in the
-  sequential path.
+- Low to moderate and bounded. One partition group's HDF5 metadata is retained
+  at a time in the sequential path; full partition row arrays are not retained.
 
 #### Keep Selective Subset Computation as the Default Hot Path
 
@@ -183,8 +210,11 @@ include:
 - range-slice eligibility seconds;
 - `r²` normalization seconds;
 - vertical and horizontal aggregation seconds;
+- HDF5 read, chunk-filter, deduplication, and accumulator seconds;
 - candidate, eligible, and normalized row counts;
-- chunk count, segment count, and peak active rows.
+- rows read, rows after filter, rows after deduplication, and duplicate rows
+  skipped;
+- chunk count, segment count, peak active rows, and peak chunk rows.
 
 The profiling parser now preserves these fields in
 `local_search_breakpoints.tsv`, records partition-group load/canonicalization
@@ -202,6 +232,48 @@ Memory risk status:
 
 - Low. The change records scalar counters/timers only and does not retain
   additional row arrays.
+
+#### Stream HDF5 Segment Assembly in Bounded Windows
+
+**Affected code:** `src/ldetect2/local_search.py`,
+`src/ldetect2/io/covariance_hdf5.py`,
+`examples/ldetect_original/scripts/profile_ldetect2.py`
+
+Implemented locally after the latest downloaded remote profile. The HDF5
+local-search path no longer materializes one full segment row array before
+aggregation. Instead, it:
+
+- reads `/index/lo_values` plus `/index/lo_offsets` for each lightweight HDF5
+  partition handle;
+- splits each segment's loci into bounded `lo` windows using the indexed row
+  counts;
+- reads HDF5 rows chunk by chunk for each bounded window;
+- applies search-window eligibility filters before deduplication and
+  normalization;
+- canonicalizes only the bounded window, preserving partition-order
+  first-pair-wins duplicate semantics;
+- aggregates the bounded window and releases its row arrays before moving to
+  the next window.
+
+Expected benefit:
+
+- Reduces the large `append_seconds` bucket by replacing full segment
+  concatenate/canonicalize work with bounded window assembly.
+- Reduces local-search peak temporaries for large chr10/chr11 windows, where a
+  single segment can otherwise involve hundreds of millions of candidate rows.
+- Keeps exactness semantics unchanged for duplicate pairs and zero/missing
+  diagonal values.
+
+Memory risk status:
+
+- Low to moderate and bounded by `HDF5_LOCAL_SEARCH_CHUNK_ROWS` plus one
+  bounded `lo` window. The current implementation does not add chromosome-wide
+  caches.
+
+Remote validation status:
+
+- Local unit/integration tests pass, but this change still needs remote
+  profiling on chr21/chr22 and then chr10/chr11.
 
 #### Cache Canonical Partitions and Slice Active Rows by Segment
 
@@ -293,26 +365,46 @@ Added/strengthened tests for:
 - precompute parity for `loci`, `sum_vert`, and `sum_horiz` against the
   Decimal legacy path on multi-partition fixtures, including cross-partition
   duplicate pairs;
+- HDF5 streaming precompute parity with tiny forced chunks, duplicate pairs
+  across active partitions, and zero diagonal values;
 - streaming metric parity against the previous materialized array metric path.
 
-Validation run after implementation:
+Current local validation run after the streaming HDF5 segment assembly patch:
 
 ```text
-uv run pytest -q
-uv run ruff check src/ldetect2 tests
+UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache uv run pytest -q
+UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache uv run ruff check src/ldetect2 tests examples/ldetect_original/scripts
 git diff --check
 ```
 
-Result after the latest streaming-metric pass: all checks passed (`162 passed`).
+Result: all checks passed (`168 passed`).
 
-## Profiling Findings: EUR chr21/chr22
+Current audit note:
 
-Remote diagnostics were run for EUR chr21 and chr22 with profiling outputs
-under:
+- This section was rechecked against the implementation, not only the docs.
+- Key code paths inspected: `src/ldetect2/pipeline.py`,
+  `src/ldetect2/local_search.py`, `src/ldetect2/_util/covariance_array.py`,
+  `src/ldetect2/io/covariance_hdf5.py`, `src/ldetect2/metric.py`, and
+  `src/ldetect2/shrinkage.py`.
+- Key tests inspected: `tests/test_local_search.py`, `tests/test_metric.py`,
+  `tests/test_covariance_io.py`, `tests/test_shrinkage.py`,
+  `tests/test_cmd_run.py`, and `tests/integration/test_pipeline.py`.
+- Recent git history also matches this sequence: selective subset work,
+  instrumentation, append/canonicalize optimization, streaming metrics, HDF5
+  migration, stale example updates, duplicate-position handling, and streaming
+  HDF5 segment assembly.
+
+## Latest Downloaded Profiling: EUR chr10/chr11/chr21/chr22
+
+The latest downloaded remote profiling outputs are under:
 
 ```text
 examples/ldetect_original/results/diagnostics/EUR/profiling/
 ```
+
+These results were generated before the bounded HDF5 streaming segment
+assembly patch in this branch, so use them as the baseline for the next remote
+comparison.
 
 The key finding is that local-search candidate scoring is not the bottleneck.
 The remaining cost is overwhelmingly local-search precompute, driven by the
@@ -320,61 +412,87 @@ number of covariance rows loaded and aggregated per breakpoint.
 
 | Chrom | Wall time | Max RSS | Local search | LS % wall | Precompute | Search |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| chr21 | 347.91 s | 10.76 GiB | 93.87 s | 27.0% | 71.09 s | 0.035 s |
-| chr22 | 479.42 s | 11.60 GiB | 158.71 s | 33.1% | 123.07 s | 0.031 s |
+| chr21 | 349.74 s | 1.76 GiB | 62.97 s | 18.0% | 62.70 s | 0.039 s |
+| chr22 | 385.07 s | 4.87 GiB | 81.31 s | 21.1% | 81.06 s | 0.032 s |
+| chr10 | 1841.74 s | 19.33 GiB | 461.60 s | 25.1% | 460.58 s | 0.118 s |
+| chr11 | 5209.00 s | 97.61 GiB | 1730.30 s | 33.2% | 1729.10 s | 0.121 s |
 
 Rows loaded and precompute time scale closely:
 
-- chr21 loaded 603.0M rows across 23 breakpoint searches.
-- chr22 loaded 920.1M rows across 23 breakpoint searches.
-- chr21 filtered 603.0M loaded rows to 327.3M candidate rows and 181.9M
-  eligible rows.
-- chr22 filtered 920.1M loaded rows to 375.9M candidate rows and 205.1M
-  eligible rows.
+- chr21 loaded 601.8M rows across 23 breakpoint searches and filtered them to
+  327.3M candidate rows and 181.9M eligible rows.
+- chr22 loaded 918.3M rows across 23 breakpoint searches and filtered them to
+  375.8M candidate rows and 205.1M eligible rows.
+- chr10 loaded 6.02B rows across 84 breakpoint searches and filtered them to
+  1.94B candidate rows and 999.3M eligible rows.
+- chr11 loaded 43.03B rows across 83 breakpoint searches and filtered them to
+  3.01B candidate rows and 1.22B eligible rows.
 
-Phase timing identified active-array append/recanonicalization as the dominant
-remaining cost:
+Phase timing still identifies segment row assembly as the dominant local-search
+runtime bucket:
 
-| Chrom | Append | Canonicalize | Horizontal | Normalize |
+| Chrom | Append/assembly | Horizontal | Normalize | Active rows peak |
 | --- | ---: | ---: | ---: | ---: |
-| chr21 | 30.27 s (42.6%) | 18.89 s (26.6%) | 11.84 s (16.6%) | 7.19 s (10.1%) |
-| chr22 | 62.47 s (50.8%) | 34.47 s (28.0%) | 13.54 s (11.0%) | 8.16 s (6.6%) |
+| chr21 | 40.36 s (64.4%) | 13.23 s (21.1%) | 7.54 s (12.0%) | 27.9M |
+| chr22 | 57.44 s (70.9%) | 13.93 s (17.2%) | 8.03 s (9.9%) | 120.2M |
+| chr10 | 347.65 s (75.5%) | 66.69 s (14.5%) | 38.43 s (8.3%) | 635.7M |
+| chr11 | 1585.92 s (91.7%) | 82.32 s (4.8%) | 48.49 s (2.8%) | 7.15B |
 
-Worst breakpoint windows in the chr21/chr22 profile:
+Worst chr11 breakpoint windows in the latest profile:
 
-| Chrom | Index | Rows | Candidate | Eligible | Partitions | Precompute |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| chr22 | 15 | 134.4M | 39.3M | 30.3M | 9 | 22.592 s |
-| chr22 | 16 | 139.9M | 29.5M | 11.3M | 10 | 19.772 s |
-| chr22 | 14 | 108.4M | 20.9M | 7.4M | 11 | 15.311 s |
-| chr22 | 9 | 76.2M | 32.4M | 18.2M | 11 | 10.700 s |
-| chr21 | 10 | 58.0M | 29.9M | 18.6M | 16 | 7.747 s |
+| Index | Window | Rows | Candidate | Eligible | Partitions | Precompute | Assembly |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 28 | 49.87-52.62 Mb | 6.80B | 326.6M | 82.5M | 15 | 366.94 s | 356.48 s |
+| 27 | 47.01-49.87 Mb | 6.26B | 480.1M | 186.2M | 17 | 347.72 s | 324.35 s |
+| 29 | 52.62-55.09 Mb | 7.09B | 193.7M | 15.7M | 18 | 265.28 s | 262.95 s |
+| 30 | 55.09-56.41 Mb | 7.25B | 130.6M | 81.5M | 25 | 208.68 s | 199.05 s |
+| 26 | 42.91-47.01 Mb | 4.90B | 295.0M | 37.5M | 24 | 138.63 s | 133.50 s |
+
+Additional chr11 timing from the raw log:
+
+- covariance calculation ran from `[02:17:55]` to `[02:40:22]`, about
+  22m27s;
+- matrix-to-vector ran from `[02:40:22]` to `[03:04:19]`, about 23m57s;
+- breakpoint finding before local search ran from `[03:04:19]` to
+  `[03:11:07]`, about 6m48s;
+- local search ran from `[03:11:07]` to `[03:39:57]`, about 28m50s;
+- final metric/write ran from `[03:39:57]` to `[03:44:20]`, about 4m23s.
+
+Important memory caveat:
+
+- `max_rss_mib` in breakpoint logs is a process lifetime high-water mark from
+  `resource.getrusage`, not current RSS.
+- chr11 already reported about 99.95 GiB at breakpoint index 0, so the peak
+  likely occurred before local search or during the first breakpoint rather
+  than in the later giant 47-56 Mb local-search windows.
+- Add current-RSS instrumentation around pipeline stages before attributing
+  the 97.61 GiB chr11 peak solely to local search.
 
 Implications:
 
 - Do not prioritize `_search_array()` candidate scoring. It is effectively
   free at this scale.
 - Do not add JIT yet.
-- The highest leverage changes are reducing repeated active-row append and
-  canonicalization work.
-- Horizontal aggregation is the next numeric target after append/canonicalize
-  improvements are remotely validated.
+- The highest leverage local-search runtime change is reducing HDF5 segment
+  row assembly, which the bounded streaming patch now targets.
+- Horizontal aggregation and normalization are the next numeric targets after
+  streaming segment assembly is remotely validated.
 
-### Post-Append Profiling Targets
+### Post-Streaming-Segment Profiling Targets
 
-After the append/segment row assembly changes are validated, review the next
+After bounded HDF5 segment assembly is validated remotely, review the next
 profile in this order:
 
 1. Horizontal aggregation.
-   This was still material in the chr21/chr22 profile: about 11.7 seconds for
-   chr21 and 13.4 seconds for chr22. The current path uses
+   This was still material in the latest chr21/chr22 profile: about 13.2
+   seconds for chr21 and 13.9 seconds for chr22. The current path uses
    `np.unique(row_hi, return_inverse=True)` plus `np.bincount()` per chunk,
    which is exact but allocation-heavy. Possible follow-ups are grouped
    reduction after sorting `hi` within the chunk, dense local accumulators
    indexed by the local locus window, or processing partition slices directly
    into accumulators.
 2. Normalization.
-   This was moderate: about 6.9 seconds for chr21 and 7.8 seconds for chr22.
+   This was moderate: about 7.5 seconds for chr21 and 8.0 seconds for chr22.
    The current path does two `np.searchsorted()` calls into diagonal arrays per
    chunk, filters positive diagonals, then computes `r²`. Possible follow-ups
    are dense or dictionary-style diagonal lookup scoped to active segment loci,
@@ -405,14 +523,22 @@ profile in this order:
 Watch these ratios in each remote profiling run:
 
 - `append_seconds / precompute_seconds`;
+- `hdf5_read_seconds / precompute_seconds`;
+- `chunk_filter_seconds / precompute_seconds`;
+- `dedup_seconds / precompute_seconds`;
+- `accumulator_seconds / precompute_seconds`;
 - `horizontal_seconds / precompute_seconds`;
 - `normalize_seconds / precompute_seconds`;
+- `rows_after_dedup / rows_read`;
+- `peak_chunk_rows`;
 - `group_total_seconds`;
 - `local_search_unaccounted_seconds`;
 - wall time outside local search: `elapsed_seconds - set_elapsed_seconds`.
 
-If append drops as expected, horizontal aggregation and group
-load/canonicalization are the next practical targets.
+If append/assembly drops as expected, horizontal aggregation and normalization
+are the next practical local-search targets. If `hdf5_read_seconds` dominates,
+review chunk sizing and HDF5 compression/read behavior before touching numeric
+kernels.
 
 ## Non-Storage To-Dos
 
@@ -434,19 +560,24 @@ Acceptance criteria:
 
 Run this remotely only; do not run real-data profiling from a local checkout.
 
-### 2. Remote Validation of Append/Canonicalize Reduction
+### 2. Remote Validation of Streaming HDF5 Segment Assembly
 
-Validate the canonical partition cache and segment-slice precompute path on
-remote chr21/chr22 before pursuing deeper numeric changes.
+Validate the bounded HDF5 segment assembly path on remote chr21/chr22 before
+pursuing deeper numeric changes. Then run chr10/chr11 one at a time.
 
 Acceptance criteria:
 
 - final `fourier_ls` BED remains byte-identical;
 - max RSS does not increase;
-- `canonicalize_seconds` drops substantially because group partitions are
-  canonicalized once;
-- `append_seconds` drops substantially because full active arrays are not
-  repeatedly recanonicalized.
+- `append_seconds` drops substantially because full segment row arrays are no
+  longer materialized;
+- `peak_chunk_rows` remains bounded and is much smaller than the old active
+  row peaks on chr10/chr11;
+- new HDF5 fields explain the assembly bucket:
+  `hdf5_read_seconds`, `chunk_filter_seconds`, `dedup_seconds`, and
+  `accumulator_seconds`;
+- `rows_after_dedup` and `duplicate_rows_skipped` confirm duplicate handling
+  remains active without full segment canonicalization.
 
 ### 3. Representative chr10/chr11 Local-Search Validation
 
@@ -552,11 +683,59 @@ with `calc-covariance` or `run`.
   caches.
 - Metric calculation streams partition row chunks through the HDF5 reader.
 - Single-worker grouped local search caches only HDF5 partition metadata and
-  reads segment row ranges from HDF5 chunks instead of preloading and
-  canonicalizing full partition groups.
+  splits segment loci into bounded `lo` windows before reading and aggregating
+  HDF5 chunks.
 - Matrix-to-vector reads HDF5 partitions through the reader; it is still
   one-partition-at-a-time rather than fully segment-chunked.
 - Example workflows and diagnostics have been updated for HDF5.
+
+### Known Behavior Divergence: Duplicate Positions
+
+This is a known, intentional behavior difference to revisit if future
+chromosomes diverge. It has not appeared to change EUR chr21/chr22 outputs so
+far, but it is not perfectly legacy-equivalent in cutoff-sensitive duplicate
+position cases.
+
+Current behavior:
+
+- `calc_covariance()` collapses duplicate physical VCF positions before
+  pairwise LD, keeping the first variant at each position.
+- This keeps retained covariance rows sorted by physical `(lo, hi)` for the
+  HDF5 fast writer path and avoids the memory-heavy generic writer on
+  duplicate-heavy partitions.
+- Current EUR chr21/chr22 results do not appear to diverge from this behavior.
+
+Legacy nuance:
+
+- Legacy covariance generation wrote duplicate-position variants as separate
+  rows, but downstream matrix readers keyed data by physical position.
+- The legacy reader therefore kept the first retained covariance row for each
+  physical `(lo, hi)` pair.
+- Pre-LD duplicate collapse is not perfectly equivalent in cutoff-sensitive
+  edge cases: if the first duplicate-position variant produces no retained row
+  for a pair but a later duplicate variant would have survived the cutoff,
+  legacy could keep the later retained row while the current path drops it.
+
+Current decision:
+
+- Keep pre-LD duplicate-position collapse because it preserves the HDF5 writer
+  memory/speed path and has not shown observed chr21/chr22 divergence.
+- Treat it as correctness-sensitive. If future profiles or chromosomes show
+  breakpoint divergence, revisit this before changing local-search numerics.
+
+Possible future writer path:
+
+- Keep duplicate-position variants through pairwise LD.
+- Exploit the pairwise kernel's SNP-index output order and non-decreasing
+  physical positions to avoid a full partition-wide `lexsort`.
+- Map variant indexes to physical-position ranks, then chunk through retained
+  rows and drop adjacent duplicate physical `(lo_rank, hi_rank)` keys,
+  preserving first-retained-pair semantics.
+- Validate that `(lo_rank, hi_rank)` is non-decreasing; fall back to the
+  generic writer only if that invariant fails.
+- This should change extra writer work from `O(n_pairs log n_pairs)` sorting
+  plus large temporaries to a chunked `O(n_pairs)` scan with
+  `O(n_snps + chunk_rows)` extra memory.
 
 ### HDF5 Contract
 
@@ -612,13 +791,17 @@ Writer requirements and invariants:
   reads.
 - `iter_owned_rows()` applies the partition ownership rules used by metric and
   matrix-to-vector paths while streaming chunks.
+- `read_lo_index()` returns both `lo_values` and `lo_offsets` so local search
+  can estimate row counts for bounded `lo` windows before reading row data.
 - `read_diagonal()` and `read_loci()` are small enough to load eagerly per
   group or per chromosome pass.
 
 Local search, metric calculation, and matrix-to-vector all stream HDF5 rows in
-bounded chunks and discard chunk temporaries after aggregation. This replaced
-the earlier memory-heavy pattern of inflating full compressed arrays, then
-canonicalizing and slicing them in memory.
+bounded chunks and discard chunk temporaries after aggregation. Local search
+additionally bounds segment assembly by indexed `lo` windows, so it no longer
+materializes and canonicalizes one full segment row array before aggregation.
+This replaced the earlier memory-heavy pattern of inflating full compressed
+arrays, then canonicalizing and slicing them in memory.
 
 Correctness requirements remain strict: breakpoint loci, `N_zero`, final BED,
 and selected local-search breakpoint positions must remain exact. Metric sums
@@ -627,25 +810,22 @@ aggregation order.
 
 ### Validation Status and Remaining Work
 
-Local checks that passed after the HDF5/example updates:
+Local checks that passed after the latest streaming segment assembly update:
 
 ```text
-snakemake -s examples/ldetect_example/Snakefile -n
-snakemake -s examples/ldetect_original/Snakefile -n --config chromosomes='[21]'
-snakemake -s examples/ldetect_original/Snakefile.diagnostics -n --config chromosomes='[21]' case_chromosome=21 control_chromosome=21
-snakemake -s examples/MacDonald2022/Snakefile -n
-uv run ruff check src/ldetect2 tests examples/ldetect_example/scripts examples/ldetect_original/scripts examples/MacDonald2022/scripts
-uv run pytest -q tests/test_covariance_io.py tests/test_covariance_array.py tests/test_covariance_summary.py tests/test_shrinkage.py tests/test_metric.py tests/test_local_search.py tests/test_cmd_run.py tests/test_partitions.py tests/integration/test_pipeline.py
+UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache uv run pytest -q
+UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache uv run ruff check src/ldetect2 tests examples/ldetect_original/scripts
 git diff --check
 ```
 
 Real-data profiling remains remote-only. Next remote checks:
 
 1. Re-test chr21/chr22 for byte-identical `fourier_ls` BED output, neutral or
-   lower RSS, and explainable HDF5 reader overhead.
-2. Re-test chr11 covariance generation after the writer fast path and
-   duplicate-position collapse.
-3. Re-run chr10/chr11 one at a time after chr21/chr22 are clean.
+   lower RSS, and lower/explainable segment assembly time.
+2. Re-run chr10/chr11 one at a time after chr21/chr22 are clean.
+3. Add current-RSS checkpoints around Step 2, Step 3, Step 4, local-search
+   start, first breakpoint start/end, and final metric if chr11 RSS remains
+   near 100 GiB.
 4. Tune `chunk_rows` only from remote profiles.
 5. Add HDF5 reader I/O or current-RSS diagnostics only if remote profiles show
    unexplained elapsed time or RSS.

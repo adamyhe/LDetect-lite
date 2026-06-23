@@ -47,12 +47,21 @@ BREAKPOINT_COLS = [
     "normalize_seconds",
     "vertical_seconds",
     "horizontal_seconds",
+    "hdf5_read_seconds",
+    "chunk_filter_seconds",
+    "dedup_seconds",
+    "accumulator_seconds",
     "candidate_rows",
     "eligible_rows",
     "normalized_rows",
+    "rows_read",
+    "rows_after_filter",
+    "rows_after_dedup",
+    "duplicate_rows_skipped",
     "chunks",
     "segments",
     "active_rows_peak",
+    "peak_chunk_rows",
 ]
 
 GROUP_COLS = [
@@ -91,12 +100,21 @@ BY_CHROM_COLS = [
     "normalize_seconds",
     "vertical_seconds",
     "horizontal_seconds",
+    "hdf5_read_seconds",
+    "chunk_filter_seconds",
+    "dedup_seconds",
+    "accumulator_seconds",
     "candidate_rows",
     "eligible_rows",
     "normalized_rows",
+    "rows_read",
+    "rows_after_filter",
+    "rows_after_dedup",
+    "duplicate_rows_skipped",
     "chunks",
     "segments",
     "active_rows_peak",
+    "peak_chunk_rows",
     "group_count",
     "group_breakpoints",
     "group_rows",
@@ -116,12 +134,20 @@ _BREAKPOINT_EXTRA_FLOAT_COLS = [
     "normalize_seconds",
     "vertical_seconds",
     "horizontal_seconds",
+    "hdf5_read_seconds",
+    "chunk_filter_seconds",
+    "dedup_seconds",
+    "accumulator_seconds",
 ]
 
 _BREAKPOINT_EXTRA_INT_COLS = [
     "candidate_rows",
     "eligible_rows",
     "normalized_rows",
+    "rows_read",
+    "rows_after_filter",
+    "rows_after_dedup",
+    "duplicate_rows_skipped",
     "chunks",
     "segments",
 ]
@@ -133,7 +159,7 @@ _SET_RE = re.compile(
 )
 _GROUP_RE = re.compile(r"Local search (?P<subset>\S+) group loaded: ")
 _BP_PREFIX_RE = re.compile(r"(?P<subset>\S+) breakpoint idx=")
-_KV_RE = re.compile(r"(?P<key>[A-Za-z_]+)=(?P<value>None|-?[0-9.]+)")
+_KV_RE = re.compile(r"(?P<key>[A-Za-z0-9_]+)=(?P<value>None|-?[0-9.]+)")
 
 
 def parse_elapsed(value: str) -> float | None:
@@ -411,6 +437,7 @@ def aggregate_by_chrom(
         for field in _BREAKPOINT_EXTRA_INT_COLS:
             out_row[field] = _sum_int_field(rows, field)
         out_row["active_rows_peak"] = _max_int_field(rows, "active_rows_peak")
+        out_row["peak_chunk_rows"] = _max_int_field(rows, "peak_chunk_rows")
         out_row["group_count"] = str(len(groups)) if groups else ""
         out_row["group_breakpoints"] = _sum_int_field(groups, "breakpoints")
         out_row["group_rows"] = _sum_int_field(groups, "rows")
@@ -585,6 +612,10 @@ def _plot_stacked_precompute_phases(plt, path: Path, rows) -> None:
         "normalize_seconds",
         "vertical_seconds",
         "horizontal_seconds",
+        "hdf5_read_seconds",
+        "chunk_filter_seconds",
+        "dedup_seconds",
+        "accumulator_seconds",
     ]
     plot_rows = [row for row in rows if any(row.get(field) for field in phase_fields)]
     if not plot_rows:

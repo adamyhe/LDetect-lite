@@ -238,7 +238,9 @@ def _assert_precompute_matches_legacy(
     assert fast._array_sum_horiz is not None
     assert fast.precomputed["locus_list"] == legacy.precomputed["locus_list"]
     for offset, locus in enumerate(fast.precomputed["locus_list"]):
-        legacy_data = legacy.precomputed["data"][locus]
+        legacy_data = legacy.precomputed["data"].get(
+            locus, {"sum_vert": 0.0, "sum_horiz": 0.0}
+        )
         assert fast._array_sum_vert[offset] == pytest.approx(
             float(legacy_data["sum_vert"])
         )
@@ -330,6 +332,66 @@ def test_local_search_matches_legacy_with_cross_partition_duplicate_pairs(
         first=100,
         last=500,
     )
+
+
+def test_hdf5_streaming_precompute_matches_legacy_with_tiny_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ldetect2.local_search as local_search_mod
+
+    monkeypatch.setattr(local_search_mod, "HDF5_LOCAL_SEARCH_CHUNK_ROWS", 2)
+    partitions = {
+        (100, 500): [
+            (100, 100, 1.0),
+            (200, 200, 1.0),
+            (300, 300, 1.0),
+            (400, 400, 1.0),
+            (500, 500, 0.0),
+            (100, 300, 0.8),
+            (200, 400, 0.7),
+            (300, 500, 0.6),
+        ],
+        (200, 600): [
+            (200, 200, 1.0),
+            (300, 300, 1.0),
+            (400, 400, 1.0),
+            (500, 500, 1.0),
+            (600, 600, 1.0),
+            (100, 300, 0.1),
+            (400, 200, 0.2),
+            (300, 500, 0.9),
+        ],
+        (400, 700): [
+            (400, 400, 1.0),
+            (600, 600, 1.0),
+            (700, 700, 1.0),
+            (400, 600, 0.5),
+            (600, 700, 0.4),
+        ],
+    }
+    store = _make_custom_partitioned_store(tmp_path, partitions)
+
+    _assert_precompute_matches_legacy(
+        store,
+        [300, 500, 650],
+        1,
+        300,
+        650,
+        first=100,
+        last=700,
+    )
+    bp, metric = _assert_searches_match(
+        store,
+        [300, 500, 650],
+        1,
+        300,
+        650,
+        first=100,
+        last=700,
+    )
+    assert bp is None or 300 <= bp <= 650
+    assert metric is not None
 
 
 def test_array_local_search_keeps_unchanged_breakpoint(tmp_path: Path) -> None:
