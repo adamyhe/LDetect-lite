@@ -347,6 +347,7 @@ def calc_covariance(
             i_pos=i_pos,
             j_pos=j_pos,
             shrink_ld=ds2_arr,
+            assume_canonical_sorted_unique=True,
         )
         return
 
@@ -362,4 +363,5 @@ def calc_covariance(
         naive_ld=d_naive_arr,
         i_id=rs_arr[ii],
         j_id=rs_arr[jj],
+        assume_canonical_sorted_unique=True,
     )

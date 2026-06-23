@@ -68,6 +68,84 @@ def _make_compact_store(
     return store, partitions
 
 
+def test_hdf5_writer_trusted_canonical_path_matches_generic_path(
+    tmp_path: Path,
+) -> None:
+    """Trusted writer mode should preserve canonical rows without reordering."""
+    i_pos = np.array([100, 100, 200, 200, 300], dtype=np.int32)
+    j_pos = np.array([100, 200, 200, 300, 300], dtype=np.int32)
+    shrink_ld = np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64)
+    generic = tmp_path / "generic.h5"
+    trusted = tmp_path / "trusted.h5"
+
+    write_covariance_partition_hdf5(
+        generic,
+        i_pos=i_pos,
+        j_pos=j_pos,
+        shrink_ld=shrink_ld,
+    )
+    write_covariance_partition_hdf5(
+        trusted,
+        i_pos=i_pos,
+        j_pos=j_pos,
+        shrink_ld=shrink_ld,
+        assume_canonical_sorted_unique=True,
+    )
+
+    import h5py
+
+    with h5py.File(generic, "r") as generic_h5, h5py.File(trusted, "r") as trusted_h5:
+        for dataset in (
+            "covariance/lo",
+            "covariance/hi",
+            "covariance/shrink_ld",
+            "index/diag_pos",
+            "index/diag_val",
+            "index/lo_values",
+            "index/lo_offsets",
+        ):
+            np.testing.assert_array_equal(
+                generic_h5[dataset][:], trusted_h5[dataset][:]
+            )
+
+
+@pytest.mark.parametrize(
+    ("i_pos", "j_pos", "message"),
+    [
+        (
+            np.array([100, 300], dtype=np.int32),
+            np.array([100, 200], dtype=np.int32),
+            "canonical",
+        ),
+        (
+            np.array([100, 300, 200], dtype=np.int32),
+            np.array([100, 300, 200], dtype=np.int32),
+            "sorted",
+        ),
+        (
+            np.array([100, 200, 200], dtype=np.int32),
+            np.array([100, 200, 200], dtype=np.int32),
+            "duplicates",
+        ),
+    ],
+)
+def test_hdf5_writer_trusted_path_enforces_sorted_unique_rows(
+    tmp_path: Path,
+    i_pos: np.ndarray,
+    j_pos: np.ndarray,
+    message: str,
+) -> None:
+    """Trusted writer mode should fail instead of writing invalid indexes."""
+    with pytest.raises(ValueError, match=message):
+        write_covariance_partition_hdf5(
+            tmp_path / "bad.h5",
+            i_pos=i_pos,
+            j_pos=j_pos,
+            shrink_ld=np.ones(i_pos.size, dtype=np.float64),
+            assume_canonical_sorted_unique=True,
+        )
+
+
 def _make_two_partition_store(
     tmp_path: Path,
     *,

@@ -12,12 +12,13 @@ fourier_ls`, where the first-order fix is to avoid unrequested local-search
 subsets. After that, the remaining cost is split between local-search
 precompute work and bounded metric/covariance I/O.
 
-This handoff separates two tracks:
+This handoff now has two tracks:
 
-1. Non-storage optimizations that can be implemented against the current `.npz`
-   covariance partitions.
-2. A storage migration path to HDF5 partition files with local-search- and
-   metric-friendly chunking and indexes.
+1. Completed non-storage optimizations that reduced unrequested work and
+   repeated local-search precompute.
+2. The current HDF5 storage path, which replaced `.npz` intermediate
+   covariance partitions and gives metric, local-search, and matrix-to-vector
+   code a shared chunked reader.
 
 The guiding constraint is that peak RSS must not increase for whole-chromosome
 runs. Any optimization that trades runtime for larger resident arrays should be
@@ -25,8 +26,9 @@ opt-in or guarded by instrumentation.
 
 ## Non-Storage Optimization Status
 
-These changes keep the existing `.npz` covariance artifacts and focus on
-reducing repeated local-search work.
+These changes were implemented before or alongside the HDF5 migration and
+focus on reducing repeated local-search work. The current production
+intermediate format is HDF5, not `.npz`.
 
 ### Completed
 
@@ -138,8 +140,8 @@ This is intentionally not used for:
 
 Expected benefit:
 
-- Fewer repeated `.npz` loads for adjacent breakpoint windows that touch the
-  same partition range.
+- Fewer repeated partition loads for adjacent breakpoint windows that touch
+  the same partition range.
 - No additional memory multiplication across process workers.
 
 Memory risk status:
@@ -381,10 +383,10 @@ profile in this order:
 3. Group load and canonicalization outside breakpoint rows.
    Per-breakpoint phase totals still may not explain all local-search elapsed
    time. Use `local_search_groups.tsv`, `group_total_seconds`, and
-   `local_search_unaccounted_seconds` to check whether `.npz` load/inflation or
-   group canonicalization has become significant. If it has, reduce redundant
+   `local_search_unaccounted_seconds` to check whether HDF5 open/read overhead
+   or group metadata setup has become significant. If it has, reduce redundant
    partition group loads, merge adjacent groups only when RSS allows it, or
-   delay canonicalization for partitions that contribute only tiny row slices.
+   delay work for partitions that contribute only tiny row slices.
 4. Metric recomputation around local search.
    This sits outside the per-breakpoint local-search rows but can affect wall
    time. The current plan is to validate streaming metrics first. If metric
@@ -518,33 +520,31 @@ Likely candidates if still hot:
 - streaming metric calculation only if partition rereads become a material
   runtime regression after the memory fix is validated.
 
-### 8. Decide Whether To Accelerate HDF5
+### 8. HDF5 Validation and Tuning
 
-Given chr10/chr11 failures even on 128 GiB nodes, move HDF5 planning earlier
-than originally intended, but do not start it before validating the streaming
-metric fix. HDF5 is a larger migration with new dependency, compatibility, and
-storage-layout risks; the streaming metric change is much smaller and attacks a
-known full-chromosome allocation immediately.
+HDF5 has been promoted and implemented. The remaining work is validation and
+tuning, not deciding whether to start the migration.
 
-Recommended decision gate:
+Recommended next checks:
 
-- If streaming metrics make chr10/chr11 complete with acceptable RSS, keep HDF5
-  as the next storage project after local-search row-assembly profiling.
-- If chr10/chr11 still fail or local-search partition inflation remains the
-  peak RSS driver, promote HDF5 to the next major implementation phase before
-  dense accumulators, JIT, or broader multiprocessing.
+- Re-profile remote chr21/chr22 first to confirm byte-identical BED output,
+  lower or neutral RSS, and explainable HDF5 reader overhead.
+- Re-run chr10/chr11 remotely one at a time after chr21/chr22 are clean.
+- Tune chunk size only from remote profiles; avoid local real-data profiling.
+- Keep HDF5 as a bounded reader path, not a large resident cache.
 
-## HDF5 and Chunked Reader Migration Plan
+## HDF5 and Chunked Reader Status
 
-The current compressed `.npz` archives are storage-efficient but not friendly
-to bounded memory reads. `np.load(..., mmap_mode=...)` does not give true
-partial array access for compressed `.npz` members; each touched array member
-must be inflated before it can be sliced. HDF5 gives us one partition artifact
-with chunked, compressed datasets that can be read in bounded slices.
+HDF5 is now the production covariance partition format. The earlier compressed
+`.npz` archives were storage-efficient but not friendly to bounded memory
+reads: `np.load(..., mmap_mode=...)` does not give true partial array access
+for compressed `.npz` members, so each touched array member must be inflated
+before it can be sliced. HDF5 gives us one partition artifact with chunked,
+compressed datasets that can be read in bounded slices.
 
-The goal is to replace `.npz` intermediate covariance partitions with HDF5
-partition files that support local-search, metric, and matrix-to-vector chunk
-reads without requiring raw `.npy` caches.
+The implemented goal was to replace `.npz` intermediate covariance partitions
+with HDF5 partition files that support local-search, metric, and
+matrix-to-vector chunk reads without requiring raw `.npy` caches.
 
 Compatibility stance:
 
@@ -561,7 +561,7 @@ scheme, one reader interface, and no long-term dual reader/writer support.
 
 ### Implementation Status
 
-Baseline HDF5 migration has been implemented:
+Baseline HDF5 migration has been implemented locally:
 
 - `h5py` is now a normal project dependency.
 - `CovarianceStore.partition_path()` returns `.h5` partition paths.
@@ -575,6 +575,10 @@ Baseline HDF5 migration has been implemented:
 - Matrix-to-vector reads HDF5 partitions through the new reader; it is still
   one-partition-at-a-time rather than fully segment-chunked.
 - Tests and example fixtures now generate HDF5 covariance partitions.
+- Example workflows and diagnostics have been updated for HDF5:
+  `examples/ldetect_example` converts the legacy gzipped text fixture to `.h5`,
+  and `examples/ldetect_original/scripts/diagnose_run.py` summarizes HDF5
+  partition files with `h5py`.
 
 Remaining implementation follow-ups:
 
@@ -582,6 +586,21 @@ Remaining implementation follow-ups:
 - Tune `chunk_rows` from remote chr21/22 and chr11 profiles.
 - Consider true chunked matrix-to-vector accumulation if it becomes the next
   wall-time or RSS bottleneck.
+
+Local validation completed after the example updates:
+
+```text
+snakemake -s examples/ldetect_example/Snakefile -n
+snakemake -s examples/ldetect_original/Snakefile -n --config chromosomes='[21]'
+snakemake -s examples/ldetect_original/Snakefile.diagnostics -n --config chromosomes='[21]' case_chromosome=21 control_chromosome=21
+snakemake -s examples/MacDonald2022/Snakefile -n
+uv run ruff check src/ldetect2 tests examples/ldetect_example/scripts examples/ldetect_original/scripts examples/MacDonald2022/scripts
+uv run pytest -q tests/test_covariance_io.py tests/test_covariance_array.py tests/test_covariance_summary.py tests/test_shrinkage.py tests/test_metric.py tests/test_local_search.py tests/test_cmd_run.py tests/test_partitions.py tests/integration/test_pipeline.py
+git diff --check
+```
+
+All of these passed locally. Real-data profiling and full diagnostic execution
+remain remote-only.
 
 ### Target HDF5 Layout
 
@@ -640,38 +659,35 @@ The cache should optimize for bounded local-search reads, not maximum
 compression ratio. A slightly larger file is acceptable if it avoids inflating
 100 MB archive members into much larger temporary arrays.
 
-### CLI and Store Migration
+### CLI and Store Status
 
-Make HDF5 the covariance partition cache format used by both:
+HDF5 is now the covariance partition cache format used by both:
 
 ```text
 ldetect2 calc-covariance
 ldetect2 run
 ```
 
-Recommended CLI cleanup:
+Current CLI shape:
 
-- Remove or deprecate `--covariance-cache compact|full` as a storage-schema
-  selector.
-- Replace it with `--covariance-metadata compact|full` only if full debug
-  metadata is still useful.
-- Default to compact metadata: `lo`, `hi`, `shrink_ld`, and indexes.
-- Keep full metadata optional because string/id datasets can increase file
+- `--covariance-cache compact|full` remains as the metadata schema selector.
+- It no longer selects `.npz` versus another storage format; all production
+  covariance partitions are `.h5`.
+- Compact metadata remains the default: `lo`, `hi`, `shrink_ld`, and indexes.
+- Full metadata remains optional because string/id datasets can increase file
   size and are not needed by normal `run`.
 
-Store changes:
+Store status:
 
-- Change `CovarianceStore.partition_path()` to return
-  `{name}.{start}.{end}.h5`.
-- Update validation to inspect HDF5 attrs and required datasets instead of
-  `.npz` keys.
+- `CovarianceStore.partition_path()` returns `{name}.{start}.{end}.h5`.
+- Validation inspects HDF5 attrs and required datasets instead of `.npz` keys.
 - Any stale `.npz` files in an output directory should be ignored by production
   loaders.
 - If an HDF5 partition is missing or invalid, regenerate it.
 
 ### Loader Abstraction
 
-Introduce a small partition reader abstraction:
+The HDF5 migration introduced a small partition reader abstraction:
 
 ```python
 @dataclass(frozen=True)
@@ -706,7 +722,7 @@ class CovariancePartitionReader(Protocol):
 
 This keeps `LocalSearch` focused on row aggregation and avoids scattering
 storage-format checks through the algorithm. The only production implementation
-should be HDF5.
+is HDF5.
 
 Reader behavior:
 
@@ -743,10 +759,10 @@ Local-search group changes:
   accumulators.
 - Close readers and release group state after the group completes.
 
-This replaces the current memory-heavy shape:
+This replaced the earlier memory-heavy shape:
 
 ```text
-load full .npz arrays -> canonicalize full partition -> segment slice
+load full compressed arrays -> canonicalize full partition -> segment slice
 ```
 
 with:
@@ -767,7 +783,7 @@ For each metric calculation:
 4. Accumulate crossing-pair sums for the requested breakpoint set.
 5. Discard the chunk before reading the next one.
 
-This mirrors the new `.npz` streaming metric behavior but avoids inflating full
+This mirrors the streaming metric behavior while avoiding inflation of full
 compressed partition members before slicing.
 
 Acceptance nuance:
@@ -808,16 +824,16 @@ Correctness:
 
 Performance:
 
-- Re-run one representative `ldetect_original` chromosome, preferably EUR chr10
-  or chr11.
-- Compare local-search elapsed time and max RSS against current `.npz`.
+- Re-run EUR chr21/chr22 remotely first, then chr10 or chr11.
+- Compare local-search elapsed time and max RSS against the previous branch
+  baseline.
 - Confirm `--subset fourier_ls` output BED is identical to current output.
-- Track HDF5 file size versus current `.npz` for 10 MB, 50 MB, and 100 MB
+- Track HDF5 file size versus previous `.npz` files for 10 MB, 50 MB, and 100 MB
   partitions.
 
 Acceptance criteria:
 
-- No RSS increase relative to current `.npz` path.
+- No RSS increase relative to the previous branch baseline.
 - Identical final `fourier_ls` BED for the same inputs.
 - HDF5 partition storage does not require keeping `.npz` intermediates.
 - Local-search chunk size is configurable or at least centralized as a single
@@ -825,23 +841,29 @@ Acceptance criteria:
 
 ### Implementation Order
 
-1. Add `h5py` as a normal project dependency.
-2. Change `CovarianceStore.partition_path()` to `.h5` and update partition
+Completed:
+
+1. Added `h5py` as a normal project dependency.
+2. Changed `CovarianceStore.partition_path()` to `.h5` and updated partition
    validation for required attrs/datasets.
-3. Implement HDF5 writer from the arrays already produced by
+3. Implemented the HDF5 writer from the arrays already produced by
    `calc_covariance()`, including canonical sort/dedup and indexes.
-4. Add the HDF5 `CovariancePartitionReader` and chunk iterator tests.
-5. Update metric paths to stream through readers and match existing metric
+4. Added the HDF5 `CovariancePartitionReader` and chunk iterator tests.
+5. Updated metric paths to stream through readers and match existing metric
    fixtures.
-6. Update local search to use reader chunk iteration instead of preloading
+6. Updated local search to use reader chunk iteration instead of preloading
    canonical full partition groups.
-7. Update matrix-to-vector to use reader chunk iteration.
-8. Remove production `.npz` validation/load paths that are no longer used by
-   `run`, while keeping any narrow test helpers needed for fixture setup.
-9. Update diagnostics/profiling docs and logs to report HDF5 chunk counts,
-   chunk rows, and reader I/O seconds.
-10. Run representative chromosome validation before further numeric
-    optimization.
+7. Updated matrix-to-vector to read HDF5 partitions through the shared reader.
+8. Removed production `.npz` validation/load paths that are no longer used by
+   `run`, while keeping narrow fixture generation helpers where useful.
+9. Updated diagnostics and examples for HDF5 partition files.
+
+Still pending:
+
+1. Add or refine diagnostics to report HDF5 chunk counts, chunk rows, and
+   reader I/O seconds if remote profiles show unexplained elapsed time.
+2. Run representative remote chromosome validation before further numeric
+   optimization.
 
 ## Open Questions
 

@@ -106,6 +106,52 @@ def _lo_index(lo: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return values, offsets.astype(np.int64, copy=False)
 
 
+def _validate_canonical_sorted_unique(
+    lo: np.ndarray,
+    hi: np.ndarray,
+    *,
+    chunk_rows: int = 1_000_000,
+) -> None:
+    """Raise if rows are not canonical, sorted, and duplicate-free."""
+    if lo.shape != hi.shape:
+        raise ValueError("covariance position arrays must have identical shapes")
+    if lo.size == 0:
+        return
+
+    prev_lo = int(lo[0])
+    prev_hi = int(hi[0])
+    if prev_lo > prev_hi:
+        raise ValueError("covariance rows must be canonical with lo <= hi")
+
+    for start in range(1, lo.size, chunk_rows):
+        stop = min(start + chunk_rows, lo.size)
+        lo_chunk = lo[start:stop]
+        hi_chunk = hi[start:stop]
+        if np.any(lo_chunk > hi_chunk):
+            raise ValueError("covariance rows must be canonical with lo <= hi")
+        sorted_after_prev = (lo_chunk[0] > prev_lo) or (
+            lo_chunk[0] == prev_lo and hi_chunk[0] > prev_hi
+        )
+        if not sorted_after_prev:
+            raise ValueError(
+                "covariance rows must be sorted by (lo, hi) with no duplicates"
+            )
+        if lo_chunk.size > 1:
+            lo_prev = lo_chunk[:-1]
+            lo_next = lo_chunk[1:]
+            hi_prev = hi_chunk[:-1]
+            hi_next = hi_chunk[1:]
+            sorted_unique = (lo_next > lo_prev) | (
+                (lo_next == lo_prev) & (hi_next > hi_prev)
+            )
+            if not np.all(sorted_unique):
+                raise ValueError(
+                    "covariance rows must be sorted by (lo, hi) with no duplicates"
+                )
+        prev_lo = int(lo_chunk[-1])
+        prev_hi = int(hi_chunk[-1])
+
+
 def write_covariance_partition_hdf5(
     path: Path,
     *,
@@ -121,16 +167,39 @@ def write_covariance_partition_hdf5(
     i_id: np.ndarray | None = None,
     j_id: np.ndarray | None = None,
     compression: str | None = "lzf",
+    assume_canonical_sorted_unique: bool = False,
 ) -> None:
-    """Write one canonical, indexed HDF5 covariance partition."""
+    """Write one canonical, indexed HDF5 covariance partition.
+
+    When ``assume_canonical_sorted_unique`` is true, the input rows must
+    already be canonical ``lo <= hi`` rows sorted by ``(lo, hi)`` with no
+    duplicate pairs. This avoids the defensive sort/dedup allocations used for
+    generic callers and is intended for ``calc_covariance()``, whose pairwise
+    kernel emits unique rows in sorted SNP-index order.
+    """
     meta_inputs = [
         values
         for values in (naive_ld, i_gpos, j_gpos, i_id, j_id)
         if values is not None
     ]
-    lo, hi, shrink, ordered_meta = _canonical_ordered_rows(
-        i_pos, j_pos, shrink_ld, *meta_inputs
-    )
+    if assume_canonical_sorted_unique:
+        i_pos = _position_array(i_pos)
+        j_pos = _position_array(j_pos)
+        position_dtype = np.result_type(i_pos.dtype, j_pos.dtype)
+        lo = i_pos.astype(position_dtype, copy=False)
+        hi = j_pos.astype(position_dtype, copy=False)
+        shrink = np.asarray(shrink_ld, dtype=np.float64)
+        ordered_meta = tuple(np.asarray(values) for values in meta_inputs)
+    else:
+        lo, hi, shrink, ordered_meta = _canonical_ordered_rows(
+            i_pos, j_pos, shrink_ld, *meta_inputs
+        )
+    if lo.shape != hi.shape or lo.shape != shrink.shape:
+        raise ValueError("covariance row arrays must have identical shapes")
+    for values in ordered_meta:
+        if values.shape != lo.shape:
+            raise ValueError("metadata arrays must match covariance row shape")
+    _validate_canonical_sorted_unique(lo, hi)
     meta_iter = iter(ordered_meta)
     naive = next(meta_iter) if naive_ld is not None else None
     ig = next(meta_iter) if i_gpos is not None else None
