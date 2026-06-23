@@ -217,29 +217,22 @@ Validation priority:
 2. remote chr10 and chr11 one at a time;
 3. compare RSS and wall time against the previous materialized metric path.
 
-HDF5 was promoted from future storage work to the active implementation after
-chr10/chr11 remote runs continued to fail under high memory limits. Existing
-intermediate `.npz` covariance files do not need to remain readable; users
-should regenerate intermediates.
+HDF5 is now the production intermediate covariance format. Existing `.npz`
+intermediates are not supported by production paths; regenerate covariance
+outputs after this migration. Metric calculation, local search, and
+matrix-to-vector now share an HDF5 chunked reader.
 
-Completed HDF5 changes:
+The HDF5 writer enforces sorted canonical `(lo, hi)` rows and `lo_offsets`
+indexes. `calc_covariance()` uses a validated fast path that skips redundant
+write-time sort/dedup allocations, and duplicate physical VCF positions are
+collapsed before pairwise LD so common duplicate-position input does not force
+the memory-heavy writer fallback.
 
-1. Added `h5py` as a normal dependency.
-2. Changed covariance partition paths from `.npz` to `.h5`.
-3. Write canonical sorted `(lo, hi, shrink_ld)` datasets plus diagonal and
-   `lo_offsets` indexes during covariance calculation.
-4. Route metric, local search, and matrix-to-vector through one HDF5 chunked
-   reader interface.
-5. Remove production dual-format support; regenerate intermediates instead of
-   reading old `.npz` files.
-6. Update example workflows and diagnostics to write/read HDF5 partitions.
-
-Status: baseline implementation is complete locally. HDF5 is now the
-production intermediate covariance format, metric calculation streams HDF5 row
-chunks, and grouped single-worker local search reads segment row ranges from
-HDF5 instead of preloading full partition groups. The example Snakemake DAGs
-dry-run successfully with the new `.h5` paths. Remote profiling is still needed
-to tune chunk sizes and confirm chr10/chr11 RSS.
+Step 2 covariance generation can still be the failing phase when a worker is
+killed abruptly, because each process owns its pairwise LD arrays and write
+temporaries. Remote profiling is still needed to tune chunk sizes and confirm
+chr10/chr11 RSS. See `notes/local-search-memory-speed-handoff.md` for the HDF5
+contract and validation checklist.
 
 ### Post-append optimization order
 

@@ -7,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.shrinkage import calc_covariance, partition_chromosome
@@ -63,6 +64,23 @@ def _vcf_stream() -> StringIO:
     )
 
 
+def _duplicate_position_vcf_stream() -> StringIO:
+    return StringIO(
+        "\n".join(
+            [
+                "##fileformat=VCFv4.2",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+                "\tsample_a\tsample_b",
+                "1\t100\trs_a\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|0",
+                "1\t100\trs_b\tC\tT\t.\tPASS\t.\tGT\t0|0\t0|1",
+                "1\t200\trs_c\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|1",
+                "1\t300\trs_d\tA\tG\t.\tPASS\t.\tGT\t1|1\t0|1",
+                "",
+            ]
+        )
+    )
+
+
 def test_calc_covariance_skips_population_monomorphic_variant(tmp_path: Path) -> None:
     """Match reference ldetect: apply cutoff before adding diagonal shrinkage."""
     map_path = tmp_path / "map.gz"
@@ -86,6 +104,40 @@ def test_calc_covariance_skips_population_monomorphic_variant(tmp_path: Path) ->
 
     assert 100 not in positions
     assert {200, 300}.issubset(positions)
+
+
+def test_calc_covariance_canonicalizes_duplicate_physical_positions(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Duplicate VCF positions should be collapsed before pairwise LD."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    out_path = tmp_path / "duplicate-position.h5"
+    calc_covariance(
+        vcf_stream=_duplicate_position_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=out_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    captured = capsys.readouterr()
+    assert "skipped 1 duplicate-position variant" in captured.err
+
+    with open_covariance_reader(out_path, 100, 300) as reader:
+        rows = reader.read_all()
+        lo_values = reader.read_loci()
+
+    assert np.all(rows.lo <= rows.hi)
+    assert np.all(
+        (rows.lo[1:] > rows.lo[:-1])
+        | ((rows.lo[1:] == rows.lo[:-1]) & (rows.hi[1:] > rows.hi[:-1]))
+    )
+    np.testing.assert_array_equal(lo_values, np.unique(rows.lo))
 
 
 def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:

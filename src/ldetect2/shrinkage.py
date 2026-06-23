@@ -325,6 +325,31 @@ def calc_covariance(
             file=sys.stderr,
         )
 
+    duplicate_positions = 0
+    if all_pos:
+        seen_positions: set[int] = set()
+        unique_pos: list[int] = []
+        unique_rs: list[str] = []
+        unique_haps: list[list[int]] = []
+        for pos, rs, row_haps in zip(all_pos, all_rs, haps, strict=True):
+            if pos in seen_positions:
+                duplicate_positions += 1
+                continue
+            seen_positions.add(pos)
+            unique_pos.append(pos)
+            unique_rs.append(rs)
+            unique_haps.append(row_haps)
+        all_pos = unique_pos
+        all_rs = unique_rs
+        haps = unique_haps
+
+    if duplicate_positions:
+        print(
+            f"Warning: skipped {duplicate_positions} duplicate-position "
+            f"variant(s); covariance partitions are keyed by physical position",
+            file=sys.stderr,
+        )
+
     if not all_pos:
         return
 
@@ -339,6 +364,9 @@ def calc_covariance(
 
     # --- write output ---
     pos_arr = np.array(all_pos, dtype=np.int32)
+    assume_sorted_unique_rows = bool(
+        pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
+    )
     i_pos = pos_arr[ii]
     j_pos = pos_arr[jj]
     if compact_output:
@@ -347,7 +375,7 @@ def calc_covariance(
             i_pos=i_pos,
             j_pos=j_pos,
             shrink_ld=ds2_arr,
-            assume_canonical_sorted_unique=True,
+            assume_canonical_sorted_unique=assume_sorted_unique_rows,
         )
         return
 
@@ -363,5 +391,5 @@ def calc_covariance(
         naive_ld=d_naive_arr,
         i_id=rs_arr[ii],
         j_id=rs_arr[jj],
-        assume_canonical_sorted_unique=True,
+        assume_canonical_sorted_unique=assume_sorted_unique_rows,
     )

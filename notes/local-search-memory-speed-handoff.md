@@ -522,8 +522,8 @@ Likely candidates if still hot:
 
 ### 8. HDF5 Validation and Tuning
 
-HDF5 has been promoted and implemented. The remaining work is validation and
-tuning, not deciding whether to start the migration.
+HDF5 has been promoted and implemented. Keep it as a bounded reader path, not
+a large resident cache.
 
 Recommended next checks:
 
@@ -531,63 +531,103 @@ Recommended next checks:
   lower or neutral RSS, and explainable HDF5 reader overhead.
 - Re-run chr10/chr11 remotely one at a time after chr21/chr22 are clean.
 - Tune chunk size only from remote profiles; avoid local real-data profiling.
-- Keep HDF5 as a bounded reader path, not a large resident cache.
 
-## HDF5 and Chunked Reader Status
+## HDF5 Status
 
-HDF5 is now the production covariance partition format. The earlier compressed
-`.npz` archives were storage-efficient but not friendly to bounded memory
-reads: `np.load(..., mmap_mode=...)` does not give true partial array access
-for compressed `.npz` members, so each touched array member must be inflated
-before it can be sliced. HDF5 gives us one partition artifact with chunked,
-compressed datasets that can be read in bounded slices.
-
-The implemented goal was to replace `.npz` intermediate covariance partitions
-with HDF5 partition files that support local-search, metric, and
-matrix-to-vector chunk reads without requiring raw `.npy` caches.
-
-Compatibility stance:
-
-- No compatibility with existing intermediate `.npz` covariance files is
-  required.
-- Existing `.npz` covariance outputs may be regenerated as HDF5.
-- The migration can remove `npz|h5|both` transition modes from production CLI
-  design.
-- Keep small test-only fixture helpers where useful, but production readers and
-  writers should target HDF5 directly.
-
-This simplifies the implementation: one storage format, one partition path
-scheme, one reader interface, and no long-term dual reader/writer support.
-
-### Implementation Status
-
-Baseline HDF5 migration has been implemented locally:
+HDF5 is the production covariance partition format. Existing `.npz`
+intermediates are not read by production paths; regenerate covariance outputs
+with `calc-covariance` or `run`.
 
 - `h5py` is now a normal project dependency.
 - `CovarianceStore.partition_path()` returns `.h5` partition paths.
-- `calc_covariance()` writes canonical, indexed HDF5 partitions.
+- `calc_covariance()` writes canonical, indexed HDF5 partitions and collapses
+  duplicate physical VCF positions before pairwise LD, keeping the first
+  variant at each position.
+- The HDF5 writer enforces canonical sorted unique row order for every write:
+  generic callers are canonicalized/sorted/deduplicated before validation, and
+  the `calc_covariance()` fast path skips redundant sort/dedup only after
+  validating that rows are already `lo <= hi`, sorted by `(lo, hi)`, and
+  duplicate-free.
 - CLI partition validation checks HDF5 attrs/datasets and regenerates invalid
   caches.
 - Metric calculation streams partition row chunks through the HDF5 reader.
 - Single-worker grouped local search caches only HDF5 partition metadata and
   reads segment row ranges from HDF5 chunks instead of preloading and
   canonicalizing full partition groups.
-- Matrix-to-vector reads HDF5 partitions through the new reader; it is still
+- Matrix-to-vector reads HDF5 partitions through the reader; it is still
   one-partition-at-a-time rather than fully segment-chunked.
-- Tests and example fixtures now generate HDF5 covariance partitions.
-- Example workflows and diagnostics have been updated for HDF5:
-  `examples/ldetect_example` converts the legacy gzipped text fixture to `.h5`,
-  and `examples/ldetect_original/scripts/diagnose_run.py` summarizes HDF5
-  partition files with `h5py`.
+- Example workflows and diagnostics have been updated for HDF5.
 
-Remaining implementation follow-ups:
+### HDF5 Contract
 
-- Add current-RSS group logging around HDF5 reader open/close and segment reads.
-- Tune `chunk_rows` from remote chr21/22 and chr11 profiles.
-- Consider true chunked matrix-to-vector accumulation if it becomes the next
-  wall-time or RSS bottleneck.
+One HDF5 file is written per covariance partition:
 
-Local validation completed after the example updates:
+```text
+{chrom}.{start}.{end}.h5
+  /covariance/lo          int32 or int64, sorted
+  /covariance/hi          int32 or int64, sorted with lo
+  /covariance/shrink_ld   float64
+  /covariance/naive_ld    float64, optional full-output dataset
+  /metadata/*             optional full-output metadata
+  /index/diag_pos         int32 or int64
+  /index/diag_val         float64
+  /index/lo_values        int32 or int64
+  /index/lo_offsets       int64
+  attrs:
+    format = "ldetect2-covariance-h5"
+    version = 1
+    position_dtype = "int32" or "int64"
+    sorted_by = "lo_hi"
+    deduplicated = true
+    compact = true or false
+```
+
+`lo_offsets` stores row-group offsets for each `lo_values` entry, so local
+search can map a genomic `lo` range to row slices quickly.
+
+Writer requirements and invariants:
+
+- Convert `(i_pos, j_pos)` to sorted canonical `(lo, hi)` before writing.
+- Deduplicate duplicate `(lo, hi)` pairs with the same first-pair-wins
+  semantics used by `canonical_local_search_rows()`.
+- Validate the final row order before writing. HDF5 `/index/lo_offsets`
+  assumes rows are canonical, sorted by `(lo, hi)`, and duplicate-free.
+- `calc_covariance()` may use the trusted fast path because its pairwise LD
+  kernel emits unique rows in sorted SNP-index order. That fast path must still
+  validate the invariant; it only skips the memory-heavy defensive sort/dedup.
+- Duplicate physical positions are removed before pairwise LD, keeping the
+  first variant for each position. Without this, common duplicate positions can
+  make index-sorted pairwise output fail the `(lo, hi)` sorted-row invariant.
+- Store positions as `int32` whenever all values fit.
+- Store diagonal rows in both `/covariance/*` and `/index/diag_*`.
+- Make `/index/lo_offsets` length `len(lo_values) + 1`, so
+  `lo_offsets[k]:lo_offsets[k + 1]` gives the row slice for `lo_values[k]`.
+
+### Chunked Reader Flows
+
+`HDF5CovariancePartitionReader` is the only production reader:
+
+- `iter_rows()` uses `/index/lo_values` and `/index/lo_offsets` to map
+  `lo_min..lo_max` to contiguous row slices, then yields bounded HDF5 dataset
+  reads.
+- `iter_owned_rows()` applies the partition ownership rules used by metric and
+  matrix-to-vector paths while streaming chunks.
+- `read_diagonal()` and `read_loci()` are small enough to load eagerly per
+  group or per chromosome pass.
+
+Local search, metric calculation, and matrix-to-vector all stream HDF5 rows in
+bounded chunks and discard chunk temporaries after aggregation. This replaced
+the earlier memory-heavy pattern of inflating full compressed arrays, then
+canonicalizing and slicing them in memory.
+
+Correctness requirements remain strict: breakpoint loci, `N_zero`, final BED,
+and selected local-search breakpoint positions must remain exact. Metric sums
+may differ only at insignificant floating last-bit levels caused by chunk
+aggregation order.
+
+### Validation Status and Remaining Work
+
+Local checks that passed after the HDF5/example updates:
 
 ```text
 snakemake -s examples/ldetect_example/Snakefile -n
@@ -599,271 +639,18 @@ uv run pytest -q tests/test_covariance_io.py tests/test_covariance_array.py test
 git diff --check
 ```
 
-All of these passed locally. Real-data profiling and full diagnostic execution
-remain remote-only.
+Real-data profiling remains remote-only. Next remote checks:
 
-### Target HDF5 Layout
-
-One HDF5 file per covariance partition:
-
-```text
-{chrom}.{start}.{end}.h5
-  /covariance/lo              int32 or int64, sorted
-  /covariance/hi              int32 or int64, sorted with lo
-  /covariance/shrink_ld       float64
-  /covariance/naive_ld        float64, optional debug/full-output dataset
-  /metadata/i_gpos            float64, optional debug/full-output dataset
-  /metadata/j_gpos            float64, optional debug/full-output dataset
-  /metadata/i_id              string, optional debug/full-output dataset
-  /metadata/j_id              string, optional debug/full-output dataset
-  /index/diag_pos         int32 or int64
-  /index/diag_val         float64
-  /index/lo_values        int32 or int64
-  /index/lo_offsets       int64
-  attrs:
-    format = "ldetect2-covariance-h5"
-    version = 1
-    chrom = ...
-    start = ...
-    end = ...
-    position_dtype = "int32" or "int64"
-    sorted_by = "lo_hi"
-    deduplicated = true
-    compact = true or false
-```
-
-`lo_offsets` stores row-group offsets for each `lo_values` entry, so local
-search can map a genomic `lo` range to row slices quickly.
-
-Writer requirements:
-
-- Convert `(i_pos, j_pos)` to sorted canonical `(lo, hi)` before writing.
-- Deduplicate duplicate `(lo, hi)` pairs with the same first-pair-wins
-  semantics used by `canonical_local_search_rows()`.
-- Store positions as `int32` whenever all values fit.
-- Store diagonal rows in both `/covariance/*` and `/index/diag_*`.
-- Make `/index/lo_offsets` length `len(lo_values) + 1`, so
-  `lo_offsets[k]:lo_offsets[k + 1]` gives the row slice for `lo_values[k]`.
-
-### Compression and Chunking
-
-Initial recommendation:
-
-- Use `shuffle=True`.
-- Benchmark `lzf` for speed-first workflows.
-- Benchmark `gzip` level 1 or 2 for space-first workflows.
-- Chunk rows in fixed row-count chunks, for example 64K to 1M rows depending
-  on observed partition sizes.
-
-The cache should optimize for bounded local-search reads, not maximum
-compression ratio. A slightly larger file is acceptable if it avoids inflating
-100 MB archive members into much larger temporary arrays.
-
-### CLI and Store Status
-
-HDF5 is now the covariance partition cache format used by both:
-
-```text
-ldetect2 calc-covariance
-ldetect2 run
-```
-
-Current CLI shape:
-
-- `--covariance-cache compact|full` remains as the metadata schema selector.
-- It no longer selects `.npz` versus another storage format; all production
-  covariance partitions are `.h5`.
-- Compact metadata remains the default: `lo`, `hi`, `shrink_ld`, and indexes.
-- Full metadata remains optional because string/id datasets can increase file
-  size and are not needed by normal `run`.
-
-Store status:
-
-- `CovarianceStore.partition_path()` returns `{name}.{start}.{end}.h5`.
-- Validation inspects HDF5 attrs and required datasets instead of `.npz` keys.
-- Any stale `.npz` files in an output directory should be ignored by production
-  loaders.
-- If an HDF5 partition is missing or invalid, regenerate it.
-
-### Loader Abstraction
-
-The HDF5 migration introduced a small partition reader abstraction:
-
-```python
-@dataclass(frozen=True)
-class CovarianceRowChunk:
-    lo: np.ndarray
-    hi: np.ndarray
-    shrink_ld: np.ndarray
-
-class CovariancePartitionReader(Protocol):
-    start: int
-    end: int
-
-    @property
-    def row_count(self) -> int: ...
-    def iter_rows(
-        self,
-        lo_min: int,
-        lo_max: int,
-        chunk_rows: int,
-    ) -> Iterator[CovarianceRowChunk]: ...
-    def iter_owned_rows(
-        self,
-        lower_min: int,
-        lower_max: int,
-        snp_first: int,
-        snp_last: int,
-        chunk_rows: int,
-    ) -> Iterator[CovarianceRowChunk]: ...
-    def read_diagonal(self) -> tuple[np.ndarray, np.ndarray]: ...
-    def read_loci(self) -> np.ndarray: ...
-```
-
-This keeps `LocalSearch` focused on row aggregation and avoids scattering
-storage-format checks through the algorithm. The only production implementation
-is HDF5.
-
-Reader behavior:
-
-- `iter_rows()` uses `/index/lo_values` and `/index/lo_offsets` to map
-  `lo_min..lo_max` to contiguous row slices, then yields bounded HDF5 dataset
-  reads.
-- `iter_owned_rows()` applies the partition ownership rules used by metric and
-  matrix-to-vector paths while streaming chunks.
-- `read_diagonal()` and `read_loci()` are small enough to load eagerly per
-  group or per chromosome pass.
-
-### Local Search HDF5 Flow
-
-For each local-search segment:
-
-1. Determine `lo_min`, `lo_max`, and `hi` constraints from the search window.
-2. Use `reader.iter_rows(lo_min, lo_max, chunk_rows)` to locate candidate row
-   ranges.
-3. Read bounded chunks from `/covariance/lo`, `/covariance/hi`, and
-   `/covariance/shrink_ld`.
-4. Normalize chunks to `r²` using `/index/diag_pos` and `/index/diag_val`.
-5. Aggregate into local `sum_vert` and `sum_horiz`.
-6. Discard the chunk before reading the next one.
-
-This should make peak memory depend on chunk size plus local accumulators,
-rather than full partition array size.
-
-Local-search group changes:
-
-- Do not preload and canonicalize full partition groups.
-- Open HDF5 readers for the group's partitions.
-- Cache only small per-partition indexes/diagonals/loci in the group scope.
-- Iterate row chunks for each segment and aggregate directly into local
-  accumulators.
-- Close readers and release group state after the group completes.
-
-This replaced the earlier memory-heavy shape:
-
-```text
-load full compressed arrays -> canonicalize full partition -> segment slice
-```
-
-with:
-
-```text
-open HDF5 reader -> locate segment row slice -> read bounded chunks
-```
-
-### Metric HDF5 Flow
-
-For each metric calculation:
-
-1. Read diagonal/index datasets once per relevant partition, or from cached
-   compact diagonal arrays when the reader scope allows it.
-2. Stream candidate pair rows from `/covariance/lo`, `/covariance/hi`, and
-   `/covariance/shrink_ld` in row chunks.
-3. Normalize only the chunk using diagonal arrays.
-4. Accumulate crossing-pair sums for the requested breakpoint set.
-5. Discard the chunk before reading the next one.
-
-This mirrors the streaming metric behavior while avoiding inflation of full
-compressed partition members before slicing.
-
-Acceptance nuance:
-
-- Metric sums may differ only at insignificant floating last-bit levels caused
-  by chunk aggregation order.
-- Breakpoint loci, `N_zero`, final BED, and selected local-search breakpoint
-  positions must remain exact.
-
-### Matrix-To-Vector HDF5 Flow
-
-For matrix-to-vector conversion:
-
-1. Iterate partitions in order.
-2. Use `iter_owned_rows()` to stream rows owned by that partition.
-3. Normalize rows to `r²` in bounded chunks using `read_diagonal()`.
-4. Accumulate diagonal-sum vector contributions into a dense array for the
-   current partition/locus span, then write or merge into the output vector.
-5. Release chunk temporaries immediately.
-
-This keeps matrix-to-vector from becoming the next full-partition inflation
-point after local search and metrics are chunked.
-
-### Validation Plan
-
-Correctness:
-
-- Add tests for HDF5 writer output: sorted rows, first-pair-wins
-  deduplication, `int32` preservation, diagonal index correctness, and
-  `lo_offsets`.
-- Compare HDF5 reader chunks with expected synthetic arrays on single-
-  partition and multi-partition fixtures.
-- Compare chunked HDF5 local-search output with the Decimal legacy oracle on
-  synthetic fixtures.
-- Compare chunked HDF5 metric output with existing metric fixtures.
-- Run the existing metric and local-search test suite.
-- Run the toy integration pipeline.
-
-Performance:
-
-- Re-run EUR chr21/chr22 remotely first, then chr10 or chr11.
-- Compare local-search elapsed time and max RSS against the previous branch
-  baseline.
-- Confirm `--subset fourier_ls` output BED is identical to current output.
-- Track HDF5 file size versus previous `.npz` files for 10 MB, 50 MB, and 100 MB
-  partitions.
-
-Acceptance criteria:
-
-- No RSS increase relative to the previous branch baseline.
-- Identical final `fourier_ls` BED for the same inputs.
-- HDF5 partition storage does not require keeping `.npz` intermediates.
-- Local-search chunk size is configurable or at least centralized as a single
-  tuning constant.
-
-### Implementation Order
-
-Completed:
-
-1. Added `h5py` as a normal project dependency.
-2. Changed `CovarianceStore.partition_path()` to `.h5` and updated partition
-   validation for required attrs/datasets.
-3. Implemented the HDF5 writer from the arrays already produced by
-   `calc_covariance()`, including canonical sort/dedup and indexes.
-4. Added the HDF5 `CovariancePartitionReader` and chunk iterator tests.
-5. Updated metric paths to stream through readers and match existing metric
-   fixtures.
-6. Updated local search to use reader chunk iteration instead of preloading
-   canonical full partition groups.
-7. Updated matrix-to-vector to read HDF5 partitions through the shared reader.
-8. Removed production `.npz` validation/load paths that are no longer used by
-   `run`, while keeping narrow fixture generation helpers where useful.
-9. Updated diagnostics and examples for HDF5 partition files.
-
-Still pending:
-
-1. Add or refine diagnostics to report HDF5 chunk counts, chunk rows, and
-   reader I/O seconds if remote profiles show unexplained elapsed time.
-2. Run representative remote chromosome validation before further numeric
-   optimization.
+1. Re-test chr21/chr22 for byte-identical `fourier_ls` BED output, neutral or
+   lower RSS, and explainable HDF5 reader overhead.
+2. Re-test chr11 covariance generation after the writer fast path and
+   duplicate-position collapse.
+3. Re-run chr10/chr11 one at a time after chr21/chr22 are clean.
+4. Tune `chunk_rows` only from remote profiles.
+5. Add HDF5 reader I/O or current-RSS diagnostics only if remote profiles show
+   unexplained elapsed time or RSS.
+6. Consider true chunked matrix-to-vector accumulation if that becomes the next
+   wall-time or RSS bottleneck.
 
 ## Open Questions
 
