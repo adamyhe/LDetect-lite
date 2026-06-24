@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from ldetect2._util.covariance_array import ChromosomeCovariance
+from ldetect2._util.memory import log_memory_checkpoint
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
@@ -37,6 +38,7 @@ def write_diag_vector_array(
     covariance_cache: ChromosomeCovariance | None = None,
 ) -> None:
     """Write the diagonal correlation-sum vector from HDF5 partitions."""
+    _log_vector_checkpoint("matrix_to_vector_array_start")
     out_path.unlink(missing_ok=True)
     pending_sums: dict[int, float] = {}
     current_locus = snp_first
@@ -52,37 +54,53 @@ def write_diag_vector_array(
             "partitions"
         )
     for p_index, (start, end) in enumerate(partitions):
+        checkpoint = _partition_checkpoint_label(p_index, start, end)
+        _log_vector_checkpoint(f"{checkpoint}_start")
         if p_index + 1 < len(partitions) and snp_first >= partitions[p_index + 1][0]:
+            _log_vector_checkpoint(f"{checkpoint}_skip_before_snp_first")
             continue
 
         if partition_arrays is None:
             path = store.partition_path(name, start, end)
+            _log_vector_checkpoint(f"{checkpoint}_hdf5_read_start")
             i_pos, j_pos, shrink = _load_hdf5_partition(path, start, end)
+            _log_vector_checkpoint(f"{checkpoint}_hdf5_read_end")
         else:
+            _log_vector_checkpoint(f"{checkpoint}_cache_load_start")
             partition = partition_arrays[p_index]
             i_pos = partition.i_pos
             j_pos = partition.j_pos
             shrink = partition.shrink_ld
+            _log_vector_checkpoint(f"{checkpoint}_cache_load_end")
+        _log_vector_checkpoint(f"{checkpoint}_filter_start")
         rows_in_partition = (
             (i_pos >= start)
             & (i_pos <= end)
             & (j_pos >= start)
             & (j_pos <= end)
         )
+        _log_vector_checkpoint(f"{checkpoint}_filter_mask_end")
         if not np.any(rows_in_partition):
+            _log_vector_checkpoint(f"{checkpoint}_no_owned_rows")
             continue
 
         i_pos = i_pos[rows_in_partition]
         j_pos = j_pos[rows_in_partition]
         shrink = shrink[rows_in_partition]
+        _log_vector_checkpoint(f"{checkpoint}_filter_apply_end")
+        _log_vector_checkpoint(f"{checkpoint}_lo_hi_start")
         if np.all(i_pos <= j_pos):
             lo = i_pos
             hi = j_pos
         else:
             lo = np.minimum(i_pos, j_pos)
             hi = np.maximum(i_pos, j_pos)
+        _log_vector_checkpoint(f"{checkpoint}_lo_hi_end")
+        _log_vector_checkpoint(f"{checkpoint}_loci_unique_start")
         loci = np.unique(np.concatenate((lo, hi)))
+        _log_vector_checkpoint(f"{checkpoint}_loci_unique_end")
         if loci.size == 0:
+            _log_vector_checkpoint(f"{checkpoint}_no_loci")
             continue
 
         if p_index + 1 < len(partitions):
@@ -91,44 +109,59 @@ def write_diag_vector_array(
         else:
             in_requested_range = loci[loci <= snp_last]
             if in_requested_range.size == 0:
+                _log_vector_checkpoint(f"{checkpoint}_no_requested_loci")
                 continue
             end_locus = int(in_requested_range[-1])
             write_cutoff = end_locus
 
+        _log_vector_checkpoint(f"{checkpoint}_r2_rows_start")
         r2_lo, r2_hi, r2 = _r2_rows(lo, hi, shrink)
+        _log_vector_checkpoint(f"{checkpoint}_r2_rows_end")
         if r2.size:
+            _log_vector_checkpoint(f"{checkpoint}_center_search_start")
             lo_idx = np.searchsorted(loci, r2_lo)
             hi_idx = np.searchsorted(loci, r2_hi)
+            _log_vector_checkpoint(f"{checkpoint}_center_search_end")
             idx_delta = hi_idx - lo_idx
             even_delta = idx_delta % 2 == 0
             legacy_reachable = even_delta | (lo_idx > 0)
+            _log_vector_checkpoint(f"{checkpoint}_legacy_reachable_mask_end")
             if np.any(legacy_reachable):
                 lo_idx = lo_idx[legacy_reachable]
                 hi_idx = hi_idx[legacy_reachable]
                 r2 = r2[legacy_reachable]
                 center_idx = (lo_idx + hi_idx) // 2
                 center_loci = loci[center_idx]
+                _log_vector_checkpoint(f"{checkpoint}_center_filter_start")
 
                 keep_center = (
                     (center_loci >= current_locus)
                     & (center_loci <= end_locus)
                     & (center_loci <= snp_last)
                 )
+                _log_vector_checkpoint(f"{checkpoint}_center_filter_end")
                 if np.any(keep_center):
+                    _log_vector_checkpoint(f"{checkpoint}_bincount_start")
                     sums = np.bincount(
                         center_idx[keep_center],
                         weights=r2[keep_center],
                         minlength=loci.size,
                     )
+                    _log_vector_checkpoint(f"{checkpoint}_bincount_end")
+                    _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_start")
                     for locus, value in zip(loci[sums > 0.0], sums[sums > 0.0]):
                         pending_sums[int(locus)] = pending_sums.get(
                             int(locus), 0.0
                         ) + float(value)
+                    _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_end")
 
+        _log_vector_checkpoint(f"{checkpoint}_next_loci_start")
         next_loci = loci[loci > end_locus]
+        _log_vector_checkpoint(f"{checkpoint}_next_loci_end")
         if next_loci.size:
             current_locus = int(next_loci[0])
 
+        _log_vector_checkpoint(f"{checkpoint}_writable_loci_start")
         writable_loci = np.array(
             [
                 locus
@@ -137,7 +170,9 @@ def write_diag_vector_array(
             ],
             dtype=np.int64,
         )
+        _log_vector_checkpoint(f"{checkpoint}_writable_loci_end")
         if writable_loci.size:
+            _log_vector_checkpoint(f"{checkpoint}_flush_start")
             _append_vector_rows(
                 out_path,
                 writable_loci,
@@ -145,6 +180,19 @@ def write_diag_vector_array(
             )
             for locus in writable_loci:
                 pending_sums.pop(int(locus), None)
+            _log_vector_checkpoint(f"{checkpoint}_flush_end")
+        _log_vector_checkpoint(f"{checkpoint}_end")
+    _log_vector_checkpoint("matrix_to_vector_array_end")
+
+
+def _partition_checkpoint_label(p_index: int, start: int, end: int) -> str:
+    """Return the stable checkpoint prefix for one matrix-to-vector partition."""
+    return f"matrix_to_vector_array_partition_{p_index}_start={start}_end={end}"
+
+
+def _log_vector_checkpoint(label: str) -> None:
+    """Log a debug-only matrix-to-vector memory checkpoint."""
+    log_memory_checkpoint(label, debug=True)
 
 
 def _load_hdf5_partition(

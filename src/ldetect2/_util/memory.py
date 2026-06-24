@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from ldetect2._util.logging import log_msg
+from ldetect2._util.logging import log_debug, log_msg
 
 
 def current_rss_mib() -> float | None:
@@ -41,7 +41,7 @@ def max_rss_mib() -> float | None:
     return rss / 1024.0
 
 
-def log_memory_checkpoint(label: str) -> None:
+def log_memory_checkpoint(label: str, *, debug: bool = False) -> None:
     """Log current and lifetime RSS for a named pipeline checkpoint."""
     current = current_rss_mib()
     maximum = max_rss_mib()
@@ -53,4 +53,8 @@ def log_memory_checkpoint(label: str) -> None:
     max_text = (
         f"max_rss_mib={maximum:.1f}" if maximum is not None else "max_rss_mib=None"
     )
-    log_msg(f"Memory checkpoint {label}: {current_text} {max_text}")
+    message = f"Memory checkpoint {label}: {current_text} {max_text}"
+    if debug:
+        log_debug(message)
+    else:
+        log_msg(message)
