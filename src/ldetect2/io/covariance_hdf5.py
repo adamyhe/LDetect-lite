@@ -277,6 +277,136 @@ def write_covariance_partition_hdf5(
         idx.create_dataset("lo_offsets", data=lo_offsets, **kwargs)
 
 
+def write_compact_covariance_partition_hdf5_chunks(
+    path: Path,
+    *,
+    positions: np.ndarray,
+    row_counts: np.ndarray,
+    row_chunks: Iterator[CovarianceRowChunk],
+    chrom: str | None = None,
+    start: int | None = None,
+    end: int | None = None,
+    compression: str | None = "lzf",
+    chunk_rows: int = 1_000_000,
+) -> None:
+    """Write compact canonical rows from a bounded sorted chunk iterator.
+
+    This is the compact-cache writer used by ``calc_covariance()``. It avoids
+    materializing full-partition ``i_pos``/``j_pos`` arrays while preserving the
+    same HDF5 schema and ``lo_offsets`` index as ``write_covariance_partition_hdf5``.
+    """
+    positions = _position_array(positions)
+    row_counts = np.asarray(row_counts, dtype=np.int64)
+    if positions.shape != row_counts.shape:
+        raise ValueError("positions and row_counts must have identical shapes")
+
+    n_rows = int(row_counts.sum())
+    nonzero_lo = row_counts > 0
+    lo_values = positions[nonzero_lo].astype(np.int64, copy=False)
+    lo_offsets = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.cumsum(row_counts[nonzero_lo], dtype=np.int64),
+        )
+    )
+
+    h5py = _h5py()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    position_dtype = positions.dtype
+    h5_chunk_rows = max(1, min(int(chunk_rows), max(n_rows, 1)))
+    kwargs = {"compression": compression, "shuffle": True}
+
+    diag_pos_parts: list[np.ndarray] = []
+    diag_val_parts: list[np.ndarray] = []
+    offset = 0
+    prev_lo: int | None = None
+    prev_hi: int | None = None
+
+    with h5py.File(path, "w") as h5:
+        h5.attrs["format"] = _FORMAT
+        h5.attrs["version"] = _VERSION
+        if chrom is not None:
+            h5.attrs["chrom"] = chrom
+        if start is not None:
+            h5.attrs["start"] = int(start)
+        if end is not None:
+            h5.attrs["end"] = int(end)
+        h5.attrs["position_dtype"] = str(position_dtype)
+        h5.attrs["sorted_by"] = "lo_hi"
+        h5.attrs["deduplicated"] = True
+        h5.attrs["compact"] = True
+
+        cov = h5.create_group("covariance")
+        idx = h5.create_group("index")
+        if n_rows == 0:
+            cov.create_dataset("lo", data=np.array([], dtype=position_dtype), **kwargs)
+            cov.create_dataset("hi", data=np.array([], dtype=position_dtype), **kwargs)
+            cov.create_dataset(
+                "shrink_ld", data=np.array([], dtype=np.float64), **kwargs
+            )
+        else:
+            dataset_kwargs = {
+                **kwargs,
+                "shape": (n_rows,),
+                "chunks": (h5_chunk_rows,),
+            }
+            lo_ds = cov.create_dataset("lo", dtype=position_dtype, **dataset_kwargs)
+            hi_ds = cov.create_dataset("hi", dtype=position_dtype, **dataset_kwargs)
+            shrink_ds = cov.create_dataset(
+                "shrink_ld", dtype=np.float64, **dataset_kwargs
+            )
+
+            for chunk in row_chunks:
+                lo = _position_array(chunk.lo).astype(position_dtype, copy=False)
+                hi = _position_array(chunk.hi).astype(position_dtype, copy=False)
+                shrink = np.asarray(chunk.shrink_ld, dtype=np.float64)
+                if lo.shape != hi.shape or lo.shape != shrink.shape:
+                    raise ValueError("covariance row chunks must have matching shapes")
+                if lo.size == 0:
+                    continue
+                _validate_canonical_sorted_unique(lo, hi)
+                if prev_lo is not None:
+                    sorted_after_prev = (int(lo[0]) > prev_lo) or (
+                        int(lo[0]) == prev_lo and int(hi[0]) > prev_hi
+                    )
+                    if not sorted_after_prev:
+                        raise ValueError(
+                            "covariance row chunks must be globally sorted by (lo, hi)"
+                        )
+                stop = offset + lo.size
+                if stop > n_rows:
+                    raise ValueError("row_chunks yielded more rows than row_counts")
+                lo_ds[offset:stop] = lo
+                hi_ds[offset:stop] = hi
+                shrink_ds[offset:stop] = shrink
+
+                diag_mask = lo == hi
+                if np.any(diag_mask):
+                    diag_pos_parts.append(lo[diag_mask])
+                    diag_val_parts.append(shrink[diag_mask])
+                prev_lo = int(lo[-1])
+                prev_hi = int(hi[-1])
+                offset = stop
+
+            if offset != n_rows:
+                raise ValueError("row_chunks yielded fewer rows than row_counts")
+
+        diag_pos = (
+            np.concatenate(diag_pos_parts).astype(position_dtype, copy=False)
+            if diag_pos_parts
+            else np.array([], dtype=position_dtype)
+        )
+        diag_val = (
+            np.concatenate(diag_val_parts).astype(np.float64, copy=False)
+            if diag_val_parts
+            else np.array([], dtype=np.float64)
+        )
+        idx.create_dataset("diag_pos", data=diag_pos, **kwargs)
+        idx.create_dataset("diag_val", data=diag_val, **kwargs)
+        idx.create_dataset("lo_values", data=lo_values, **kwargs)
+        idx.create_dataset("lo_offsets", data=lo_offsets, **kwargs)
+
+
 def validate_covariance_hdf5(path: Path, require_full: bool = False) -> bool:
     """Return whether *path* is a readable ldetect2 HDF5 covariance partition."""
     if not path.exists():

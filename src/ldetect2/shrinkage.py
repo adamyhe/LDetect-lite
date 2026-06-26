@@ -5,12 +5,20 @@ from __future__ import annotations
 import gzip
 import math
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
 
 import numpy as np
 
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect2.io.covariance_hdf5 import (
+    CovarianceRowChunk,
+    write_compact_covariance_partition_hdf5_chunks,
+    write_covariance_partition_hdf5,
+)
+
+COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
 
 # ---------------------------------------------------------------------------
 # Pairwise LD kernel (Numba-accelerated when available)
@@ -136,6 +144,157 @@ def _pairwise_ld_impl(
     return ii, jj, d_naive_arr, ds2_arr
 
 
+@_njit_fallback
+def _count_pairwise_ld_by_i_impl(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+) -> np.ndarray:
+    n_snps = hap_mat.shape[0]
+    n_haps = hap_mat.shape[1]
+    n_total = float(n_haps)
+    counts = np.zeros(n_snps, dtype=np.int64)
+
+    for i in range(n_snps):
+        gpos1 = gpos_arr[i]
+        row_count = 0
+        for j in range(i, n_snps):
+            df = gpos_arr[j] - gpos1
+            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+            if ee < cutoff:
+                break
+
+            a = hap_mat[i]
+            b = hap_mat[j]
+            n11 = np.sum(a * b)
+            n1x = np.sum(a)
+            nx1 = np.sum(b)
+
+            f11 = n11 / n_total
+            f1 = n1x / n_total
+            f2 = nx1 / n_total
+            d_naive = f11 - f1 * f2
+            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+
+            if math.fabs(ds2) < cutoff:
+                continue
+
+            row_count += 1
+        counts[i] = row_count
+
+    return counts
+
+
+@_njit_fallback
+def _pairwise_ld_compact_range_impl(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    i_start: int,
+    i_stop: int,
+    n_pairs: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_snps = hap_mat.shape[0]
+    n_haps = hap_mat.shape[1]
+    n_total = float(n_haps)
+
+    ii = np.empty(n_pairs, dtype=np.int32)
+    jj = np.empty(n_pairs, dtype=np.int32)
+    ds2_arr = np.empty(n_pairs, dtype=np.float64)
+
+    cnt = 0
+    for i in range(i_start, i_stop):
+        gpos1 = gpos_arr[i]
+        for j in range(i, n_snps):
+            df = gpos_arr[j] - gpos1
+            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+            if ee < cutoff:
+                break
+
+            a = hap_mat[i]
+            b = hap_mat[j]
+            n11 = np.sum(a * b)
+            n1x = np.sum(a)
+            nx1 = np.sum(b)
+
+            f11 = n11 / n_total
+            f1 = n1x / n_total
+            f2 = nx1 / n_total
+            d_naive = f11 - f1 * f2
+            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+
+            if math.fabs(ds2) < cutoff:
+                continue
+
+            if i == j:
+                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
+
+            ii[cnt] = i
+            jj[cnt] = j
+            ds2_arr[cnt] = ds2
+            cnt += 1
+
+    return ii, jj, ds2_arr
+
+
+def _compact_pair_chunks(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    pos_arr: np.ndarray,
+    row_counts: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    chunk_rows: int,
+) -> Iterator[CovarianceRowChunk]:
+    """Yield compact covariance rows in sorted ``(lo, hi)`` order."""
+    max_row_count = int(row_counts.max(initial=0))
+    target_rows = max(int(chunk_rows), max_row_count, 1)
+    i_start = 0
+    n_snps = row_counts.size
+    while i_start < n_snps:
+        while i_start < n_snps and row_counts[i_start] == 0:
+            i_start += 1
+        if i_start >= n_snps:
+            break
+
+        n_pairs = 0
+        i_stop = i_start
+        while i_stop < n_snps:
+            row_count = int(row_counts[i_stop])
+            if n_pairs > 0 and n_pairs + row_count > target_rows:
+                break
+            n_pairs += row_count
+            i_stop += 1
+            if n_pairs >= target_rows:
+                break
+
+        ii, jj, shrink_ld = _pairwise_ld_compact_range_impl(
+            hap_mat,
+            gpos_arr,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            i_start,
+            i_stop,
+            n_pairs,
+        )
+        yield CovarianceRowChunk(
+            lo=pos_arr[ii],
+            hi=pos_arr[jj],
+            shrink_ld=shrink_ld,
+        )
+        i_start = i_stop
+
+
 # ---------------------------------------------------------------------------
 # Chromosome partitioning  (was P00_00_partition_chromosome.py)
 # ---------------------------------------------------------------------------
@@ -219,6 +378,7 @@ def calc_covariance(
     ne: float = 11418.0,
     cutoff: float = 1e-7,
     compact_output: bool = False,
+    compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -242,7 +402,15 @@ def calc_covariance(
         cutoff: Pairs whose ``|Ds2| < cutoff`` are not written.
         compact_output: Write the compact restartable cache schema used by
             ``ldetect2 run``.
+        compact_chunk_rows: Approximate maximum compact HDF5 rows to hold while
+            filling one bounded output chunk.
     """
+    from ldetect2._util.logging import log_debug
+    from ldetect2._util.memory import log_memory_checkpoint
+
+    total_start = time.perf_counter()
+    log_memory_checkpoint("calc_covariance_start", debug=True)
+
     # --- read individuals ---
     individuals: list[str] = []
     with open(individuals_path) as f:
@@ -351,25 +519,92 @@ def calc_covariance(
         )
 
     if not all_pos:
+        log_debug(
+            "calc_covariance empty_partition "
+            f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
+        )
         return
 
     # --- build numpy arrays for the JIT kernel ---
+    array_start = time.perf_counter()
     hap_mat = np.array(haps, dtype=np.uint8)  # (n_snps, n_haps)
     gpos_arr = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)  # (n_snps,)
-
-    # --- compute pairwise LD (Numba-accelerated when available) ---
-    ii, jj, d_naive_arr, ds2_arr = _pairwise_ld_impl(
-        hap_mat, gpos_arr, ne, float(n_ind), theta, cutoff
+    log_debug(
+        "calc_covariance arrays_built "
+        f"n_snps={hap_mat.shape[0]} n_haps={hap_mat.shape[1]} "
+        f"seconds={time.perf_counter() - array_start:.3f}"
     )
+    log_memory_checkpoint("calc_covariance_arrays_built", debug=True)
 
-    # --- write output ---
     pos_arr = np.array(all_pos, dtype=np.int32)
     assume_sorted_unique_rows = bool(
         pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
     )
+
+    if compact_output and assume_sorted_unique_rows:
+        count_start = time.perf_counter()
+        row_counts = _count_pairwise_ld_by_i_impl(
+            hap_mat, gpos_arr, ne, float(n_ind), theta, cutoff
+        )
+        n_pairs = int(row_counts.sum())
+        max_pairs_per_locus = int(row_counts.max(initial=0))
+        log_debug(
+            "calc_covariance compact_pair_counts "
+            f"n_snps={pos_arr.size} n_pairs={n_pairs} "
+            f"max_pairs_per_locus={max_pairs_per_locus} "
+            f"seconds={time.perf_counter() - count_start:.3f}"
+        )
+        log_memory_checkpoint("calc_covariance_pair_counted", debug=True)
+
+        write_start = time.perf_counter()
+        write_compact_covariance_partition_hdf5_chunks(
+            output_path,
+            positions=pos_arr,
+            row_counts=row_counts,
+            row_chunks=_compact_pair_chunks(
+                hap_mat,
+                gpos_arr,
+                pos_arr,
+                row_counts,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+                compact_chunk_rows,
+            ),
+            chunk_rows=compact_chunk_rows,
+        )
+        log_debug(
+            "calc_covariance compact_hdf5_written "
+            f"n_pairs={n_pairs} output_bytes={output_path.stat().st_size} "
+            f"seconds={time.perf_counter() - write_start:.3f} "
+            f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
+        )
+        log_memory_checkpoint("calc_covariance_compact_written", debug=True)
+        return
+
+    # --- compute pairwise LD (Numba-accelerated when available) ---
+    pair_start = time.perf_counter()
+    ii, jj, d_naive_arr, ds2_arr = _pairwise_ld_impl(
+        hap_mat, gpos_arr, ne, float(n_ind), theta, cutoff
+    )
+    log_debug(
+        "calc_covariance pair_arrays_materialized "
+        f"n_pairs={ii.size} seconds={time.perf_counter() - pair_start:.3f}"
+    )
+    log_memory_checkpoint("calc_covariance_pair_arrays_materialized", debug=True)
+
+    # --- write output ---
+    map_start = time.perf_counter()
     i_pos = pos_arr[ii]
     j_pos = pos_arr[jj]
+    log_debug(
+        "calc_covariance positions_mapped "
+        f"n_pairs={ii.size} seconds={time.perf_counter() - map_start:.3f}"
+    )
+    log_memory_checkpoint("calc_covariance_positions_mapped", debug=True)
     if compact_output:
+        write_start = time.perf_counter()
         write_covariance_partition_hdf5(
             output_path,
             i_pos=i_pos,
@@ -377,10 +612,18 @@ def calc_covariance(
             shrink_ld=ds2_arr,
             assume_canonical_sorted_unique=assume_sorted_unique_rows,
         )
+        log_debug(
+            "calc_covariance compact_hdf5_written_fallback "
+            f"n_pairs={ii.size} output_bytes={output_path.stat().st_size} "
+            f"seconds={time.perf_counter() - write_start:.3f} "
+            f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
+        )
+        log_memory_checkpoint("calc_covariance_compact_written_fallback", debug=True)
         return
 
     gpos_flat = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)
     rs_arr = np.array(all_rs)
+    write_start = time.perf_counter()
     write_covariance_partition_hdf5(
         output_path,
         i_pos=i_pos,
@@ -393,3 +636,10 @@ def calc_covariance(
         j_id=rs_arr[jj],
         assume_canonical_sorted_unique=assume_sorted_unique_rows,
     )
+    log_debug(
+        "calc_covariance full_hdf5_written "
+        f"n_pairs={ii.size} output_bytes={output_path.stat().st_size} "
+        f"seconds={time.perf_counter() - write_start:.3f} "
+        f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
+    )
+    log_memory_checkpoint("calc_covariance_full_written", debug=True)

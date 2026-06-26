@@ -222,6 +222,32 @@ def test_missing_debug_lines_produce_empty_local_search_rows(tmp_path: Path) -> 
     assert profile.aggregate_by_chrom(set_rows, group_rows, breakpoint_rows) == []
 
 
+def test_profile_chromosome_prefers_chromosome_prefixed_logs(
+    tmp_path: Path,
+) -> None:
+    profile = _load_profile_module()
+    root = tmp_path / "diagnostics" / "EUR"
+    log_dir = root / "22" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "timing.log").write_text("Exit status: 1\n")
+    (log_dir / "ldetect2.log").write_text("[12:00:00] legacy\n")
+    (log_dir / "22.timing.log").write_text("Exit status: 0\n")
+    (log_dir / "22.ldetect2.log").write_text("[12:00:00] prefixed\n")
+
+    run_row, set_rows, group_rows, breakpoint_rows = profile.profile_chromosome(
+        root,
+        "EUR",
+        "22",
+        "test",
+    )
+
+    assert run_row["chrom"] == "chr22"
+    assert run_row["exit_status"] == "0"
+    assert set_rows == []
+    assert group_rows == []
+    assert breakpoint_rows == []
+
+
 def test_missing_optional_phase_fields_stay_blank(tmp_path: Path) -> None:
     profile = _load_profile_module()
     path = tmp_path / "ldetect2.log"

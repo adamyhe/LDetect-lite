@@ -354,6 +354,14 @@ def _none_to_empty(value: str | None) -> str:
     return "" if value in {None, "None"} else value
 
 
+def _chrom_log_path(log_dir: Path, chrom: str, suffix: str) -> Path:
+    """Return the chromosome-prefixed log path, falling back to legacy names."""
+    prefixed = log_dir / f"{chrom}.{suffix}"
+    if prefixed.exists():
+        return prefixed
+    return log_dir / suffix
+
+
 def profile_chromosome(
     diagnostic_root: Path,
     population: str,
@@ -367,13 +375,13 @@ def profile_chromosome(
 ]:
     """Parse timing and ldetect2 logs for one diagnostic chromosome."""
     log_dir = diagnostic_root / str(chrom) / "logs"
-    run_row = parse_time_log(log_dir / "timing.log")
+    run_row = parse_time_log(_chrom_log_path(log_dir, str(chrom), "timing.log"))
     run_row.update(
         {"profile_name": profile_name, "population": population, "chrom": f"chr{chrom}"}
     )
 
     set_rows, group_rows, breakpoint_rows = parse_ldetect2_log(
-        log_dir / "ldetect2.log"
+        _chrom_log_path(log_dir, str(chrom), "ldetect2.log")
     )
     for row in set_rows + group_rows + breakpoint_rows:
         row.update(

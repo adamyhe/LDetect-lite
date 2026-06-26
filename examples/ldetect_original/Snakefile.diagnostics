@@ -294,8 +294,8 @@ rule diagnostic_run_ldetect2:
         vector=str(DIAG_ROOT / "{chrom}" / "run" / "vector-{chrom}.txt.gz"),
         partitions=str(DIAG_ROOT / "{chrom}" / "run" / "{chrom}_partitions.txt"),
     log:
-        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2.log"),
-        timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing.log"),
+        run=str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.ldetect2.log"),
+        timing=str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.timing.log"),
     threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
     params:
         output_dir=diag_run_dir,
@@ -395,8 +395,8 @@ rule diagnostic_run_ldetect2_omni:
         ),
         vector=str(DIAG_ROOT / "{chrom}" / "omni_run" / "vector-{chrom}.txt.gz"),
     log:
-        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2_omni.log"),
-        timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing_omni.log"),
+        run=str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.ldetect2_omni.log"),
+        timing=str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.timing_omni.log"),
     threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
     params:
         output_dir=lambda wc: str(DIAG_ROOT / str(wc.chrom) / "omni_run"),
@@ -522,11 +522,11 @@ rule diagnostic_summary:
 rule diagnostic_profile_summary:
     input:
         logs=expand(
-            str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2.log"),
+            str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.ldetect2.log"),
             chrom=PROFILE_CHROMS,
         ),
         timings=expand(
-            str(DIAG_ROOT / "{chrom}" / "logs" / "timing.log"),
+            str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.timing.log"),
             chrom=PROFILE_CHROMS,
         ),
         script="scripts/profile_ldetect2.py",
