@@ -365,6 +365,29 @@ def test_matrix_to_vector_array_matches_legacy_overlapping_partitions(tmp_path):
     _assert_vectors_close(array_path, legacy_path)
 
 
+@pytest.mark.parametrize("compact", [True, False])
+def test_matrix_to_vector_chunked_hdf5_matches_materialized_cache(
+    tmp_path,
+    monkeypatch,
+    compact,
+):
+    import ldetect2._util.vector_array as vector_array
+
+    monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
+    store, partitions = _make_two_partition_store(tmp_path, compact=compact)
+    chunked_path = tmp_path / "chunked.txt.gz"
+    cache_path = tmp_path / "cache.txt.gz"
+    cache = load_chromosome_covariance("testchr", store, partitions, 100, 800)
+
+    MatrixAnalysis("testchr", store).calc_diag_array(chunked_path)
+    MatrixAnalysis("testchr", store).calc_diag_array(
+        cache_path,
+        covariance_cache=cache,
+    )
+
+    _assert_vectors_close(chunked_path, cache_path)
+
+
 def test_matrix_to_vector_array_accepts_chromosome_covariance_cache(tmp_path):
     store, partitions = _make_two_partition_store(tmp_path)
     cached_path = tmp_path / "cached.txt.gz"
@@ -389,7 +412,10 @@ def test_matrix_to_vector_array_accepts_full_hdf5(tmp_path):
     assert _read_vector(output_path)
 
 
-def test_matrix_to_vector_array_respects_explicit_snp_range(tmp_path):
+def test_matrix_to_vector_array_respects_explicit_snp_range(tmp_path, monkeypatch):
+    import ldetect2._util.vector_array as vector_array
+
+    monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
     store, _ = _make_two_partition_store(tmp_path)
     array_path = tmp_path / "array.txt.gz"
     legacy_path = tmp_path / "legacy.txt.gz"

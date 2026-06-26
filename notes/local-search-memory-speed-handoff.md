@@ -405,7 +405,19 @@ Latest Step 3 subphase run for chr11:
 
 | Chrom | Wall time | Max RSS | Local search | Precompute | Search |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| chr11 | 5204.00 s | 97.58 GiB | 1720.65 s | 1719.42 s | 0.124 s |
+| chr11 before helper-scope cleanup | 5204.00 s | 97.58 GiB | 1720.65 s | 1719.42 s | 0.124 s |
+| chr11 after helper-scope cleanup | 3967.00 s | 63.55 GiB | 1797.29 s | 1796.06 s | 0.133 s |
+
+Post-cleanup chr11 walltime split from memory checkpoints:
+
+| Phase | Seconds | Minutes | Notes |
+| --- | ---: | ---: | --- |
+| Step 3 matrix-to-vector | 1485 s | 24.8 m | pre-chunking profile |
+| Step 4 total | 2475 s | 41.2 m | includes minima, metrics, local search |
+| Filter-width/minima before metric | 135 s | 2.2 m | low priority versus LS/Step 3 |
+| Fourier metric | 271 s | 4.5 m | streaming metric pass |
+| Fourier local search | 1797 s | 29.9 m | largest walltime phase |
+| Final Fourier-LS metric | 271 s | 4.5 m | second streaming metric pass |
 
 The bounded HDF5 segment assembly experiment was run before this profile. It
 improved chr11 local-search time but regressed whole-run wall time and did not
@@ -438,6 +450,32 @@ runtime bucket:
 | chr22 | 57.40 s (70.9%) | 13.88 s (17.2%) | 7.99 s (9.9%) | 120.2M |
 | chr10 | 351.03 s (75.6%) | 66.82 s (14.4%) | 38.46 s (8.3%) | 635.7M |
 | chr11 | 1623.00 s (91.8%) | 83.53 s (4.7%) | 49.39 s (2.8%) | 7.15B |
+
+Post-cleanup chr11 local-search phase timing:
+
+| Phase | Seconds | Share of LS precompute |
+| --- | ---: | ---: |
+| Append/segment assembly | 1649.06 s | 91.8% |
+| Horizontal aggregation | 83.88 s | 4.7% |
+| Normalization | 49.84 s | 2.8% |
+| Slice/filter bookkeeping | 6.89 s | 0.4% |
+| Vertical aggregation | 1.01 s | 0.1% |
+
+The top six local-search windows dominate runtime:
+
+| Window | Partitions | Rows loaded | Candidate rows | Eligible rows | Precompute | Assembly |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 49.87-52.62 Mb | 15 | 6.80B | 326.6M | 82.5M | 385.08 s | 374.19 s |
+| 47.01-49.87 Mb | 17 | 6.26B | 480.1M | 186.2M | 360.29 s | 336.46 s |
+| 52.62-55.09 Mb | 18 | 7.09B | 193.7M | 15.7M | 276.84 s | 274.39 s |
+| 55.09-56.41 Mb | 25 | 7.25B | 130.6M | 81.5M | 218.32 s | 208.43 s |
+| 42.91-47.01 Mb | 24 | 4.90B | 295.0M | 37.5M | 142.20 s | 136.90 s |
+| 56.41-59.45 Mb | 35 | 7.30B | 92.0M | 34.5M | 103.23 s | 99.02 s |
+
+These six windows account for about 1486 seconds of local-search precompute,
+or roughly 83% of all chr11 local-search precompute time. The key walltime
+lever is reducing repeated segment row assembly in the dense 43-59 Mb region,
+not candidate scoring.
 
 Worst chr11 breakpoint windows in the latest profile:
 
@@ -492,75 +530,88 @@ jumps are all inside `_r2_rows()`:
 | 137 | 47.20-56.13 Mb | 44.78 / 82.56 GiB | 82.56 GiB | 41.84 / 91.98 GiB |
 | 138 | 47.64-56.47 Mb | 50.13 / 91.98 GiB | 91.98 GiB | 45.37 / 97.58 GiB |
 
-There is also an avoidable lifetime overlap between partitions: large arrays
-from partition 135 remain live at partition 136 start, then partition 136's
-HDF5 read and `_r2_rows()` temporaries stack on top. That means the first
-implementation target should be per-partition lifetime cleanup or helper-scope
-isolation, followed by chunked `_r2_rows()`/center accumulation if the single
-partition peak remains too high.
+The first implementation target, per-partition lifetime cleanup, has now been
+validated remotely. Moving each partition into a helper scope drops current RSS
+from tens of GiB at partition end back to hundreds of MiB before the next
+partition read. The remaining peak is no longer cross-partition stacking; it is
+the largest single-partition `_r2_rows()` and center-index materialization.
+
+Stage 1 helper-scope validation for the dense partitions:
+
+| Partition | Key checkpoint | Current RSS | Max RSS |
+| ---: | --- | ---: | ---: |
+| 135 | `r2_rows_end` | 17.34 GiB | 51.90 GiB |
+| 135 | `helper_return` | 0.32 GiB | 51.90 GiB |
+| 136 | `r2_rows_end` | 18.10 GiB | 54.21 GiB |
+| 136 | `helper_return` | 0.32 GiB | 54.21 GiB |
+| 137 | `r2_rows_end` | 20.87 GiB | 62.40 GiB |
+| 137 | `helper_return` | 0.42 GiB | 62.40 GiB |
+| 138 | `r2_rows_end` | 21.25 GiB | 63.55 GiB |
+| 138 | `helper_return` | 0.42 GiB | 63.55 GiB |
 
 Implications:
 
 - Do not prioritize `_search_array()` candidate scoring. It is effectively
   free at this scale.
 - Do not add JIT yet.
-- The highest leverage memory task is now fixing Step 3 matrix-to-vector array
-  lifetimes and `_r2_rows()` temporaries. The lifetime max RSS is already
-  present by the first local-search breakpoint, so local-search segment
-  assembly is not the chr11 RSS chokepoint in this profile.
-- Horizontal aggregation and normalization remain possible runtime targets, but
-  should wait until the RSS chokepoint is understood.
+- The highest leverage memory task is now fixing Step 3 `_r2_rows()` and
+  center-index temporaries. Helper-scope cleanup reduced chr11 max RSS from
+  about 97.58 GiB to 63.55 GiB, so the cross-partition lifetime issue is no
+  longer the dominant memory risk.
+- The highest leverage walltime task is local-search append/segment assembly:
+  1649 s out of 1796 s precompute in the latest chr11 profile.
+- Step 3 matrix-to-vector is also a major walltime phase at about 1485 s, so a
+  chunked `_r2_rows()` implementation should be judged on both RSS and runtime.
+- Horizontal aggregation and normalization are real but secondary walltime
+  targets: about 84 s and 50 s respectively on chr11.
 
 ### Next Profiling Targets
 
 Review the next remote profile in this order:
 
-1. Matrix-to-vector array lifetime cleanup.
-   Move per-partition matrix-to-vector work into a helper scope or explicitly
-   release large arrays at the end of each partition before loading the next
-   HDF5 partition. This should prevent partition 135 outputs from stacking
-   with partition 136 reads and `_r2_rows()` temporaries.
-2. Chunked matrix-to-vector replacement.
+1. Chunked matrix-to-vector replacement.
    `_r2_rows()` is the source of the largest Step 3 peak. Replace the
    one-partition materialized normalization/indexing path with bounded HDF5
    row-chunk accumulation. Preserve the current center-locus and pending-sum
-   semantics exactly, and compare output vectors byte-for-byte or with
-   existing float tolerance before enabling.
-3. Segment assembly after RSS is localized.
-   The reverted bounded-window experiment showed that naively reducing
-   segment temporaries can trade runtime for HDF5 read overhead. Revisit only
-   if current RSS actually spikes inside local search.
-4. Horizontal aggregation.
-   This was still material in the latest chr21/chr22 profile: about 13.2
-   seconds for chr21 and 13.9 seconds for chr22. The current path uses
+   semantics exactly. This remains first because it targets 63.55 GiB RSS and
+   a 24.8 minute Step 3 walltime phase.
+2. Local-search segment assembly for dense windows.
+   Runtime is now dominated by append/segment assembly in six chr11 windows.
+   Revisit row assembly with a runtime-first design that reduces repeated
+   multi-billion-row scans without reintroducing the bounded-window HDF5 read
+   regression. Candidate directions include caching reusable per-partition row
+   slices for a small dense window group, processing adjacent breakpoints as a
+   shared sweep, or building segment-local accumulators directly from
+   partition slices.
+3. Horizontal aggregation.
+   This is material but secondary in the latest chr11 profile: about 84 seconds
+   total, led by the 47.01-49.87 Mb window at 13.3 seconds. The current path uses
    `np.unique(row_hi, return_inverse=True)` plus `np.bincount()` per chunk,
    which is exact but allocation-heavy. Possible follow-ups are grouped
    reduction after sorting `hi` within the chunk, dense local accumulators
    indexed by the local locus window, or processing partition slices directly
    into accumulators.
-5. Normalization.
-   This was moderate: about 7.5 seconds for chr21 and 8.0 seconds for chr22.
-   The current path does two `np.searchsorted()` calls into diagonal arrays per
+4. Normalization.
+   This is about 50 seconds total on chr11, again secondary to assembly. The
+   current path does two `np.searchsorted()` calls into diagonal arrays per
    chunk, filters positive diagonals, then computes `r²`. Possible follow-ups
    are dense or dictionary-style diagonal lookup scoped to active segment loci,
    carrying per-partition diagonal lookup state, and combining eligibility plus
    diagonal filtering to shrink arrays earlier.
-6. Group load and canonicalization outside breakpoint rows.
-   Per-breakpoint phase totals still may not explain all local-search elapsed
-   time. Use `local_search_groups.tsv`, `group_total_seconds`, and
-   `local_search_unaccounted_seconds` to check whether HDF5 open/read overhead
-   or group metadata setup has become significant. If it has, reduce redundant
-   partition group loads, merge adjacent groups only when RSS allows it, or
-   delay work for partitions that contribute only tiny row slices.
-7. Metric recomputation around local search.
-   This sits outside the per-breakpoint local-search rows but can affect wall
-   time. The current plan is to validate streaming metrics first. If metric
-   time becomes visible after the memory fix, instrument metric time
-   separately before considering any cache reuse.
-8. Filter-width search.
-   For larger profiles, repeated width evaluations can be visible during
-   exponential search, binary search, and trackback. A low-memory optimization
-   is to cache `{width: minima_count}` only. Do not cache smoothed arrays.
+5. Group load and canonicalization outside breakpoint rows.
+   This is not currently material: `group_total_seconds` is about 1.0 s and
+   `local_search_unaccounted_seconds` is about 0.06 s on chr11. Keep monitoring
+   but do not prioritize.
+6. Metric recomputation around local search.
+   The two streaming metric passes are each about 271 s, around 9 minutes
+   together. This is a meaningful walltime target after Step 3 and local-search
+   assembly. Avoid adding chromosome-wide covariance caches; look for reusable
+   diagonal/locus metadata or a way to combine/reuse streaming passes.
+7. Filter-width search.
+   This is about 135 s before the first metric in the latest chr11 profile. A
+   low-memory optimization is to cache `{width: minima_count}` only. Do not
+   cache smoothed arrays. This is lower priority than Step 3, local search, and
+   metric passes.
 Watch these ratios in each remote profiling run:
 
 - `append_seconds / precompute_seconds`;
@@ -577,36 +628,45 @@ Watch these ratios in each remote profiling run:
 - `local_search_unaccounted_seconds`;
 - wall time outside local search: `elapsed_seconds - set_elapsed_seconds`.
 
-If current RSS peaks before local search, prioritize that earlier stage. If it
-peaks during local search, revisit segment assembly with a design that reduces
-repeated HDF5 reads instead of forcing small bounded windows.
+Current RSS now peaks before local search, in Step 3, but walltime is dominated
+by local search after Step 3. Treat Step 3 chunking as the memory-sensitive
+priority and dense-window local-search segment assembly as the runtime
+priority.
 
 ## Non-Storage To-Dos
 
-### 1. Validate Step 3 Per-Partition Array Lifetime Cleanup
+### 1. Step 3 Per-Partition Array Lifetime Cleanup
 
 Implemented in `write_diag_vector_array()` by moving per-partition
 matrix-to-vector work into `_process_diag_vector_partition()`. The outer loop
 now retains only `current_locus` and `pending_sums`, and logs
 `helper_return` after the helper scope exits.
 
-Acceptance criteria:
+Remote chr11 result:
 
-- per-partition arrays from one matrix-to-vector iteration are released before
-  the next partition's HDF5 read begins;
-- output vector and final `fourier_ls` BED remain identical;
-- chr11 max RSS drops from the current 97.58 GiB profile, even before the full
-  chunked `_r2_rows()` rewrite;
-- debug checkpoints remain scalar-only and show current RSS falling after each
-  large partition.
+- max RSS dropped from 97.58 GiB to 63.55 GiB;
+- wall time dropped from 5204 s to 3967 s in the downloaded profile;
+- helper-return checkpoints show current RSS falling back below 0.5 GiB after
+  each large partition;
+- final command exited successfully.
 
-Remote validation is still required; do not run real-data profiling from a
-local checkout.
+Keep this change. Continue to avoid local real-data profiling.
 
 ### 2. Replace Step 3 `_r2_rows()` With Chunked Accumulation
 
-After lifetime cleanup, replace the one-partition materialized `_r2_rows()` and
-center-index path with bounded HDF5 row-chunk processing.
+After lifetime cleanup, the pre-chunking peak came from one-partition
+materialized `_r2_rows()` and center-index arrays. The HDF5 path now replaces
+that with bounded row-chunk processing. This targets both memory and runtime:
+Step 3 took about 1485 s on chr11 before this change.
+
+Implementation status:
+
+- HDF5-backed matrix-to-vector now uses `MATRIX_TO_VECTOR_CHUNK_ROWS` and
+  two bounded passes per partition.
+- The first pass builds sorted owned loci from chunk-local unique arrays.
+- The second pass normalizes rows and accumulates center-locus sums in chunks.
+- The in-memory `ChromosomeCovariance` cache path keeps the materialized
+  `_r2_rows()` implementation as a compatibility/reference path.
 
 Acceptance criteria:
 
@@ -614,10 +674,38 @@ Acceptance criteria:
   existing array path;
 - vector output matches the existing array path on focused tests;
 - final `fourier_ls` BED remains byte-identical on remote validation;
-- chr11 max RSS drops substantially from the current 97.58 GiB profile;
-- wall time does not regress enough to offset the memory fix.
+- chr11 max RSS drops substantially from the current 63.55 GiB profile;
+- Step 3 walltime improves or remains close enough that the RSS reduction is
+  worth the tradeoff.
 
-### 3. Remote Validation of Streaming Metric and Step 3 Fixes
+### 3. Optimize Local-Search Segment Assembly in Dense Windows
+
+Local-search precompute is the largest walltime phase after helper-scope
+cleanup: 1796 s on chr11, with 1649 s in append/segment assembly. Six dense
+windows between about 42.9 and 59.5 Mb account for about 1486 s of local-search
+precompute.
+
+Candidate approaches:
+
+- process adjacent dense breakpoints as a shared sweep over partition slices;
+- cache reusable per-partition row slices only within a small dense-window
+  group, with strict memory bounds;
+- build segment-local accumulators directly from partition slices instead of
+  repeatedly assembling full active row ranges;
+- keep the previous bounded-window HDF5 experiment as a caution: do not trade
+  assembly time for repeated HDF5 read inflation.
+
+Acceptance criteria:
+
+- final `fourier_ls` BED remains byte-identical;
+- max RSS does not increase versus the helper-scope profile;
+- append/segment assembly time drops materially in the six dense chr11
+  windows;
+- local-search precompute improves on chr11 and does not regress on chr21/22.
+
+Run this remotely only; do not run real-data profiling from a local checkout.
+
+### 4. Remote Validation of Streaming Metric and Step 3 Fixes
 
 Validate the default `fourier_ls` run on remote chr21/chr22 first, then chr10
 and chr11 one at a time. This should happen before deeper local-search numeric
@@ -636,7 +724,26 @@ Acceptance criteria:
 
 Run this remotely only; do not run real-data profiling from a local checkout.
 
-### 4. Representative chr10/chr11 Local-Search Runtime Validation
+### 5. Metric Pass Runtime Review
+
+The two streaming metric passes each take about 271 s on chr11, or about
+9 minutes together. This is a meaningful walltime target after Step 3 and
+local-search segment assembly.
+
+Candidate approaches:
+
+- instrument metric pass substeps before optimizing;
+- reuse small metadata such as diagonal/locus information where exact and
+  bounded;
+- explore whether the Fourier and Fourier-LS metric passes can share safe
+  streaming setup without retaining chromosome-wide covariance arrays.
+
+Constraints:
+
+- do not reintroduce full-chromosome covariance caches;
+- preserve exact `N_zero` and metric behavior within existing tolerance.
+
+### 6. Representative chr10/chr11 Local-Search Runtime Validation
 
 Acceptance criteria:
 
@@ -648,7 +755,7 @@ Acceptance criteria:
 
 Run this remotely only; do not run real-data profiling from a local checkout.
 
-### 5. Dense Local Accumulators
+### 7. Dense Local Accumulators
 
 The implementation still uses `sum_vert_by_locus` and `sum_horiz_by_locus`
 dictionaries during precompute, then materializes arrays at the end. A future
@@ -662,10 +769,10 @@ Constraints:
 - compare `sum_vert` and `sum_horiz` against the Decimal legacy path before
   enabling by default.
 
-Priority after chr21/chr22 profiling: medium. This should follow precompute
-substep instrumentation so we know dictionary accumulation is material.
+Priority: medium-low until segment assembly improves. Accumulator dictionaries
+are not the dominant chr11 runtime bucket in the latest profile.
 
-### 6. Horizontal Grouped Reduction
+### 8. Horizontal Grouped Reduction
 
 Horizontal aggregation still uses `np.unique(..., return_inverse=True)` and
 `np.bincount()` per chunk. This is conservative because `hi` is not globally
@@ -679,10 +786,19 @@ Possible future approach:
   reduction strategy;
 - accept only if runtime improves without increasing peak RSS.
 
-Priority after chr21/chr22 profiling: unknown. It may reduce wall time but can
-increase memory pressure; profile single-worker precompute first.
+Priority: secondary. It is about 84 s on chr11, compared with 1649 s for
+append/segment assembly.
 
-### 7. Multiprocessing-Aware Grouping
+### 9. Normalization Lookup Optimization
+
+Normalization is about 50 s on chr11. Possible optimizations include dense or
+dictionary-style diagonal lookup scoped to active segment loci, carrying
+per-partition diagonal lookup state, and combining eligibility plus diagonal
+filtering earlier.
+
+Priority: secondary. Optimize only after Step 3 chunking and segment assembly.
+
+### 10. Multiprocessing-Aware Grouping
 
 Current grouping is sequential only. A future version could assign whole
 partition groups to process workers.
@@ -693,10 +809,10 @@ Constraints:
 - group tasks must remain bounded by partition range;
 - worker count should be documented as a memory multiplier.
 
-Priority after chr21/chr22 profiling: low until precompute substeps identify a
-pure numeric kernel as dominant.
+Priority: low. Group loading is about 1 s and unaccounted local-search time is
+near zero in the latest chr11 profile. Multiprocessing can also multiply memory.
 
-### 8. JIT Review After Profiling
+### 11. JIT Review After Profiling
 
 Do not add JIT until the representative chromosome run identifies remaining
 hot pure-array kernels.
@@ -708,7 +824,7 @@ Likely candidates if still hot:
 - streaming metric calculation only if partition rereads become a material
   runtime regression after the memory fix is validated.
 
-### 9. HDF5 Validation and Tuning
+### 12. HDF5 Validation and Tuning
 
 HDF5 has been promoted and implemented. Keep it as a bounded reader path, not
 a large resident cache.
@@ -741,10 +857,10 @@ with `calc-covariance` or `run`.
 - Metric calculation streams partition row chunks through the HDF5 reader.
 - Single-worker grouped local search caches only HDF5 partition metadata and
   reads HDF5 row chunks for each full segment range before aggregating.
-- Matrix-to-vector reads HDF5 partitions through the reader and processes each
-  partition in a helper scope so large temporaries can be released before the
-  next partition read; `_r2_rows()` is still one-partition-at-a-time rather
-  than fully chunked.
+- Matrix-to-vector reads HDF5 partitions through the reader, processes each
+  partition in a helper scope, and chunks HDF5 normalization/center
+  accumulation with `MATRIX_TO_VECTOR_CHUNK_ROWS`; caller-supplied in-memory
+  covariance caches still use the materialized reference path.
 - Example workflows and diagnostics have been updated for HDF5.
 
 ### Known Behavior Divergence: Duplicate Positions
