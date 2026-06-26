@@ -14,7 +14,11 @@ from ldetect2._util.covariance_array import (
 )
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
-from ldetect2.local_search import LocalSearch
+from ldetect2.local_search import (
+    LocalSearch,
+    _segment_rows_from_hdf5_partitions,
+    local_search_hdf5_partition,
+)
 from ldetect2.metric import Metric
 
 
@@ -388,6 +392,45 @@ def test_hdf5_precompute_matches_legacy_with_duplicate_pairs(
     )
     assert bp is None or 300 <= bp <= 650
     assert metric is not None
+
+
+def test_hdf5_segment_stream_preserves_first_partition_duplicate_pair(
+    tmp_path: Path,
+) -> None:
+    partitions = {
+        (100, 400): [
+            (100, 100, 1.0),
+            (200, 200, 1.0),
+            (300, 300, 1.0),
+            (400, 400, 1.0),
+            (200, 400, 0.7),
+        ],
+        (200, 500): [
+            (200, 200, 1.0),
+            (300, 300, 1.0),
+            (400, 400, 1.0),
+            (500, 500, 1.0),
+            (400, 200, 0.2),
+            (300, 500, 0.8),
+        ],
+    }
+    store = _make_custom_partitioned_store(tmp_path, partitions)
+    hdf5_partitions = [
+        local_search_hdf5_partition("chr1", store, start, end)
+        for start, end in partitions
+    ]
+
+    lo, hi, shrink = _segment_rows_from_hdf5_partitions(
+        hdf5_partitions,
+        active_min_lo=100,
+        lo_min=100,
+        lo_max=500,
+        chunk_rows=2,
+    )
+
+    duplicate_idx = np.flatnonzero((lo == 200) & (hi == 400))
+    assert duplicate_idx.size == 1
+    assert shrink[int(duplicate_idx[0])] == pytest.approx(0.7)
 
 
 def test_array_local_search_keeps_unchanged_breakpoint(tmp_path: Path) -> None:

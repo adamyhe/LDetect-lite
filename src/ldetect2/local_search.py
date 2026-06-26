@@ -6,6 +6,7 @@ import decimal
 import math
 import time
 from bisect import bisect_left
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,7 +26,7 @@ from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
+from ldetect2.io.covariance_hdf5 import CovarianceRowChunk, open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 
 _PREC = 50
@@ -261,19 +262,55 @@ def _segment_rows_from_hdf5_partitions(
     lo_max: int,
     chunk_rows: int = 1_000_000,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return canonical segment rows by reading bounded HDF5 row chunks."""
+    """Return canonical segment rows from the duplicate-safe HDF5 row stream."""
+    return _materialize_canonical_row_stream(
+        _iter_hdf5_canonical_segment_rows(
+            partitions,
+            active_min_lo,
+            lo_min,
+            lo_max,
+            chunk_rows=chunk_rows,
+        )
+    )
+
+
+def _iter_hdf5_canonical_segment_rows(
+    partitions: list[LocalSearchHDF5Partition],
+    active_min_lo: int,
+    lo_min: int,
+    lo_max: int,
+    *,
+    chunk_rows: int = 1_000_000,
+) -> Iterator[CovarianceRowChunk]:
+    """Yield canonical HDF5 segment rows in local-search precedence order.
+
+    Local search consumes physical ``(lo, hi)`` covariance rows after duplicate
+    resolution.  The current HDF5 writer already stores canonical sorted unique
+    rows per partition; this stream preserves partition and row order so the
+    materializer below keeps the same first-retained-pair-wins semantics as
+    :func:`canonical_local_search_rows`.  If duplicate-position handling is made
+    legacy-equivalent later, update this boundary rather than the aggregation
+    code that consumes it.
+    """
     min_lo = max(active_min_lo, lo_min)
-    lo_parts: list[np.ndarray] = []
-    hi_parts: list[np.ndarray] = []
-    shrink_parts: list[np.ndarray] = []
     for partition in partitions:
         with open_covariance_reader(
             partition.path, partition.start, partition.end
         ) as reader:
-            for chunk in reader.iter_rows(min_lo, lo_max, chunk_rows):
-                lo_parts.append(chunk.lo)
-                hi_parts.append(chunk.hi)
-                shrink_parts.append(chunk.shrink_ld)
+            yield from reader.iter_rows(min_lo, lo_max, chunk_rows)
+
+
+def _materialize_canonical_row_stream(
+    chunks: Iterator[CovarianceRowChunk],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Materialize a canonical covariance row stream with first-row wins."""
+    lo_parts: list[np.ndarray] = []
+    hi_parts: list[np.ndarray] = []
+    shrink_parts: list[np.ndarray] = []
+    for chunk in chunks:
+        lo_parts.append(chunk.lo)
+        hi_parts.append(chunk.hi)
+        shrink_parts.append(chunk.shrink_ld)
 
     if not lo_parts:
         return (
@@ -494,6 +531,214 @@ def _add_array_segment_values(
             sum_vert_by_locus.setdefault(locus_key, 0.0)
         if stats is not None:
             stats.horizontal_seconds += time.perf_counter() - horizontal_start
+
+
+def _add_hdf5_segment_values(
+    segment_loci: np.ndarray,
+    active_partitions: list[LocalSearchHDF5Partition],
+    active_min_lo: int,
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
+    snp_first: int,
+    snp_last: int,
+    snp_top: int,
+    include_snp_first: bool,
+    sum_vert_by_locus: dict[int, float],
+    sum_horiz_by_locus: dict[int, float],
+    *,
+    chunk_rows: int = 1_000_000,
+    stats: LocalSearchPrecomputeStats | None = None,
+) -> None:
+    """Stream HDF5 segment rows directly into local-search accumulators."""
+    if segment_loci.size == 0:
+        return
+    if stats is not None:
+        stats.segments += 1
+
+    for locus in segment_loci:
+        locus_key = int(locus)
+        sum_vert_by_locus.setdefault(locus_key, 0.0)
+        sum_horiz_by_locus.setdefault(locus_key, 0.0)
+
+    if diag_pos.size == 0:
+        return
+
+    lo_min = int(segment_loci[0])
+    lo_max = int(segment_loci[-1])
+    seen_hi_by_lo: dict[int, np.ndarray] = {}
+    chunk_iter = _iter_hdf5_canonical_segment_rows(
+        active_partitions,
+        active_min_lo,
+        lo_min,
+        lo_max,
+        chunk_rows=chunk_rows,
+    )
+    while True:
+        hdf5_start = time.perf_counter()
+        try:
+            chunk = next(chunk_iter)
+        except StopIteration:
+            break
+        if stats is not None:
+            stats.hdf5_read_seconds += time.perf_counter() - hdf5_start
+            stats.rows_read += int(chunk.lo.size)
+            stats.peak_chunk_rows = max(stats.peak_chunk_rows, int(chunk.lo.size))
+
+        filter_start = time.perf_counter()
+        eligible = (chunk.lo <= snp_last) & (chunk.hi <= snp_top)
+        if include_snp_first:
+            eligible &= chunk.lo >= snp_first
+        else:
+            eligible &= chunk.lo > snp_first
+        if stats is not None:
+            stats.chunk_filter_seconds += time.perf_counter() - filter_start
+            stats.rows_after_filter += int(np.count_nonzero(eligible))
+        if not np.any(eligible):
+            continue
+
+        row_lo = chunk.lo[eligible]
+        row_hi = chunk.hi[eligible]
+        row_shrink = chunk.shrink_ld[eligible]
+
+        dedup_start = time.perf_counter()
+        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo)
+        if stats is not None:
+            stats.dedup_seconds += time.perf_counter() - dedup_start
+            stats.duplicate_rows_skipped += int(
+                row_lo.size - np.count_nonzero(first_seen)
+            )
+        if not np.any(first_seen):
+            continue
+
+        row_lo = row_lo[first_seen]
+        row_hi = row_hi[first_seen]
+        row_shrink = row_shrink[first_seen]
+        if stats is not None:
+            kept = int(row_lo.size)
+            stats.candidate_rows += kept
+            stats.eligible_rows += kept
+            stats.rows_after_dedup += kept
+            stats.chunks += 1
+
+        _add_row_chunk_values(
+            row_lo,
+            row_hi,
+            row_shrink,
+            diag_pos,
+            diag_val,
+            sum_vert_by_locus,
+            sum_horiz_by_locus,
+            stats=stats,
+        )
+
+
+def _first_seen_pair_mask(
+    row_lo: np.ndarray,
+    row_hi: np.ndarray,
+    seen_hi_by_lo: dict[int, np.ndarray],
+) -> np.ndarray:
+    """Return rows whose physical pair has not appeared in earlier chunks."""
+    keep = np.ones(row_lo.size, dtype=bool)
+    if row_lo.size == 0:
+        return keep
+
+    group_starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
+        )
+    )
+    group_ends = np.concatenate((group_starts[1:], np.array([row_lo.size])))
+    for start, end in zip(group_starts, group_ends):
+        locus = int(row_lo[start])
+        hi_values = row_hi[start:end]
+        seen = seen_hi_by_lo.get(locus)
+        if seen is None:
+            seen_hi_by_lo[locus] = hi_values.copy()
+            continue
+
+        duplicates = np.isin(hi_values, seen, assume_unique=True)
+        if np.any(duplicates):
+            keep[start:end] = ~duplicates
+        new_hi = hi_values[~duplicates]
+        if new_hi.size:
+            seen_hi_by_lo[locus] = np.union1d(seen, new_hi)
+    return keep
+
+
+def _add_row_chunk_values(
+    row_lo: np.ndarray,
+    row_hi: np.ndarray,
+    row_shrink: np.ndarray,
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
+    sum_vert_by_locus: dict[int, float],
+    sum_horiz_by_locus: dict[int, float],
+    *,
+    stats: LocalSearchPrecomputeStats | None = None,
+) -> None:
+    """Normalize one canonical row chunk and add local-search sums."""
+    normalize_start = time.perf_counter()
+    diag_lo_idx = np.searchsorted(diag_pos, row_lo)
+    diag_hi_idx = np.searchsorted(diag_pos, row_hi)
+    has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
+    safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
+    safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
+    has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (diag_pos[safe_hi_idx] == row_hi)
+    if not np.any(has_diag):
+        if stats is not None:
+            stats.normalize_seconds += time.perf_counter() - normalize_start
+        return
+
+    row_lo = row_lo[has_diag]
+    row_hi = row_hi[has_diag]
+    row_shrink = row_shrink[has_diag]
+    diag_lo = diag_val[diag_lo_idx[has_diag]]
+    diag_hi = diag_val[diag_hi_idx[has_diag]]
+    positive = (diag_lo > 0.0) & (diag_hi > 0.0)
+    if not np.any(positive):
+        if stats is not None:
+            stats.normalize_seconds += time.perf_counter() - normalize_start
+        return
+
+    row_lo = row_lo[positive]
+    row_hi = row_hi[positive]
+    r2 = (
+        row_shrink[positive]
+        * row_shrink[positive]
+        / (diag_lo[positive] * diag_hi[positive])
+    )
+    if stats is not None:
+        stats.normalized_rows += int(r2.size)
+        stats.normalize_seconds += time.perf_counter() - normalize_start
+
+    vertical_start = time.perf_counter()
+    group_starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
+        )
+    )
+    vert_loci = row_lo[group_starts]
+    vert_sums = np.add.reduceat(r2, group_starts)
+    for locus, value in zip(vert_loci, vert_sums):
+        sum_vert_by_locus[int(locus)] = (
+            sum_vert_by_locus.get(int(locus), 0.0) + float(value)
+        )
+    if stats is not None:
+        stats.vertical_seconds += time.perf_counter() - vertical_start
+
+    horizontal_start = time.perf_counter()
+    horiz_loci, horiz_inverse = np.unique(row_hi, return_inverse=True)
+    horiz_sums = np.bincount(horiz_inverse, weights=r2)
+    for locus, value in zip(horiz_loci, horiz_sums):
+        locus_key = int(locus)
+        sum_horiz_by_locus[locus_key] = (
+            sum_horiz_by_locus.get(locus_key, 0.0) + float(value)
+        )
+        sum_vert_by_locus.setdefault(locus_key, 0.0)
+    if stats is not None:
+        stats.horizontal_seconds += time.perf_counter() - horizontal_start
 
 
 def _diag_lookup(
@@ -1123,20 +1368,6 @@ class LocalSearch:
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
-                lo_min = int(segment_loci[0])
-                lo_max = int(segment_loci[-1])
-                append_start = time.perf_counter()
-                active_lo, active_hi, active_shrink = (
-                    _segment_rows_from_hdf5_partitions(
-                        active_partitions,
-                        active_min_lo,
-                        lo_min,
-                        lo_max,
-                    )
-                )
-                self.precompute_stats.append_seconds += (
-                    time.perf_counter() - append_start
-                )
                 diagonal_start = time.perf_counter()
                 diag_pos, diag_val = _active_diagonal_from_hdf5_partitions(
                     active_partitions,
@@ -1145,11 +1376,11 @@ class LocalSearch:
                 self.precompute_stats.diagonal_seconds += (
                     time.perf_counter() - diagonal_start
                 )
-                _add_array_segment_values(
+                accumulator_start = time.perf_counter()
+                _add_hdf5_segment_values(
                     segment_loci,
-                    active_lo,
-                    active_hi,
-                    active_shrink,
+                    active_partitions,
+                    active_min_lo,
                     diag_pos,
                     diag_val,
                     self.snp_first,
@@ -1159,6 +1390,9 @@ class LocalSearch:
                     sum_vert_by_locus,
                     sum_horiz_by_locus,
                     stats=self.precompute_stats,
+                )
+                self.precompute_stats.accumulator_seconds += (
+                    time.perf_counter() - accumulator_start
                 )
 
                 if segment_end_idx < active_loci.size:
