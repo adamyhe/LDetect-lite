@@ -386,10 +386,11 @@ The latest downloaded remote profiling outputs are under:
 examples/ldetect_original/results/diagnostics/EUR/profiling/
 ```
 
-The current remote logs include pipeline memory checkpoints. They confirm that
-the chr11 RSS high-water mark is not caused by the local-search segment
-assembly path. The high-water mark first appears during Step 3
-matrix-to-vector conversion.
+The current remote logs include pipeline and Step 3 subphase memory
+checkpoints. They confirm that the chr11 RSS high-water mark is not caused by
+the local-search segment assembly path. The high-water mark first appears
+during Step 3 matrix-to-vector conversion, specifically inside `_r2_rows()` for
+large HDF5 partitions around 46-56 Mb.
 
 Current run summary:
 
@@ -399,6 +400,12 @@ Current run summary:
 | chr22 | 453.00 s | 4.89 GiB | 81.16 s | 17.9% | 80.91 s | 0.030 s |
 | chr10 | 1899.67 s | 19.42 GiB | 465.19 s | 24.5% | 464.16 s | 0.117 s |
 | chr11 | 5401.00 s | 97.60 GiB | 1769.81 s | 32.8% | 1768.59 s | 0.126 s |
+
+Latest Step 3 subphase run for chr11:
+
+| Chrom | Wall time | Max RSS | Local search | Precompute | Search |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| chr11 | 5204.00 s | 97.58 GiB | 1720.65 s | 1719.42 s | 0.124 s |
 
 The bounded HDF5 segment assembly experiment was run before this profile. It
 improved chr11 local-search time but regressed whole-run wall time and did not
@@ -444,13 +451,10 @@ Worst chr11 breakpoint windows in the latest profile:
 
 Additional chr11 timing from the raw log:
 
-- covariance calculation ran from `[22:21:46]` to `[22:44:49]`, about
-  23m03s;
-- matrix-to-vector ran from `[22:44:49]` to `[23:09:15]`, about 24m26s;
-- breakpoint finding before local search ran from `[23:09:15]` to
-  `[23:16:07]`, about 6m52s;
-- local search ran from `[23:16:07]` to `[23:45:37]`, about 29m30s;
-- final metric/write ran from `[23:45:37]` to `[23:50:09]`, about 4m32s.
+- covariance calculation ran from `[04:32:43]` to `[04:54:11]`, about
+  21m28s;
+- matrix-to-vector ran from `[04:54:11]` to `[05:18:12]`, about 24m01s;
+- local search was about 28m41s in the aggregated profile.
 
 Important memory caveat:
 
@@ -466,30 +470,44 @@ Step-level chr11 memory checkpoints:
 
 | Checkpoint | Current RSS | Max RSS |
 | --- | ---: | ---: |
-| `step2_start` | 143.9 MiB | 328.5 MiB |
-| `step2_end` | 144.3 MiB | 328.5 MiB |
-| `step3_start` | 144.3 MiB | 328.5 MiB |
-| `step3_end` | 430.5 MiB | 99,942.0 MiB |
-| `fourier_metric_start` | 480.0 MiB | 99,942.0 MiB |
-| `fourier_local_search_start` | 513.0 MiB | 99,942.0 MiB |
-| `fourier_local_search_end` | 428.6 MiB | 99,942.0 MiB |
-| `run_end` | 411.9 MiB | 99,942.0 MiB |
+| `step2_start` | 142.2 MiB | 339.0 MiB |
+| `step2_end` | 142.9 MiB | 339.0 MiB |
+| `step3_start` | 142.9 MiB | 339.0 MiB |
+| `matrix_to_vector_array_start` | 142.9 MiB | 339.0 MiB |
+| `matrix_to_vector_array_end` | 731.4 MiB | 99,922.9 MiB |
+| `step3_end` | 373.4 MiB | 99,922.9 MiB |
+| `step4_start` | 373.4 MiB | 99,922.9 MiB |
+| `run_end` | 364.5 MiB | 99,922.9 MiB |
 
 Covariance worker checkpoints did not show the 100 GiB peak. The largest
-worker high-water marks in this run were about 22.6 GiB, with current RSS near
-661 MiB at partition completion. That makes Step 3
-`MatrixAnalysis.calc_diag_array()` / `write_diag_vector_array()` the primary
-RSS chokepoint to investigate next.
+worker high-water marks in this run were about 22.6 GiB. The Step 3 subphase
+checkpoints identify `_r2_rows()` as the main matrix-to-vector allocation
+spike. Large partition reads and locus construction contribute, but the largest
+jumps are all inside `_r2_rows()`:
+
+| Partition | Range | Read end current/max | `loci_unique_end` max | `_r2_rows_end` current/max |
+| ---: | --- | ---: | ---: | ---: |
+| 135 | 46.24-55.47 Mb | 10.83 / 10.83 GiB | 19.05 GiB | 18.54 / 53.62 GiB |
+| 136 | 46.72-55.60 Mb | 41.93 / 53.62 GiB | 53.62 GiB | 38.20 / 82.56 GiB |
+| 137 | 47.20-56.13 Mb | 44.78 / 82.56 GiB | 82.56 GiB | 41.84 / 91.98 GiB |
+| 138 | 47.64-56.47 Mb | 50.13 / 91.98 GiB | 91.98 GiB | 45.37 / 97.58 GiB |
+
+There is also an avoidable lifetime overlap between partitions: large arrays
+from partition 135 remain live at partition 136 start, then partition 136's
+HDF5 read and `_r2_rows()` temporaries stack on top. That means the first
+implementation target should be per-partition lifetime cleanup or helper-scope
+isolation, followed by chunked `_r2_rows()`/center accumulation if the single
+partition peak remains too high.
 
 Implications:
 
 - Do not prioritize `_search_array()` candidate scoring. It is effectively
   free at this scale.
 - Do not add JIT yet.
-- The highest leverage memory task is now fixing the Step 3 matrix-to-vector
-  transient allocation. The lifetime max RSS is already present by the first
-  local-search breakpoint, so local-search segment assembly is not the chr11
-  RSS chokepoint in this profile.
+- The highest leverage memory task is now fixing Step 3 matrix-to-vector array
+  lifetimes and `_r2_rows()` temporaries. The lifetime max RSS is already
+  present by the first local-search breakpoint, so local-search segment
+  assembly is not the chr11 RSS chokepoint in this profile.
 - Horizontal aggregation and normalization remain possible runtime targets, but
   should wait until the RSS chokepoint is understood.
 
@@ -497,17 +515,17 @@ Implications:
 
 Review the next remote profile in this order:
 
-1. Matrix-to-vector Step 3.
-   Add subphase memory checkpoints inside `write_diag_vector_array()`,
-   especially around HDF5 partition reads, in-partition filtering,
-   `np.unique(np.concatenate((lo, hi)))`, `_r2_rows()`, `np.bincount()`, and
-   vector-row flushing. The goal is to identify the exact temporary allocation
-   that raises chr11 from a 328 MiB high-water mark to about 99.94 GiB.
+1. Matrix-to-vector array lifetime cleanup.
+   Move per-partition matrix-to-vector work into a helper scope or explicitly
+   release large arrays at the end of each partition before loading the next
+   HDF5 partition. This should prevent partition 135 outputs from stacking
+   with partition 136 reads and `_r2_rows()` temporaries.
 2. Chunked matrix-to-vector replacement.
-   If `_r2_rows()` or `np.bincount()` is the source, replace the one-partition
-   materialized path with bounded HDF5 row-chunk accumulation. Preserve the
-   current center-locus and pending-sum semantics exactly, and compare output
-   vectors byte-for-byte or with existing float tolerance before enabling.
+   `_r2_rows()` is the source of the largest Step 3 peak. Replace the
+   one-partition materialized normalization/indexing path with bounded HDF5
+   row-chunk accumulation. Preserve the current center-locus and pending-sum
+   semantics exactly, and compare output vectors byte-for-byte or with
+   existing float tolerance before enabling.
 3. Segment assembly after RSS is localized.
    The reverted bounded-window experiment showed that naively reducing
    segment temporaries can trade runtime for HDF5 read overhead. Revisit only
@@ -565,28 +583,30 @@ repeated HDF5 reads instead of forcing small bounded windows.
 
 ## Non-Storage To-Dos
 
-### 1. Instrument Step 3 Matrix-to-Vector Memory
+### 1. Validate Step 3 Per-Partition Array Lifetime Cleanup
 
-The latest chr11 memory checkpoints identify Step 3 as the RSS chokepoint:
-`step3_start` had a 328.5 MiB lifetime max, while `step3_end` had a
-99,942.0 MiB lifetime max. Add finer checkpoints inside
-`write_diag_vector_array()` before changing local-search memory behavior again.
+Implemented in `write_diag_vector_array()` by moving per-partition
+matrix-to-vector work into `_process_diag_vector_partition()`. The outer loop
+now retains only `current_locus` and `pending_sums`, and logs
+`helper_return` after the helper scope exits.
 
 Acceptance criteria:
 
-- logs identify the first Step 3 subphase where max RSS approaches 100 GiB;
-- checkpoints cover HDF5 `read_all()`, partition filtering, locus list
-  construction, `_r2_rows()`, center-locus `bincount`, pending-sum flushing,
-  and loop cleanup;
-- instrumentation remains scalar-only and does not retain extra arrays;
-- output vector and final `fourier_ls` BED remain identical.
+- per-partition arrays from one matrix-to-vector iteration are released before
+  the next partition's HDF5 read begins;
+- output vector and final `fourier_ls` BED remain identical;
+- chr11 max RSS drops from the current 97.58 GiB profile, even before the full
+  chunked `_r2_rows()` rewrite;
+- debug checkpoints remain scalar-only and show current RSS falling after each
+  large partition.
 
-Run this remotely only; do not run real-data profiling from a local checkout.
+Remote validation is still required; do not run real-data profiling from a
+local checkout.
 
-### 2. Replace Step 3 Materialized Partition Work With Chunked Accumulation
+### 2. Replace Step 3 `_r2_rows()` With Chunked Accumulation
 
-After the subphase checkpoint identifies the allocation, replace the offending
-one-partition materialization with bounded HDF5 row-chunk processing.
+After lifetime cleanup, replace the one-partition materialized `_r2_rows()` and
+center-index path with bounded HDF5 row-chunk processing.
 
 Acceptance criteria:
 
@@ -594,7 +614,7 @@ Acceptance criteria:
   existing array path;
 - vector output matches the existing array path on focused tests;
 - final `fourier_ls` BED remains byte-identical on remote validation;
-- chr11 max RSS drops substantially from the current 97.6 GiB profile;
+- chr11 max RSS drops substantially from the current 97.58 GiB profile;
 - wall time does not regress enough to offset the memory fix.
 
 ### 3. Remote Validation of Streaming Metric and Step 3 Fixes
@@ -721,8 +741,10 @@ with `calc-covariance` or `run`.
 - Metric calculation streams partition row chunks through the HDF5 reader.
 - Single-worker grouped local search caches only HDF5 partition metadata and
   reads HDF5 row chunks for each full segment range before aggregating.
-- Matrix-to-vector reads HDF5 partitions through the reader; it is still
-  one-partition-at-a-time rather than fully segment-chunked.
+- Matrix-to-vector reads HDF5 partitions through the reader and processes each
+  partition in a helper scope so large temporaries can be released before the
+  next partition read; `_r2_rows()` is still one-partition-at-a-time rather
+  than fully chunked.
 - Example workflows and diagnostics have been updated for HDF5.
 
 ### Known Behavior Divergence: Duplicate Positions

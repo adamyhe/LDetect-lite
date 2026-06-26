@@ -8,19 +8,27 @@ A modern reimplementation of [LDetect](https://bitbucket.org/nygcresearch/ldetec
 pip install ldetect2
 ```
 
+Or, with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv add ldetect2
+```
+
 The main `ldetect2 run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect2 calc-covariance`, and so must be on PATH.
 
 **Optional** (`--generate-heatmap`): install matplotlib via `pip install ldetect2[heatmap]`. Generating covariance heatmaps requires a matplotlib install.
 
 ### Development
 
-Install from source
+Install from source with uv:
 
 ```bash
 git clone https://github.com/adamyhe/ldetect2.git
 cd ldetect2
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
+
+Use `uv sync --extra heatmap` when working on heatmap generation, and run local commands through `uv run`, for example `uv run ldetect2 --help` or `uv run snakemake --cores 4` from an example pipeline directory.
 
 ## Usage
 

@@ -22,8 +22,8 @@ Pipeline steps:
 
 Usage:
     cd examples/ldetect_example/
-    snakemake -n               # dry-run
-    snakemake --cores 4        # run
+    uv run snakemake -n               # dry-run
+    uv run snakemake --cores 4        # run
 """
 
 from pathlib import Path
@@ -38,6 +38,8 @@ NE        = config["ne"]
 N_SNPS    = config["n_snps_bw_bpoints"]
 SUBSET    = config["subset"]
 BB_BASE   = config["bitbucket_base"]
+PYTHON    = config.get("python_command", "uv run python")
+LDETECT2  = config.get("ldetect2_command", "uv run ldetect2")
 
 REF_DIR   = Path(config["ref_dir"])
 WORK_DIR  = Path(config["work_dir"])
@@ -121,7 +123,7 @@ rule convert_ref_covariance:
     shell:
         """
         mkdir -p $(dirname {output})
-        python scripts/convert_covariance.py --input {input} --output {output}
+        {PYTHON} scripts/convert_covariance.py --input {input} --output {output}
         """
 
 
@@ -150,7 +152,7 @@ rule matrix_to_vector:
         str(WORK_VECTOR),
     shell:
         """
-        ldetect2 matrix-to-vector \
+        {LDETECT2} matrix-to-vector \
             --dataset-path {WORK_DIR} \
             --name {CHROM} \
             --output {output}
@@ -169,7 +171,7 @@ rule find_minima:
         str(WORK_BPTS),
     shell:
         """
-        ldetect2 find-minima \
+        {LDETECT2} find-minima \
             --input {input.vector} \
             --chr-name {CHROM} \
             --dataset-path {WORK_DIR} \
@@ -190,7 +192,7 @@ rule extract_bpoints:
         str(WORK_BED),
     shell:
         """
-        ldetect2 extract-bpoints \
+        {LDETECT2} extract-bpoints \
             --name {CHROM} \
             --dataset-path {WORK_DIR} \
             --breakpoints {input.bpts} \
@@ -211,7 +213,7 @@ rule partition_chromosome:
     shell:
         """
         mkdir -p $(dirname {output})
-        ldetect2 partition-chromosome \
+        {LDETECT2} partition-chromosome \
             --genetic-map {input} \
             --n-individuals {N_INDS} \
             --ne {NE} \
@@ -232,7 +234,7 @@ rule compare_vector:
     shell:
         """
         mkdir -p {RES_DIR}
-        python scripts/compare_vector.py \
+        {PYTHON} scripts/compare_vector.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output}
@@ -247,7 +249,7 @@ rule compare_bpoints:
         str(RES_DIR / "compare_bpoints.tsv"),
     shell:
         """
-        python scripts/compare_bpoints.py \
+        {PYTHON} scripts/compare_bpoints.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output}
@@ -262,7 +264,7 @@ rule compare_bed:
         str(RES_DIR / "compare_bed.tsv"),
     shell:
         """
-        python scripts/compare_bed.py \
+        {PYTHON} scripts/compare_bed.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output}
@@ -277,7 +279,7 @@ rule compare_partitions:
         str(RES_DIR / "compare_partitions.tsv"),
     shell:
         """
-        python scripts/compare_partitions.py \
+        {PYTHON} scripts/compare_partitions.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output}

@@ -17,9 +17,9 @@ Pipeline steps:
 
 Usage:
     cd examples/MacDonald2022/
-    snakemake -n                         # dry-run, all chromosomes
-    snakemake --cores 8                  # run with 8 parallel jobs
-    snakemake --config chromosomes=[22]  # smoke-test on chr22 only
+    uv run snakemake -n                         # dry-run, all chromosomes
+    uv run snakemake --cores 8                  # run with 8 parallel jobs
+    uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
 from pathlib import Path
@@ -40,6 +40,8 @@ MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
 RESULTS = Path(config["results_dir"])
 VCF_TMPL = config["vcf_filename_template"]
+PYTHON = config.get("python_command", "uv run python")
+LDETECT2 = config.get("ldetect2_command", "uv run ldetect2")
 
 
 wildcard_constraints:
@@ -198,7 +200,7 @@ rule prep_individuals:
         expected_count=lambda wc: expected_individual_count_param(wc.population),
     shell:
         """
-        python scripts/prep_individuals.py \
+        {PYTHON} scripts/prep_individuals.py \
             --sample-data-base-url {params.base_url} \
             --subpops {params.subpops} \
             --vcf {input.vcf} \
@@ -219,7 +221,7 @@ rule convert_decode_map:
         str(MAPS_DIR / "decode_raw" / "chr{chrom}.tab.gz"),
     shell:
         """
-        python scripts/convert_decode_map.py \
+        {PYTHON} scripts/convert_decode_map.py \
             --input {input} \
             --output-dir {MAPS_DIR}/decode_raw \
             --chromosomes {wildcards.chrom}
@@ -257,7 +259,7 @@ rule interpolate_map:
     shell:
         """
         mkdir -p {MAPS_DIR}/interpolated
-        ldetect2 interpolate-maps \
+        {LDETECT2} interpolate-maps \
             --snp-file {input.snps} \
             --genetic-map {input.map} \
             --output {output}
@@ -301,7 +303,7 @@ rule run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 run \
+        {LDETECT2} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -332,7 +334,7 @@ rule postprocess:
         min_snps=config["min_snps_per_block"],
     shell:
         """
-        python scripts/postprocess.py \
+        {PYTHON} scripts/postprocess.py \
             --bed {input.bed} \
             --vcf {input.vcf} \
             --centromeres {input.centromeres} \
@@ -384,7 +386,7 @@ rule validate_maps:
         str(RESULTS / "compare" / "map_summary.tsv"),
     shell:
         """
-        python scripts/validate_maps.py \
+        {PYTHON} scripts/validate_maps.py \
             --interpolated {input} \
             --output {output}
         """
@@ -402,7 +404,7 @@ rule compare_maps:
         ref_dir=str(RES_DIR / "macdonalds_maps"),
     shell:
         """
-        python scripts/compare_maps.py \
+        {PYTHON} scripts/compare_maps.py \
             --ours {input} \
             --ref-dir {params.ref_dir} \
             --output {output}
@@ -437,7 +439,7 @@ rule compare_blocks:
         tolerance=50_000,
     shell:
         """
-        python scripts/compare_blocks.py \
+        {PYTHON} scripts/compare_blocks.py \
             --ours {input.ours} \
             --ref {input.ref} \
             --output {output} \

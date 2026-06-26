@@ -20,9 +20,9 @@ Pipeline steps:
 
 Usage:
     cd examples/ldetect_original/
-    snakemake -n                         # dry-run, all chromosomes
-    snakemake --cores 8                  # run with 8 parallel jobs
-    snakemake --config chromosomes=[22]  # smoke-test on chr22 only
+    uv run snakemake -n                         # dry-run, all chromosomes
+    uv run snakemake --cores 8                  # run with 8 parallel jobs
+    uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
 from pathlib import Path
@@ -38,6 +38,8 @@ MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
 RESULTS = Path(config["results_dir"])
 VCF_TMPL = config["vcf_filename_template"]
+PYTHON = config.get("python_command", "uv run python")
+LDETECT2 = config.get("ldetect2_command", "uv run ldetect2")
 
 
 def pop_ne(population):
@@ -156,7 +158,7 @@ rule prep_individuals:
         subpops=lambda wc: " ".join(pop_subpops(wc.population)),
     shell:
         """
-        python scripts/prep_individuals.py \
+        {PYTHON} scripts/prep_individuals.py \
             --panel {input.panel} \
             --subpops {params.subpops} \
             --vcf {input.vcf} \
@@ -230,7 +232,7 @@ rule run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 run \
+        {LDETECT2} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -285,7 +287,7 @@ rule compare_blocks:
     shell:
         """
         mkdir -p {RESULTS}/compare
-        python scripts/compare_blocks.py \
+        {PYTHON} scripts/compare_blocks.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output} \

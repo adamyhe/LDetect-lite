@@ -15,13 +15,13 @@ The workflow starts from public 1000 Genomes Phase 1 VCFs and runs the modern
 cd examples/ldetect_original
 
 # Dry-run all configured chromosomes and populations.
-snakemake -n
+uv run snakemake -n
 
 # Run a small smoke test.
-snakemake --cores 8 --config chromosomes='[22]'
+uv run snakemake --cores 8 --config chromosomes='[22]'
 
 # Run the configured analysis.
-snakemake --cores 32
+uv run snakemake --cores 32
 ```
 
 The main outputs are:
