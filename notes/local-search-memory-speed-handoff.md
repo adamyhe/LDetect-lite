@@ -51,7 +51,7 @@ plan text.
 | Duplicate-safe local-search row-stream boundary | Implemented | HDF5 local search routes segment rows through one canonical stream boundary preserving first-retained-pair precedence |
 | Dense local accumulators | To-do | local search still uses `sum_vert_by_locus`/`sum_horiz_by_locus` dictionaries |
 | JIT for local-search numerics | Deferred | Candidate scoring is not hot in current profiles; revisit only after remote profiling |
-| Step 2 covariance worker RSS | Implemented and remotely profiled | compact `calc_covariance()` logs per-worker phase checkpoints and writes compact HDF5 rows in bounded chunks; chr11 whole-run max RSS is now 0.774 GiB |
+| Step 2 covariance worker RSS | Implemented and remotely profiled | compact `calc_covariance()` logs per-worker phase checkpoints and writes compact HDF5 rows in bounded chunks; chr11 whole-run max RSS is now 0.825 GiB |
 | Remote real-data validation | Partial | chr10/chr11/chr13/chr21/chr22 profiles downloaded after bounded compact covariance writes; full all-chromosome validation still pending |
 
 ## Non-Storage Optimization Status
@@ -391,66 +391,71 @@ The latest downloaded remote profiling outputs are under:
 examples/ldetect_original/results/diagnostics/EUR/profiling/
 ```
 
-The current remote logs include chr10/chr11/chr13/chr21/chr22 after bounded
-compact covariance writes. They validate the Step 2 memory fix: chr11
-whole-run max RSS dropped from 22.14 GiB to 0.774 GiB and chr10 dropped from
-4.82 GiB to 0.582 GiB. The tradeoff is runtime: local-search HDF5
-reads/decompression regressed by about 1.7-2.4x across the profiled
-chromosomes, so storage layout/read behavior is now the top runtime target.
+The current remote logs include chr10/chr11/chr13/chr21/chr22 after compact
+HDF5 storage chunks were decoupled from write batches and local search began
+reusing open HDF5 readers within each breakpoint precompute. They validate the
+read-layout follow-up: chr11 local-search HDF5 read time dropped from about
+996 s to about 563 s while whole-run max RSS remained below 1 GiB.
 
 Current run summary:
 
 | Chrom | Wall time | Max RSS | Local search | LS % wall | Precompute | Search |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| chr10 | 2015.63 s | 0.582 GiB | 442.52 s | 22.0% | 441.50 s | 0.117 s |
-| chr11 | 4244.00 s | 0.774 GiB | 1286.13 s | 30.3% | 1284.96 s | 0.118 s |
-| chr13 | 1437.35 s | 0.472 GiB | 379.94 s | 26.4% | 378.99 s | 0.120 s |
-| chr21 | 337.22 s | 0.403 GiB | 63.71 s | 18.9% | 63.44 s | 0.036 s |
-| chr22 | 422.08 s | 0.413 GiB | 97.37 s | 23.1% | 97.06 s | 0.047 s |
+| chr10 | 1714.45 s | 0.596 GiB | 334.47 s | 19.5% | 333.46 s | 0.117 s |
+| chr11 | 3868.00 s | 0.825 GiB | 856.66 s | 22.1% | 855.49 s | 0.118 s |
+| chr13 | 1166.70 s | 0.476 GiB | 208.00 s | 17.8% | 207.29 s | 0.120 s |
+| chr21 | 338.73 s | 0.397 GiB | 64.42 s | 19.0% | 64.08 s | 0.036 s |
+| chr22 | 394.59 s | 0.412 GiB | 68.59 s | 17.4% | 68.31 s | 0.047 s |
 
-Before/after against the previous streamed local-search profile:
+Before/after against the previous bounded compact profile with 1M HDF5 dataset
+chunks and open-per-segment local-search readers:
 
 | Chrom | Wall time | Max RSS | Local search | HDF5 read |
 | --- | ---: | ---: | ---: | ---: |
-| chr10 | 1.07x | 0.12x | 1.26x | 1.74x |
-| chr11 | 1.05x | 0.03x | 1.53x | 1.81x |
-| chr13 | 1.19x | 0.41x | 1.78x | 2.44x |
-| chr21 | 1.07x | 0.61x | 1.25x | 1.74x |
-| chr22 | 1.07x | 0.30x | 1.45x | 1.94x |
+| chr10 | 0.85x | 1.03x | 0.76x | 0.56x |
+| chr11 | 0.91x | 1.07x | 0.67x | 0.57x |
+| chr13 | 0.81x | 1.01x | 0.55x | 0.41x |
+| chr21 | 1.00x | 0.99x | 1.01x | 0.70x |
+| chr22 | 0.94x | 1.00x | 0.70x | 0.53x |
+
+Against the pre-regression streamed local-search profile, HDF5 read time is
+mostly recovered: chr10/chr11/chr13/chr22 are within about 0.97-1.03x of the
+old read-time baseline, while chr21 remains about 1.22x slower.
 
 Step 3 validation:
 
 | Chrom | Step 3 seconds | Step 3 max RSS | Notes |
 | --- | ---: | ---: | --- |
-| chr10 | 469 s | 380.4 MiB | Raw log split |
-| chr11 | 982 s | 503.6 MiB | Was 63.55 GiB after helper-scope cleanup and 97.58 GiB before cleanup |
-| chr13 | 263 s | 356.4 MiB | Raw log split |
-| chr21 | 57 s | 360.4 MiB | Smaller-chromosome validation |
-| chr22 | 76 s | 363.7 MiB | Smaller-chromosome validation |
+| chr10 | 437 s | 452.6 MiB | Raw log split |
+| chr11 | 1023 s | 452.6 MiB | Was 63.55 GiB after helper-scope cleanup and 97.58 GiB before cleanup |
+| chr13 | 237 s | 445.5 MiB | Raw log split |
+| chr21 | 58 s | 371.7 MiB | Smaller-chromosome validation |
+| chr22 | 76 s | 372.2 MiB | Smaller-chromosome validation |
 
 Current chr11 walltime split from refreshed raw logs:
 
 | Phase | Seconds | Minutes | Notes |
 | --- | ---: | ---: | --- |
-| Step 1 partitioning | 2 s | 0.0 m | 19:58:09-19:58:11 |
-| Step 2 covariance generation | 1304 s | 21.7 m | 378 HDF5 partitions, `workers=4`, compact cache |
-| Step 3 matrix-to-vector | 982 s | 16.4 m | chunked HDF5 path, parent max RSS 503.6 MiB |
-| Step 4 total | 1953 s | 32.6 m | includes minima, metrics, local search |
-| Filter-width/minima before metric | 401 s | 6.7 m | larger than previous profile; still below local search |
-| Fourier metric | 401 s | 6.7 m | streaming metric pass |
-| Fourier local search | 1286 s | 21.4 m | HDF5 read/decompression dominated |
-| Final Fourier-LS metric | 266 s | 4.4 m | second streaming metric pass |
+| Step 1 partitioning | 2 s | 0.0 m | 04:11:55-04:11:57 |
+| Step 2 covariance generation | 1322 s | 22.0 m | 378 HDF5 partitions, `workers=4`, compact cache |
+| Step 3 matrix-to-vector | 1023 s | 17.1 m | chunked HDF5 path, parent max RSS 452.6 MiB |
+| Step 4 total | 1518 s | 25.3 m | includes minima, metrics, local search |
+| Filter-width/minima before metric | 135 s | 2.3 m | back near the earlier profile |
+| Fourier metric | 262 s | 4.4 m | streaming metric pass |
+| Fourier local search | 857 s | 14.3 m | read-layout/reuse mostly recovered regression |
+| Final Fourier-LS metric | 264 s | 4.4 m | second streaming metric pass |
 
 The key runtime finding is still that local-search candidate scoring is not the
 bottleneck. The bounded compact covariance writer fixed the major Step 2 RSS
-pressure, but local-search HDF5 read/decompression time increased enough to
-raise chr11 local-search time from about 842 s to about 1286 s. Local search is
-again the largest walltime phase, but not a memory risk.
+pressure, and the HDF5 layout/read-cache follow-up largely removed the
+downstream read regression. Local search is still the largest single Step 4
+subphase on chr11, but Step 2 covariance generation and Step 3 matrix-to-vector
+are comparable whole-run bottlenecks.
 
 Rows loaded and precompute time scale closely:
 
 - chr10 logically requested 6.02B rows across 84 breakpoint searches, read
-  4.35B HDF5 rows, filtered them to 2.26B rows, and deduplicated to 999.3M
+  4.35B HDF5 rows, filtered them to 2.27B rows, and deduplicated to 999.3M
   candidate rows.
 - chr11 logically requested 43.03B rows across 83 breakpoint searches, read
   16.62B HDF5 rows, filtered them to 5.30B rows, and deduplicated to 1.22B
@@ -465,62 +470,62 @@ Rows loaded and precompute time scale closely:
   711.0M HDF5 rows, filtered them to 386.4M rows, and deduplicated to 205.1M
   candidate rows.
 
-Phase timing now identifies HDF5 reads/decompression as the largest
-local-search runtime bucket, with duplicate tracking, horizontal aggregation,
-and normalization as the next targets:
+Phase timing still identifies HDF5 reads/decompression as the largest
+local-search runtime bucket on chr11, with duplicate tracking, horizontal
+aggregation, and normalization as the next targets:
 
 | Chrom | HDF5 read | Dedup | Horizontal | Normalize | Local-search max RSS |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| chr10 | 259.86 s (58.9%) | 68.13 s (15.4%) | 62.35 s (14.1%) | 38.30 s (8.7%) | 524.3 MiB |
-| chr11 | 995.94 s (77.5%) | 130.73 s (10.2%) | 77.34 s (6.0%) | 49.46 s (3.8%) | 615.8 MiB |
-| chr13 | 205.92 s (54.3%) | 65.81 s (17.4%) | 60.05 s (15.8%) | 35.36 s (9.3%) | 474.2 MiB |
-| chr21 | 33.49 s (52.8%) | 7.75 s (12.2%) | 12.09 s (19.1%) | 7.79 s (12.3%) | 407.0 MiB |
-| chr22 | 52.72 s (54.3%) | 13.81 s (14.2%) | 17.67 s (18.2%) | 9.71 s (10.0%) | 422.7 MiB |
+| chr10 | 144.97 s (43.5%) | 68.63 s (20.6%) | 63.28 s (19.0%) | 43.42 s (13.0%) | 554.1 MiB |
+| chr11 | 563.17 s (65.8%) | 134.21 s (15.7%) | 77.46 s (9.1%) | 52.14 s (6.1%) | 637.7 MiB |
+| chr13 | 83.93 s (40.5%) | 42.80 s (20.6%) | 43.27 s (20.9%) | 29.06 s (14.0%) | 465.4 MiB |
+| chr21 | 23.55 s (36.8%) | 10.99 s (17.1%) | 17.54 s (27.4%) | 9.08 s (14.2%) | 387.6 MiB |
+| chr22 | 27.86 s (40.8%) | 13.24 s (19.4%) | 14.94 s (21.9%) | 9.26 s (13.6%) | 397.4 MiB |
 
 Current chr11 local-search phase timing:
 
 | Phase | Seconds | Share of LS precompute |
 | --- | ---: | ---: |
-| HDF5 read/decompression | 995.94 s | 77.5% |
-| Duplicate tracking | 130.73 s | 10.2% |
-| Horizontal aggregation | 77.34 s | 6.0% |
-| Normalization | 49.46 s | 3.8% |
-| Chunk filtering | 9.83 s | 0.8% |
+| HDF5 read/decompression | 563.17 s | 65.8% |
+| Duplicate tracking | 134.21 s | 15.7% |
+| Horizontal aggregation | 77.46 s | 9.1% |
+| Normalization | 52.14 s | 6.1% |
+| Chunk filtering | 6.98 s | 0.8% |
 | Vertical aggregation | 1.15 s | 0.1% |
 
 The top six local-search windows dominate runtime:
 
 | Window | Partitions | Rows requested | Candidate rows | Precompute | HDF5 read | Dedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 49.87-52.62 Mb | 15 | 6.80B | 82.5M | 237.49 s | 214.50 s | 9.28 s |
-| 47.01-49.87 Mb | 17 | 6.26B | 186.2M | 236.42 s | 195.70 s | 15.09 s |
-| 55.09-56.41 Mb | 25 | 7.25B | 81.5M | 180.50 s | 120.20 s | 47.00 s |
-| 52.62-55.09 Mb | 18 | 7.09B | 15.7M | 165.33 s | 158.46 s | 2.56 s |
-| 42.91-47.01 Mb | 24 | 4.90B | 37.5M | 90.24 s | 82.19 s | 2.63 s |
-| 56.41-59.45 Mb | 35 | 7.30B | 34.5M | 72.88 s | 58.33 s | 9.41 s |
+| 47.01-49.87 Mb | 17 | 6.26B | 186.2M | 152.83 s | 112.75 s | 15.29 s |
+| 49.87-52.62 Mb | 15 | 6.80B | 82.5M | 144.94 s | 122.39 s | 9.29 s |
+| 55.09-56.41 Mb | 25 | 7.25B | 81.5M | 128.92 s | 66.54 s | 49.40 s |
+| 52.62-55.09 Mb | 18 | 7.09B | 15.7M | 95.95 s | 89.36 s | 2.54 s |
+| 42.91-47.01 Mb | 24 | 4.90B | 37.5M | 54.64 s | 46.74 s | 2.61 s |
+| 56.41-59.45 Mb | 35 | 7.30B | 34.5M | 47.02 s | 32.26 s | 9.65 s |
 
-These six windows account for about 983 seconds of chr11 local-search
+These six windows account for about 624 seconds of chr11 local-search
 precompute. The dense 43-59 Mb region is still the main local-search runtime
-problem, and the next walltime lever is now very clearly reducing repeated
-HDF5 reads/decompression rather than duplicate tracking or candidate scoring.
+problem, but the read-layout/reuse change restored it close to the earlier
+streamed-local-search baseline.
 
 Worst chr11 breakpoint windows in the current profile:
 
 | Index | Window | Rows | Candidate | Partitions | Precompute | HDF5 read | Dedup |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 28 | 49.87-52.62 Mb | 6.80B | 82.5M | 15 | 237.49 s | 214.50 s | 9.28 s |
-| 27 | 47.01-49.87 Mb | 6.26B | 186.2M | 17 | 236.42 s | 195.70 s | 15.09 s |
-| 30 | 55.09-56.41 Mb | 7.25B | 81.5M | 25 | 180.50 s | 120.20 s | 47.00 s |
-| 29 | 52.62-55.09 Mb | 7.09B | 15.7M | 18 | 165.33 s | 158.46 s | 2.56 s |
-| 26 | 42.91-47.01 Mb | 4.90B | 37.5M | 24 | 90.24 s | 82.19 s | 2.63 s |
-| 31 | 56.41-59.45 Mb | 7.30B | 34.5M | 35 | 72.88 s | 58.33 s | 9.41 s |
+| 27 | 47.01-49.87 Mb | 6.26B | 186.2M | 17 | 152.83 s | 112.75 s | 15.29 s |
+| 28 | 49.87-52.62 Mb | 6.80B | 82.5M | 15 | 144.94 s | 122.39 s | 9.29 s |
+| 30 | 55.09-56.41 Mb | 7.25B | 81.5M | 25 | 128.92 s | 66.54 s | 49.40 s |
+| 29 | 52.62-55.09 Mb | 7.09B | 15.7M | 18 | 95.95 s | 89.36 s | 2.54 s |
+| 26 | 42.91-47.01 Mb | 4.90B | 37.5M | 24 | 54.64 s | 46.74 s | 2.61 s |
+| 31 | 56.41-59.45 Mb | 7.30B | 34.5M | 35 | 47.02 s | 32.26 s | 9.65 s |
 
 Additional chr11 timing from the raw log:
 
-- local search now takes about 21.4 minutes on chr11, up from about
-  14.0 minutes in the prior streamed-local-search profile;
-- chr11 whole-run wall time is about 70.7 minutes;
-- chr11 whole-run max RSS is about 0.774 GiB, down from about 22.14 GiB.
+- local search now takes about 14.3 minutes on chr11, down from about
+  21.4 minutes in the previous bounded compact profile;
+- chr11 whole-run wall time is about 64.5 minutes;
+- chr11 whole-run max RSS is about 0.825 GiB, still below the 1 GiB target.
 
 ### Bounded Step 2 RSS Validation
 
@@ -535,11 +540,11 @@ The latest raw logs validate the bounded compact writer:
 
 | Source | Max RSS | Interpretation |
 | --- | ---: | --- |
-| `/usr/bin/time` chr11 | 812,020 KiB / 0.774 GiB | whole command including Step 2 worker children |
-| parent `run_end` checkpoint | 619.5 MiB | parent lifetime high-water |
-| Step 2 parent checkpoint | 374.3 MiB | worker high-water no longer leaks into whole-run RSS |
-| Step 3 parent checkpoint | 503.6 MiB | chunked matrix-to-vector remains bounded |
-| Fourier local-search parent checkpoint | 615.8 MiB | local search remains bounded |
+| `/usr/bin/time` chr11 | 865,180 KiB / 0.825 GiB | whole command including Step 2 worker children |
+| parent `run_end` checkpoint | 722.1 MiB | parent lifetime high-water after final metric |
+| Step 2 parent checkpoint | 371.4 MiB | worker high-water no longer leaks into whole-run RSS |
+| Step 3 parent checkpoint | 452.6 MiB | chunked matrix-to-vector remains bounded |
+| Fourier local-search parent checkpoint | 637.7 MiB | local search remains bounded |
 
 Step 2 compact writer diagnostics:
 
@@ -548,17 +553,18 @@ Step 2 compact writer diagnostics:
 - retained compact rows total about 8.81B across partitions;
 - the largest chr11 partition retained about 677.9M rows;
 - max pairs per lower SNP in chr11 was about 32,492;
-- compact pair counting summed to about 1813 s across workers;
-- compact HDF5 writing summed to about 2524 s across workers;
-- worker current RSS peaked around 789.9 MiB and worker `ru_maxrss` around
-  793.0 MiB in debug checkpoints.
+- compact pair counting summed to about 1845 s across workers;
+- compact HDF5 writing summed to about 2548 s across workers;
+- compact HDF5 datasets used `dataset_chunk_rows=65536` with
+  `write_chunk_rows=1000000` across all chr11 partitions;
+- worker current RSS peaked around 845.9 MiB and worker `ru_maxrss` around
+  844.9 MiB in debug checkpoints.
 
-The likely source was transient Step 2 pair materialization in
+The old Step 2 RSS source was transient full-partition pair materialization in
 `calc_covariance()`: `_pairwise_ld_impl()` allocated all retained pair index
 and LD arrays for a partition, then the writer mapped `ii`/`jj` to `i_pos` and
-`j_pos` arrays before HDF5 output. Dense partitions could therefore have a high
-temporary footprint even though the final compact HDF5 files and downstream
-readers were bounded.
+`j_pos` arrays before HDF5 output. The bounded compact path has removed that
+failure mode in the current chr10/chr11/chr13/chr21/chr22 profiles.
 
 Implemented local follow-up:
 
@@ -582,9 +588,8 @@ Remaining Step 2 work:
 
 1. Keep the bounded compact writer; the memory win is large and validated on
    chr10/chr11/chr13/chr21/chr22.
-2. Investigate whether the bounded writer's HDF5 chunking/layout changed
-   downstream local-search read behavior. Local-search HDF5 read time now
-   dominates and regressed across all profiled chromosomes.
+2. Keep the 65,536-row compact HDF5 dataset chunk layout for now. It recovered
+   most of the local-search HDF5 read regression while preserving bounded RSS.
 3. If future chromosomes still exceed memory targets, consider adaptive Step 2
    worker parallelism, but this is no longer the first-line priority.
 
@@ -624,41 +629,34 @@ Implications:
   and refreshed raw log.
 - The streamed HDF5 local-search segment aggregation change met the main
   memory and walltime goals: chr11 local-search max RSS is below 1 GiB and
-  precompute time dropped from about 1788 s to about 841 s.
+  precompute time dropped from about 1788 s to about 855 s.
 - The bounded Step 2 compact writer should be kept: it cut chr11 whole-run RSS
-  from 22.14 GiB to 0.774 GiB.
-- The highest leverage runtime task is now HDF5 read/decompression behavior in
-  local search. The regression is broad, so investigate storage chunk layout,
-  HDF5 dataset chunking, compression, and reader access patterns before adding
-  more local-search CPU optimizations.
-- Step 3 matrix-to-vector remains a major walltime phase at about 982 s on
+  from 22.14 GiB to 0.825 GiB.
+- The HDF5 layout/read-cache follow-up should also be kept: chr11 local-search
+  HDF5 read time fell from about 996 s to about 563 s and returned close to the
+  pre-regression read baseline.
+- Step 3 matrix-to-vector remains a major walltime phase at about 1023 s on
   chr11, but it is not a memory risk.
 - Horizontal aggregation and normalization remain real but secondary walltime
-  targets: about 78 s and 53 s respectively on chr11.
+  targets: about 77 s and 52 s respectively on chr11.
 
 ### Next Profiling Targets
 
 Review the next remote profile in this order:
 
-1. HDF5 read/decompression in local search.
-   HDF5 read time is now 995.9 s on chr11, about 77.5% of local-search
-   precompute, and regressed by 1.7-2.4x across the downloaded chromosomes.
-   Candidate directions include comparing old/new HDF5 chunk shapes, tuning
-   writer `chunks`, trying no compression or larger row chunks for compact
-   covariance files, and processing adjacent dense breakpoints as a shared
-   sweep. Keep strict memory bounds; do not reintroduce full active segment
-   materialization.
-2. Confirm final-output parity after bounded compact writes.
+1. Confirm final-output parity after the compact HDF5 layout/read-cache change.
    The profiling logs show successful runs, but the remote validation package
    should still compare BED/JSON/HDF5 validation artifacts against the previous
-   compact baseline before treating the storage-layout change as locked.
-3. Duplicate tracking.
-   Deduplication is now 130.7 s on chr11, about 10.2% of local-search
+   compact baseline before treating the storage-layout change as locked. This
+   is still the guardrail for duplicate-position and first-retained-pair
+   behavior.
+2. Dense-window local-search row volume and duplicate tracking.
+   Deduplication is now 134.2 s on chr11, about 15.7% of local-search
    precompute and especially visible in the 55.09-56.41 Mb window. Possible
    follow-ups are replacing `np.isin`/`np.union1d` per `lo` group with a
    two-pointer merge against sorted seen `hi` arrays, or exploiting partition
    overlap structure to avoid duplicate checks where there is no overlap.
-4. Horizontal aggregation.
+3. Horizontal aggregation.
    This is material but secondary in the latest chr11 profile: about 77 seconds
    total. The current path uses
    `np.unique(row_hi, return_inverse=True)` plus `np.bincount()` per chunk,
@@ -666,27 +664,187 @@ Review the next remote profile in this order:
    reduction after sorting `hi` within the chunk, dense local accumulators
    indexed by the local locus window, or processing partition slices directly
    into accumulators.
-5. Normalization.
-   This is about 49 seconds total on chr11, again secondary. The
+4. Normalization.
+   This is about 52 seconds total on chr11, again secondary. The
    current path does two `np.searchsorted()` calls into diagonal arrays per
    chunk, filters positive diagonals, then computes `r²`. Possible follow-ups
    are dense or dictionary-style diagonal lookup scoped to active segment loci,
    carrying per-partition diagonal lookup state, and combining eligibility plus
    diagonal filtering to shrink arrays earlier.
-6. Group load and canonicalization outside breakpoint rows.
+5. Group load and canonicalization outside breakpoint rows.
    This is not currently material: `group_total_seconds` is about 1.0 s and
    `local_search_unaccounted_seconds` is about 0.06 s on chr11. Keep monitoring
    but do not prioritize.
-7. Metric recomputation around local search.
-   The two streaming metric passes are each about 268 s, around 9 minutes
+6. Metric recomputation around local search.
+   The two streaming metric passes are about 262 s and 264 s, around 8.8 minutes
    together. This is a meaningful walltime target after Step 3 and local-search
    assembly. Avoid adding chromosome-wide covariance caches; look for reusable
    diagonal/locus metadata or a way to combine/reuse streaming passes.
-8. Filter-width search.
+7. Filter-width search.
    This is about 135 s before the first metric in the refreshed chr11 raw log. A
    low-memory optimization is to cache `{width: minima_count}` only. Do not
    cache smoothed arrays. This is lower priority than Step 3, local search, and
    metric passes.
+
+### Optimization Implementation Plan
+
+The main remaining runtime targets are now local-search dense-window work,
+Step 3 matrix-to-vector, and repeated streaming metric passes. Keep RSS below
+the current sub-1 GiB remote profile; do not add chromosome-wide covariance
+caches.
+
+#### 1. Local-search dense-window duplicate tracking
+
+**Target:** chr11 local-search dedup is 134.2 s total, with the worst dense
+window at 55.09-56.41 Mb spending 49.4 s in dedup alone.
+
+**Status:** Implemented locally. `_first_seen_pair_mask()` now uses
+`np.searchsorted()` membership plus a sorted unique merge for repeated
+per-`lo` groups, avoiding `np.isin()`/`np.union1d()` in the hot path. Debug
+logs now include `dedup_merge_seconds`.
+
+Plan:
+
+- Keep `_first_seen_pair_mask()` on the sorted merge path for the common case
+  where both `hi_values` and `seen` are sorted unique.
+- Keep the current implementation as a small fallback/helper for unsorted
+  defensive cases until tests cover the invariant thoroughly.
+- Track `dedup_seen_loci`, `dedup_seen_hi_values`, and
+  `dedup_merge_seconds` if instrumentation remains low-noise.
+
+Expected payoff: mostly local-search CPU; best-case chr11 improvement is on
+the order of 1-2 minutes, concentrated in dense windows. Memory risk is low if
+the merged seen arrays remain per-breakpoint and per-`lo`.
+
+Validation:
+
+- Unit-test first-retained-pair semantics across chunk boundaries and
+  partition-order duplicates.
+- Compare local-search outputs with and without the merge path on compact HDF5
+  fixtures.
+- Remote acceptance: unchanged BED/JSON/HDF5 validation; chr11 dedup seconds
+  drops materially without increasing max RSS.
+
+#### 2. Local-search dense accumulators and horizontal aggregation
+
+**Target:** horizontal aggregation is 77.5 s on chr11, and normalization is
+52.1 s. These are now visible after the HDF5 read regression was recovered.
+
+**Status:** Partially implemented locally. Horizontal aggregation now uses
+`np.argsort()` plus `np.add.reduceat()` on `row_hi` instead of
+`np.unique(row_hi, return_inverse=True)` plus `np.bincount()`. Full
+dict-to-dense local accumulator replacement is still pending remote timing.
+
+Plan:
+
+- Replace `sum_vert_by_locus` and `sum_horiz_by_locus` dictionaries with dense
+  arrays scoped to the current breakpoint's active/precomputed loci.
+- Build a `locus -> dense index` mapping once per precompute from
+  `precomputed_loci`/active loci, then accumulate vertical and horizontal sums
+  by index.
+- For horizontal sums, test whether sorting `row_hi` within each bounded chunk
+  plus `np.add.reduceat()` beats the current
+  `np.unique(row_hi, return_inverse=True)` plus `np.bincount()` path.
+- Keep dictionary fallback for tiny windows if dense setup overhead is higher.
+
+Expected payoff: reduces Python dict churn and allocation-heavy horizontal
+grouping. Memory risk is low to moderate because arrays are per-breakpoint
+locus windows, not chromosome-wide covariance rows.
+
+Validation:
+
+- Array/HDF5 local-search parity tests across overlapping partitions and
+  duplicate rows.
+- Focus on windows with many `candidate_rows` but modest locus counts.
+- Remote acceptance: horizontal seconds and normalization seconds improve or
+  stay neutral; max RSS remains close to the current 0.8 GiB chr11 profile.
+
+#### 3. Metric pass reuse without a covariance cache
+
+**Target:** chr11 runs two streaming metric passes around local search, about
+262 s and 264 s, or 8.8 minutes together.
+
+**Status:** Instrumentation implemented locally. `metric_from_files()` now logs
+partition index-read, row-read, normalization, crossing accumulation seconds,
+and row counts. Metadata reuse/fused metric passes remain unimplemented until
+the new timing shows which subphase is hot.
+
+Plan:
+
+- First add metric-pass instrumentation: partition read seconds, normalization
+  seconds, crossing-pair accumulation seconds, rows read, and rows crossing
+  breakpoints.
+- Reuse cheap metadata only: partition diagonal/locus indexes and any
+  breakpoint interval lookup structures. Do not retain normalized covariance
+  rows.
+- Consider a fused metric API that computes the initial and final metrics in
+  one partition streaming pass only if both breakpoint sets are known at the
+  same point in the pipeline. If not, leave this for a broader pipeline
+  restructuring.
+
+Expected payoff: uncertain until instrumentation. The upper bound is large
+because the two passes together are comparable to local-search CPU buckets, but
+safe reuse may only remove setup costs.
+
+Validation:
+
+- Exact `sum`, `N_nonzero`, and `N_zero` parity for metric fixtures.
+- Remote acceptance: metric seconds improve without any increase in resident
+  covariance storage.
+
+#### 4. Step 3 matrix-to-vector runtime
+
+**Target:** Step 3 remains about 1023 s on chr11 after memory cleanup.
+
+**Status:** Instrumentation implemented locally. Each HDF5 matrix-to-vector
+partition now logs chunk count, rows read, rows accumulated, HDF5 read seconds,
+normalization seconds, and center accumulation seconds. Additional bounded
+dense accumulator changes remain pending profiling.
+
+Plan:
+
+- Add phase instrumentation inside `_process_diag_vector_partition_hdf5()`:
+  HDF5 read seconds, diagonal lookup/normalization seconds, center-locus
+  accumulation seconds, rows read, and rows emitted.
+- Reuse per-partition diagonal lookup state inside the helper scope only.
+- Evaluate dense per-partition center accumulators instead of `pending_sums`
+  dict updates where locus ranges are compact.
+- Keep helper-scope release points and current HDF5 streaming behavior.
+
+Expected payoff: meaningful walltime if dict accumulation or repeated diagonal
+lookup is hot. Memory risk is moderate but bounded by one partition helper.
+
+Validation:
+
+- Vector output exact/close parity against existing fixtures.
+- Remote acceptance: Step 3 seconds improve while helper-return RSS still
+  drops back below the current bounded profile.
+
+#### 5. Filter-width count cache
+
+**Target:** chr11 filter/minima setup is about 135 s before the first metric.
+
+**Status:** Implemented locally. `FlexibleBoundedAccessor` now caches
+`{width: minima_count}` values, so binary search and trackback do not recompute
+the same width.
+
+Plan:
+
+- Wrap `apply_filter_get_minima()` calls in `custom_binary_search_with_trackback`
+  with a `{width: minima_count}` cache.
+- Cache only counts, never smoothed arrays or minima index arrays.
+
+Expected payoff: modest and low-risk. It should be implemented after the
+larger runtime buckets unless profiling shows repeated width evaluations are
+substantial.
+
+Validation:
+
+- Unit-test identical found widths and count-call reduction on a synthetic
+  accessor.
+- Remote acceptance: filter/minima seconds improve with no measurable RSS
+  change.
+
 Watch these ratios in each remote profiling run:
 
 - `append_seconds / precompute_seconds`;
@@ -1092,15 +1250,13 @@ git diff --check
 
 Real-data profiling remains remote-only. Next remote checks:
 
-1. Validate whether the compact HDF5 storage chunk layout plus local-search
-   reader reuse improves downstream `hdf5_read_seconds` toward the pre-bounded
-   writer profile while preserving the current sub-1 GiB RSS envelope.
-2. Regenerate chr21/chr22 first as smaller iteration targets, then chr10/chr11.
-3. Confirm final BED/JSON/HDF5 parity for the compact HDF5 layout/read-cache
+1. Confirm final BED/JSON/HDF5 parity for the compact HDF5 layout/read-cache
    change against the previous compact baseline.
-4. Inspect `dataset_chunk_rows`, `write_chunk_rows`,
-   `hdf5_reader_open_count`, and `hdf5_reader_reuse_count` in debug logs before
-   changing compression or exposing chunk-size configuration.
+2. Keep `dataset_chunk_rows=65536` and reader reuse as the default unless a
+   future profile shows a new RSS or read-time regression.
+3. Profile dense-window local-search row volume, duplicate tracking,
+   horizontal aggregation, and normalization before changing compression or
+   exposing chunk-size configuration.
 
 ## Open Questions
 

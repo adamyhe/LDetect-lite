@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
+from ldetect2._util.logging import log_debug
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
@@ -304,6 +306,14 @@ def metric_from_files(
     loci_chunks: list[np.ndarray] = []
     diag_pos_chunks: list[np.ndarray] = []
     diag_val_chunks: list[np.ndarray] = []
+    index_read_seconds = 0.0
+    row_read_seconds = 0.0
+    normalize_seconds = 0.0
+    crossing_seconds = 0.0
+    rows_read = 0
+    pair_rows = 0
+    normalized_rows = 0
+    crossing_rows = 0
 
     for p_index, (start, end) in enumerate(partitions):
         path = store.partition_path(name, start, end)
@@ -311,6 +321,7 @@ def metric_from_files(
             partitions, p_index, snp_first, snp_last
         )
         with open_covariance_reader(path, start, end) as reader:
+            index_start = time.perf_counter()
             diag_pos, diag_val = reader.read_diagonal()
             diag_in_range = (
                 (diag_pos >= snp_first)
@@ -321,6 +332,7 @@ def metric_from_files(
             if np.any(diag_in_range):
                 diag_pos_chunks.append(diag_pos[diag_in_range])
                 diag_val_chunks.append(diag_val[diag_in_range])
+            index_read_seconds += time.perf_counter() - index_start
             for chunk in reader.iter_owned_rows(
                 lower_min,
                 lower_max,
@@ -329,6 +341,7 @@ def metric_from_files(
                 _DEFAULT_CHUNK_ROWS,
                 include_lower_min=include_lower_min,
             ):
+                rows_read += int(chunk.lo.size)
                 loci_chunks.append(np.unique(np.concatenate((chunk.lo, chunk.hi))))
 
     if not loci_chunks:
@@ -355,21 +368,31 @@ def metric_from_files(
             partitions, p_index, snp_first, snp_last
         )
         with open_covariance_reader(path, start, end) as reader:
-            for chunk in reader.iter_owned_rows(
+            chunk_iter = reader.iter_owned_rows(
                 lower_min,
                 lower_max,
                 snp_first,
                 snp_last,
                 _DEFAULT_CHUNK_ROWS,
                 include_lower_min=include_lower_min,
-            ):
+            )
+            while True:
+                read_start = time.perf_counter()
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    break
+                row_read_seconds += time.perf_counter() - read_start
+                rows_read += int(chunk.lo.size)
                 pair_mask = chunk.lo < chunk.hi
                 if not np.any(pair_mask):
                     continue
                 pair_i = chunk.lo[pair_mask]
                 pair_j = chunk.hi[pair_mask]
                 pair_s = chunk.shrink_ld[pair_mask]
+                pair_rows += int(pair_i.size)
 
+                normalize_start = time.perf_counter()
                 diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
                 diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
                 has_diag = (diag_i_idx < unique_diag_pos.size) & (
@@ -381,6 +404,7 @@ def metric_from_files(
                     unique_diag_pos[safe_j_idx] == pair_j
                 )
                 if not np.any(has_diag):
+                    normalize_seconds += time.perf_counter() - normalize_start
                     continue
 
                 pair_i = pair_i[has_diag]
@@ -391,6 +415,7 @@ def metric_from_files(
 
                 positive = (diag_i > 0.0) & (diag_j > 0.0)
                 if not np.any(positive):
+                    normalize_seconds += time.perf_counter() - normalize_start
                     continue
 
                 pair_i = pair_i[positive]
@@ -398,11 +423,15 @@ def metric_from_files(
                 pair_s = pair_s[positive]
                 diag_i = diag_i[positive]
                 diag_j = diag_j[positive]
+                normalized_rows += int(pair_i.size)
+                normalize_seconds += time.perf_counter() - normalize_start
 
+                crossing_start = time.perf_counter()
                 i_blocks = np.searchsorted(bp, pair_i, side="left")
                 j_blocks = np.searchsorted(bp, pair_j, side="left")
                 crossing = i_blocks != j_blocks
                 if not np.any(crossing):
+                    crossing_seconds += time.perf_counter() - crossing_start
                     continue
 
                 r2 = (
@@ -412,7 +441,18 @@ def metric_from_files(
                 )
                 total_sum += float(np.sum(r2))
                 n_nonzero += int(np.count_nonzero(crossing))
+                crossing_rows += int(np.count_nonzero(crossing))
+                crossing_seconds += time.perf_counter() - crossing_start
 
+    log_debug(
+        "metric_from_files profile "
+        f"partitions={len(partitions)} rows_read={rows_read} pair_rows={pair_rows} "
+        f"normalized_rows={normalized_rows} crossing_rows={crossing_rows} "
+        f"index_read_seconds={index_read_seconds:.6f} "
+        f"row_read_seconds={row_read_seconds:.6f} "
+        f"normalize_seconds={normalize_seconds:.6f} "
+        f"crossing_seconds={crossing_seconds:.6f}"
+    )
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
 
 

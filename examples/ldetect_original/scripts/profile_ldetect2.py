@@ -50,6 +50,7 @@ BREAKPOINT_COLS = [
     "hdf5_read_seconds",
     "chunk_filter_seconds",
     "dedup_seconds",
+    "dedup_merge_seconds",
     "accumulator_seconds",
     "candidate_rows",
     "eligible_rows",
@@ -105,6 +106,7 @@ BY_CHROM_COLS = [
     "hdf5_read_seconds",
     "chunk_filter_seconds",
     "dedup_seconds",
+    "dedup_merge_seconds",
     "accumulator_seconds",
     "candidate_rows",
     "eligible_rows",
@@ -141,6 +143,7 @@ _BREAKPOINT_EXTRA_FLOAT_COLS = [
     "hdf5_read_seconds",
     "chunk_filter_seconds",
     "dedup_seconds",
+    "dedup_merge_seconds",
     "accumulator_seconds",
 ]
 

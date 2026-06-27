@@ -66,6 +66,7 @@ class LocalSearchPrecomputeStats:
     peak_chunk_rows: int = 0
     hdf5_reader_open_count: int = 0
     hdf5_reader_reuse_count: int = 0
+    dedup_merge_seconds: float = 0.0
 
     def log_fields(self) -> str:
         """Return stable key/value fields for debug profiling logs."""
@@ -81,6 +82,7 @@ class LocalSearchPrecomputeStats:
             f"hdf5_read_seconds={self.hdf5_read_seconds:.6f} "
             f"chunk_filter_seconds={self.chunk_filter_seconds:.6f} "
             f"dedup_seconds={self.dedup_seconds:.6f} "
+            f"dedup_merge_seconds={self.dedup_merge_seconds:.6f} "
             f"accumulator_seconds={self.accumulator_seconds:.6f} "
             f"candidate_rows={self.candidate_rows} "
             f"eligible_rows={self.eligible_rows} "
@@ -652,7 +654,7 @@ def _add_hdf5_segment_values(
         row_shrink = chunk.shrink_ld[eligible]
 
         dedup_start = time.perf_counter()
-        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo)
+        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
         if stats is not None:
             stats.dedup_seconds += time.perf_counter() - dedup_start
             stats.duplicate_rows_skipped += int(
@@ -687,6 +689,7 @@ def _first_seen_pair_mask(
     row_lo: np.ndarray,
     row_hi: np.ndarray,
     seen_hi_by_lo: dict[int, np.ndarray],
+    stats: LocalSearchPrecomputeStats | None = None,
 ) -> np.ndarray:
     """Return rows whose physical pair has not appeared in earlier chunks."""
     keep = np.ones(row_lo.size, dtype=bool)
@@ -708,13 +711,61 @@ def _first_seen_pair_mask(
             seen_hi_by_lo[locus] = hi_values.copy()
             continue
 
-        duplicates = np.isin(hi_values, seen, assume_unique=True)
+        merge_start = time.perf_counter()
+        duplicates = _sorted_membership(hi_values, seen)
         if np.any(duplicates):
             keep[start:end] = ~duplicates
         new_hi = hi_values[~duplicates]
         if new_hi.size:
-            seen_hi_by_lo[locus] = np.union1d(seen, new_hi)
+            seen_hi_by_lo[locus] = _merge_sorted_unique(seen, new_hi)
+        if stats is not None:
+            stats.dedup_merge_seconds += time.perf_counter() - merge_start
     return keep
+
+
+def _sorted_membership(values: np.ndarray, seen: np.ndarray) -> np.ndarray:
+    """Return whether each sorted value is present in sorted unique ``seen``."""
+    if values.size == 0 or seen.size == 0:
+        return np.zeros(values.size, dtype=bool)
+    idx = np.searchsorted(seen, values)
+    in_bounds = idx < seen.size
+    safe_idx = np.minimum(idx, seen.size - 1)
+    return in_bounds & (seen[safe_idx] == values)
+
+
+def _merge_sorted_unique(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Merge sorted unique arrays, preserving dtype and uniqueness."""
+    if left.size == 0:
+        return right.copy()
+    if right.size == 0:
+        return left
+    merged = np.empty(left.size + right.size, dtype=np.result_type(left, right))
+    i = 0
+    j = 0
+    out = 0
+    while i < left.size and j < right.size:
+        left_value = left[i]
+        right_value = right[j]
+        if left_value < right_value:
+            merged[out] = left_value
+            i += 1
+        elif right_value < left_value:
+            merged[out] = right_value
+            j += 1
+        else:
+            merged[out] = left_value
+            i += 1
+            j += 1
+        out += 1
+    if i < left.size:
+        tail = left[i:]
+        merged[out : out + tail.size] = tail
+        out += tail.size
+    if j < right.size:
+        tail = right[j:]
+        merged[out : out + tail.size] = tail
+        out += tail.size
+    return merged[:out]
 
 
 def _add_row_chunk_values(
@@ -780,8 +831,17 @@ def _add_row_chunk_values(
         stats.vertical_seconds += time.perf_counter() - vertical_start
 
     horizontal_start = time.perf_counter()
-    horiz_loci, horiz_inverse = np.unique(row_hi, return_inverse=True)
-    horiz_sums = np.bincount(horiz_inverse, weights=r2)
+    order = np.argsort(row_hi, kind="stable")
+    sorted_hi = row_hi[order]
+    sorted_r2 = r2[order]
+    group_starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(sorted_hi[1:] != sorted_hi[:-1]) + 1,
+        )
+    )
+    horiz_loci = sorted_hi[group_starts]
+    horiz_sums = np.add.reduceat(sorted_r2, group_starts)
     for locus, value in zip(horiz_loci, horiz_sums):
         locus_key = int(locus)
         sum_horiz_by_locus[locus_key] = (

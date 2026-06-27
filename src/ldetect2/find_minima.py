@@ -34,12 +34,18 @@ class FlexibleBoundedAccessor:
         self.min_ind = min_ind
         self.max_ind = max_ind
         self._invert = invert
+        self._cache: dict[int, int] = {}
 
     def __getitem__(self, i: int) -> int:
         if i < self.min_ind or i > self.max_ind:
             raise IndexError(f"Index {i} out of range [{self.min_ind}, {self.max_ind}]")
         actual = self.max_ind - i if self._invert else i
-        return self.f(self.data, actual)
+        cached = self._cache.get(actual)
+        if cached is not None:
+            return cached
+        value = self.f(self.data, actual)
+        self._cache[actual] = value
+        return value
 
     def __len__(self) -> int:
         return self.max_ind - self.min_ind + 1

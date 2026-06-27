@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import gzip
+import time
 from pathlib import Path
 
 import numpy as np
 
 from ldetect2._util.covariance_array import ChromosomeCovariance
+from ldetect2._util.logging import log_debug
 from ldetect2._util.memory import log_memory_checkpoint
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
@@ -310,17 +312,34 @@ def _process_diag_vector_partition_hdf5(
 
         _log_vector_checkpoint(f"{checkpoint}_chunked_r2_accum_start")
         partition_sums = np.zeros(loci.size, dtype=np.float64)
+        profile = {
+            "hdf5_read_seconds": 0.0,
+            "normalize_seconds": 0.0,
+            "center_seconds": 0.0,
+            "rows_read": 0,
+            "rows_accumulated": 0,
+            "chunks": 0,
+        }
         center_hi = min(end_locus, snp_last)
         center_left = int(np.searchsorted(loci, current_locus, side="left"))
         center_right = int(np.searchsorted(loci, center_hi, side="right"))
         if center_left < center_right:
-            for chunk in reader.iter_owned_rows(
+            chunk_iter = reader.iter_owned_rows(
                 start,
                 end,
                 start,
                 end,
                 MATRIX_TO_VECTOR_CHUNK_ROWS,
-            ):
+            )
+            while True:
+                read_start = time.perf_counter()
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    break
+                profile["hdf5_read_seconds"] += time.perf_counter() - read_start
+                profile["rows_read"] += int(chunk.lo.size)
+                profile["chunks"] += 1
                 _accumulate_vector_chunk(
                     loci=loci,
                     diag_pos=diag_pos,
@@ -331,8 +350,18 @@ def _process_diag_vector_partition_hdf5(
                     center_left=center_left,
                     center_right=center_right,
                     partition_sums=partition_sums,
+                    profile=profile,
                 )
         _log_vector_checkpoint(f"{checkpoint}_chunked_r2_accum_end")
+        log_debug(
+            "matrix_to_vector_hdf5_partition profile "
+            f"checkpoint={checkpoint} chunks={int(profile['chunks'])} "
+            f"rows_read={int(profile['rows_read'])} "
+            f"rows_accumulated={int(profile['rows_accumulated'])} "
+            f"hdf5_read_seconds={profile['hdf5_read_seconds']:.6f} "
+            f"normalize_seconds={profile['normalize_seconds']:.6f} "
+            f"center_seconds={profile['center_seconds']:.6f}"
+        )
 
     _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_start")
     nonzero = partition_sums > 0.0
@@ -380,11 +409,13 @@ def _accumulate_vector_chunk(
     center_left: int,
     center_right: int,
     partition_sums: np.ndarray,
+    profile: dict[str, float | int] | None = None,
 ) -> None:
     """Normalize one row chunk and add center-locus sums into ``partition_sums``."""
     if row_lo.size == 0:
         return
 
+    normalize_start = time.perf_counter()
     diag_lo_idx = np.searchsorted(diag_pos, row_lo)
     diag_hi_idx = np.searchsorted(diag_pos, row_hi)
     has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
@@ -392,6 +423,8 @@ def _accumulate_vector_chunk(
     safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
     has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (diag_pos[safe_hi_idx] == row_hi)
     if not np.any(has_diag):
+        if profile is not None:
+            profile["normalize_seconds"] += time.perf_counter() - normalize_start
         return
 
     row_lo = row_lo[has_diag]
@@ -402,6 +435,8 @@ def _accumulate_vector_chunk(
 
     positive = (diag_lo > 0.0) & (diag_hi > 0.0)
     if not np.any(positive):
+        if profile is not None:
+            profile["normalize_seconds"] += time.perf_counter() - normalize_start
         return
 
     row_lo = row_lo[positive]
@@ -409,12 +444,17 @@ def _accumulate_vector_chunk(
     row_shrink = row_shrink[positive]
     diag_lo = diag_lo[positive]
     diag_hi = diag_hi[positive]
+    if profile is not None:
+        profile["normalize_seconds"] += time.perf_counter() - normalize_start
 
+    center_start = time.perf_counter()
     lo_idx = np.searchsorted(loci, row_lo)
     hi_idx = np.searchsorted(loci, row_hi)
     idx_delta = hi_idx - lo_idx
     legacy_reachable = (idx_delta % 2 == 0) | (lo_idx > 0)
     if not np.any(legacy_reachable):
+        if profile is not None:
+            profile["center_seconds"] += time.perf_counter() - center_start
         return
 
     lo_idx = lo_idx[legacy_reachable]
@@ -425,6 +465,8 @@ def _accumulate_vector_chunk(
     center_idx = (lo_idx + hi_idx) // 2
     in_center = (center_idx >= center_left) & (center_idx < center_right)
     if not np.any(in_center):
+        if profile is not None:
+            profile["center_seconds"] += time.perf_counter() - center_start
         return
 
     center_idx = center_idx[in_center]
@@ -432,6 +474,9 @@ def _accumulate_vector_chunk(
         diag_lo[in_center] * diag_hi[in_center]
     )
     _add_grouped_sums(partition_sums, center_idx, r2)
+    if profile is not None:
+        profile["rows_accumulated"] += int(center_idx.size)
+        profile["center_seconds"] += time.perf_counter() - center_start
 
 
 def _add_grouped_sums(

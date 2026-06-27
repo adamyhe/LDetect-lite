@@ -16,10 +16,13 @@ from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.local_search import (
     LocalSearch,
+    _first_seen_pair_mask,
     _iter_hdf5_canonical_segment_rows,
     _materialize_canonical_row_stream,
+    _merge_sorted_unique,
     _open_hdf5_reader_pool,
     _segment_rows_from_hdf5_partitions,
+    _sorted_membership,
     local_search_hdf5_partition,
 )
 from ldetect2.metric import Metric
@@ -481,6 +484,45 @@ def test_hdf5_segment_stream_matches_with_reader_pool_reuse(tmp_path: Path) -> N
 
     for pooled_values, baseline_values in zip(pooled, baseline):
         np.testing.assert_array_equal(pooled_values, baseline_values)
+
+
+def test_sorted_membership_and_merge_preserve_unique_order() -> None:
+    seen = np.array([100, 300, 500], dtype=np.int32)
+    values = np.array([100, 200, 500, 700], dtype=np.int32)
+
+    np.testing.assert_array_equal(
+        _sorted_membership(values, seen),
+        np.array([True, False, True, False]),
+    )
+    np.testing.assert_array_equal(
+        _merge_sorted_unique(seen, values),
+        np.array([100, 200, 300, 500, 700], dtype=np.int32),
+    )
+
+
+def test_first_seen_pair_mask_uses_seen_rows_across_chunks() -> None:
+    seen_hi_by_lo: dict[int, np.ndarray] = {}
+    first_lo = np.array([100, 100, 100, 200], dtype=np.int32)
+    first_hi = np.array([100, 200, 300, 200], dtype=np.int32)
+    second_lo = np.array([100, 100, 100, 200, 200], dtype=np.int32)
+    second_hi = np.array([200, 300, 400, 200, 500], dtype=np.int32)
+
+    np.testing.assert_array_equal(
+        _first_seen_pair_mask(first_lo, first_hi, seen_hi_by_lo),
+        np.array([True, True, True, True]),
+    )
+    np.testing.assert_array_equal(
+        _first_seen_pair_mask(second_lo, second_hi, seen_hi_by_lo),
+        np.array([False, False, True, False, True]),
+    )
+    np.testing.assert_array_equal(
+        seen_hi_by_lo[100],
+        np.array([100, 200, 300, 400], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        seen_hi_by_lo[200],
+        np.array([200, 500], dtype=np.int32),
+    )
 
 
 def test_array_local_search_keeps_unchanged_breakpoint(tmp_path: Path) -> None:
