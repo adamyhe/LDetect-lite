@@ -13,6 +13,7 @@ from typing import IO
 import numpy as np
 
 from ldetect2.io.covariance_hdf5 import (
+    HDF5_DATASET_CHUNK_ROWS,
     CovarianceRowChunk,
     write_compact_covariance_partition_hdf5_chunks,
     write_covariance_partition_hdf5,
@@ -557,6 +558,7 @@ def calc_covariance(
         log_memory_checkpoint("calc_covariance_pair_counted", debug=True)
 
         write_start = time.perf_counter()
+        dataset_chunk_rows = min(HDF5_DATASET_CHUNK_ROWS, n_pairs) if n_pairs else 0
         write_compact_covariance_partition_hdf5_chunks(
             output_path,
             positions=pos_arr,
@@ -577,6 +579,8 @@ def calc_covariance(
         log_debug(
             "calc_covariance compact_hdf5_written "
             f"n_pairs={n_pairs} output_bytes={output_path.stat().st_size} "
+            f"dataset_chunk_rows={dataset_chunk_rows} "
+            f"write_chunk_rows={compact_chunk_rows} "
             f"seconds={time.perf_counter() - write_start:.3f} "
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
         )

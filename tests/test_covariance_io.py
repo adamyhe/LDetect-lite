@@ -16,7 +16,10 @@ from ldetect2.io.covariance import (
     read_partition_into_matrix,
     read_partition_into_matrix_lean,
 )
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect2.io.covariance_hdf5 import (
+    open_covariance_reader,
+    write_covariance_partition_hdf5,
+)
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.matrix_analysis import MatrixAnalysis
 
@@ -107,6 +110,30 @@ def test_hdf5_writer_trusted_canonical_path_matches_generic_path(
             np.testing.assert_array_equal(
                 generic_h5[dataset][:], trusted_h5[dataset][:]
             )
+
+
+def test_hdf5_reader_accepts_files_without_layout_attrs(tmp_path: Path) -> None:
+    """Full-schema and legacy compact HDF5 files predate layout debug attrs."""
+    path = tmp_path / "legacy.h5"
+    write_covariance_partition_hdf5(
+        path,
+        i_pos=np.array([100, 100, 200], dtype=np.int32),
+        j_pos=np.array([100, 200, 200], dtype=np.int32),
+        shrink_ld=np.array([1.0, 0.5, 1.0], dtype=np.float64),
+    )
+
+    import h5py
+
+    with h5py.File(path, "r") as h5:
+        assert "dataset_chunk_rows" not in h5.attrs
+        assert "write_chunk_rows" not in h5.attrs
+
+    with open_covariance_reader(path, 100, 200) as reader:
+        rows = reader.read_all()
+        loci = reader.read_loci()
+
+    np.testing.assert_array_equal(rows.lo, np.array([100, 100, 200]))
+    np.testing.assert_array_equal(loci, np.array([100, 200]))
 
 
 @pytest.mark.parametrize(

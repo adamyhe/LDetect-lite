@@ -7,6 +7,7 @@ import math
 import time
 from bisect import bisect_left
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,7 +27,11 @@ from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
-from ldetect2.io.covariance_hdf5 import CovarianceRowChunk, open_covariance_reader
+from ldetect2.io.covariance_hdf5 import (
+    CovarianceRowChunk,
+    HDF5CovariancePartitionReader,
+    open_covariance_reader,
+)
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 
 _PREC = 50
@@ -59,6 +64,8 @@ class LocalSearchPrecomputeStats:
     segments: int = 0
     active_rows_peak: int = 0
     peak_chunk_rows: int = 0
+    hdf5_reader_open_count: int = 0
+    hdf5_reader_reuse_count: int = 0
 
     def log_fields(self) -> str:
         """Return stable key/value fields for debug profiling logs."""
@@ -85,7 +92,9 @@ class LocalSearchPrecomputeStats:
             f"chunks={self.chunks} "
             f"segments={self.segments} "
             f"active_rows_peak={self.active_rows_peak} "
-            f"peak_chunk_rows={self.peak_chunk_rows}"
+            f"peak_chunk_rows={self.peak_chunk_rows} "
+            f"hdf5_reader_open_count={self.hdf5_reader_open_count} "
+            f"hdf5_reader_reuse_count={self.hdf5_reader_reuse_count}"
         )
 
 
@@ -100,6 +109,9 @@ class LocalSearchHDF5Partition:
     loci: np.ndarray
     diag_pos: np.ndarray
     diag_val: np.ndarray
+
+
+_HDF5ReaderPool = dict[tuple[str, int, int], HDF5CovariancePartitionReader]
 
 
 def local_search_hdf5_partition(
@@ -121,6 +133,36 @@ def local_search_hdf5_partition(
             diag_pos=diag_pos,
             diag_val=diag_val,
         )
+
+
+def _hdf5_reader_pool_key(
+    partition: LocalSearchHDF5Partition,
+) -> tuple[str, int, int]:
+    return (str(partition.path), int(partition.start), int(partition.end))
+
+
+@contextmanager
+def _open_hdf5_reader_pool(
+    partitions: tuple[LocalSearchHDF5Partition, ...],
+) -> Iterator[_HDF5ReaderPool]:
+    """Open each HDF5 partition reader once for one local-search precompute."""
+    readers: _HDF5ReaderPool = {}
+    try:
+        for partition in partitions:
+            key = _hdf5_reader_pool_key(partition)
+            if key in readers:
+                continue
+            reader = open_covariance_reader(
+                partition.path,
+                partition.start,
+                partition.end,
+            )
+            reader.open()
+            readers[key] = reader
+        yield readers
+    finally:
+        for reader in readers.values():
+            reader.close()
 
 
 def _append_partition(
@@ -281,6 +323,7 @@ def _iter_hdf5_canonical_segment_rows(
     lo_max: int,
     *,
     chunk_rows: int = 1_000_000,
+    readers_by_partition: _HDF5ReaderPool | None = None,
 ) -> Iterator[CovarianceRowChunk]:
     """Yield canonical HDF5 segment rows in local-search precedence order.
 
@@ -294,10 +337,14 @@ def _iter_hdf5_canonical_segment_rows(
     """
     min_lo = max(active_min_lo, lo_min)
     for partition in partitions:
-        with open_covariance_reader(
-            partition.path, partition.start, partition.end
-        ) as reader:
+        if readers_by_partition is not None:
+            reader = readers_by_partition[_hdf5_reader_pool_key(partition)]
             yield from reader.iter_rows(min_lo, lo_max, chunk_rows)
+        else:
+            with open_covariance_reader(
+                partition.path, partition.start, partition.end
+            ) as reader:
+                yield from reader.iter_rows(min_lo, lo_max, chunk_rows)
 
 
 def _materialize_canonical_row_stream(
@@ -547,6 +594,7 @@ def _add_hdf5_segment_values(
     sum_horiz_by_locus: dict[int, float],
     *,
     chunk_rows: int = 1_000_000,
+    readers_by_partition: _HDF5ReaderPool | None = None,
     stats: LocalSearchPrecomputeStats | None = None,
 ) -> None:
     """Stream HDF5 segment rows directly into local-search accumulators."""
@@ -566,12 +614,15 @@ def _add_hdf5_segment_values(
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
     seen_hi_by_lo: dict[int, np.ndarray] = {}
+    if stats is not None and readers_by_partition is not None:
+        stats.hdf5_reader_reuse_count += len(active_partitions)
     chunk_iter = _iter_hdf5_canonical_segment_rows(
         active_partitions,
         active_min_lo,
         lo_min,
         lo_max,
         chunk_rows=chunk_rows,
+        readers_by_partition=readers_by_partition,
     )
     while True:
         hdf5_start = time.perf_counter()
@@ -1273,6 +1324,19 @@ class LocalSearch:
         local_partitions: tuple[LocalSearchHDF5Partition, ...],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Precompute local-search arrays from HDF5 partition row chunks."""
+        with _open_hdf5_reader_pool(local_partitions) as readers_by_partition:
+            self.precompute_stats.hdf5_reader_open_count += len(readers_by_partition)
+            return self._precompute_array_from_hdf5_partitions_with_readers(
+                local_partitions,
+                readers_by_partition,
+            )
+
+    def _precompute_array_from_hdf5_partitions_with_readers(
+        self,
+        local_partitions: tuple[LocalSearchHDF5Partition, ...],
+        readers_by_partition: _HDF5ReaderPool,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Precompute local-search arrays from HDF5 partition row chunks."""
         active_partitions: list[LocalSearchHDF5Partition] = []
         active_min_lo = -2**63
         active_loci = np.array([], dtype=np.int64)
@@ -1389,6 +1453,7 @@ class LocalSearch:
                     self.initial_breakpoint_index == 0,
                     sum_vert_by_locus,
                     sum_horiz_by_locus,
+                    readers_by_partition=readers_by_partition,
                     stats=self.precompute_stats,
                 )
                 self.precompute_stats.accumulator_seconds += (

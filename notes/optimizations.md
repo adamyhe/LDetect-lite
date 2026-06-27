@@ -164,54 +164,48 @@ whole-chromosome runs.
 
 ### Updated remote profiling result
 
-Remote EUR chr10/chr11/chr13/chr21/chr22 profiling after streamed HDF5
-local-search segment aggregation shows that the main local-search assembly
-optimization worked. The refreshed chr11 `ldetect2.log` and `timing.log` show
-that local search no longer sets the whole-run RSS peak; the remaining
-whole-command high-water is in Step 2 covariance worker children. Local-search
-cost remains precompute and row-volume dominated rather than candidate-scoring
-dominated:
+Remote EUR chr10/chr11/chr13/chr21/chr22 profiling after bounded compact
+covariance writes shows that the Step 2 memory fix worked. Whole-run RSS is
+now below 1 GiB on all downloaded chromosomes, including chr11. The tradeoff is
+runtime: local-search HDF5 reads/decompression regressed by about 1.7-2.4x, so
+storage layout and reader behavior are now the next optimization target.
 
 | Chrom | Wall time | Max RSS | Local search | Precompute | Search |
 |---|---:|---:|---:|---:|---:|
-| chr10 | 1884.15 s | 4.82 GiB | 350.33 s | 349.26 s | 0.120 s |
-| chr11 | 4038.00 s | 22.14 GiB | 842.10 s | 840.94 s | 0.117 s |
-| chr13 | 1211.23 s | 1.16 GiB | 213.72 s | 212.96 s | 0.088 s |
-| chr21 | 315.60 s | 0.66 GiB | 50.80 s | 50.52 s | 0.038 s |
-| chr22 | 395.93 s | 1.39 GiB | 67.18 s | 66.90 s | 0.037 s |
+| chr10 | 2015.63 s | 0.582 GiB | 442.52 s | 441.50 s | 0.117 s |
+| chr11 | 4244.00 s | 0.774 GiB | 1286.13 s | 1284.96 s | 0.118 s |
+| chr13 | 1437.35 s | 0.472 GiB | 379.94 s | 378.99 s | 0.120 s |
+| chr21 | 337.22 s | 0.403 GiB | 63.71 s | 63.44 s | 0.036 s |
+| chr22 | 422.08 s | 0.413 GiB | 97.37 s | 97.06 s | 0.047 s |
 
-Against the previous chr11/chr21/chr22 profile, local-search precompute changed
-by 0.47x on chr11, 0.76x on chr21, and 0.72x on chr22. Whole-run max RSS also
-dropped on those chromosomes. The current chr11 run still peaks at 22.14 GiB,
-but the parent process ends at only 601.5 MiB max RSS and the local-search
-aggregate high-water mark is about 592 MiB. The remaining run-level memory peak
-is therefore Step 2 covariance generation, not Step 3, metric streaming, or
-local search.
+Against the previous streamed-local-search profile, whole-run max RSS dropped
+to 0.12x on chr10, 0.03x on chr11, 0.41x on chr13, 0.61x on chr21, and 0.30x
+on chr22. Local-search wall time moved the other way: 1.26x on chr10, 1.53x
+on chr11, 1.78x on chr13, 1.25x on chr21, and 1.45x on chr22.
 
 Refreshed chr11 raw-log split:
 
 | Phase | Seconds | Memory finding |
 |---|---:|---|
-| Step 2 covariance generation | 1473 s | `/usr/bin/time` max RSS 22.14 GiB; worker logs show transient max about 22.67 GiB |
-| Step 3 matrix-to-vector | 1060 s | parent max RSS 459.5 MiB |
-| Fourier metric | 262 s | bounded streaming pass |
-| Fourier local search | 842 s | parent/local-search max RSS about 592 MiB |
-| Final Fourier-LS metric | 260 s | parent max RSS 601.5 MiB |
+| Step 2 covariance generation | 1304 s | whole-run max RSS now 0.774 GiB |
+| Step 3 matrix-to-vector | 982 s | parent max RSS 503.6 MiB |
+| Fourier metric/minima setup | 401 s | bounded streaming pass plus filter/minima work |
+| Fourier local search | 1286 s | HDF5 read/decompression dominated |
+| Final Fourier-LS metric | 266 s | bounded streaming pass |
 
 Step 2 generated 378 compact HDF5 partitions for chr11 with `workers=4`.
-Completed partition logs show current worker RSS peaking around 695.5 MiB, but
-180 partition completions report worker lifetime max RSS above 20 GiB. The
-likely pressure point was `calc_covariance()` materializing all retained pair
-index and LD arrays, then mapping `ii`/`jj` into full `i_pos`/`j_pos` arrays
-before HDF5 write.
+The bounded writer retained about 8.81B compact rows total; the largest
+partition retained about 677.9M rows. Worker debug checkpoints peaked around
+790 MiB current RSS and 793 MiB max RSS, validating that full-partition pair
+index and mapped-position arrays are gone from the compact path.
 
 Step 3 memory and runtime improved substantially:
 
 | Chrom | Step 3 seconds | Step 3 max RSS |
 |---|---:|---:|
-| chr11 | 1079 s | 467.3 MiB |
-| chr21 | 60 s | 355.9 MiB |
-| chr22 | 73 s | 361.9 MiB |
+| chr11 | 982 s | 503.6 MiB |
+| chr21 | 57 s | 360.4 MiB |
+| chr22 | 76 s | 363.7 MiB |
 
 Local search logically requested 43.03B rows on chr11, but the streamed HDF5
 path read 16.62B rows, filtered them to 5.30B rows, and deduplicated to 1.22B
@@ -220,9 +214,9 @@ reads/decompression and duplicate tracking dominate the remaining cost:
 
 | Chrom | HDF5 read | Dedup | Horizontal | Normalize |
 |---|---:|---:|---:|---:|
-| chr11 | 550.64 s | 131.48 s | 77.73 s | 52.57 s |
-| chr21 | 19.27 s | 8.00 s | 12.65 s | 8.14 s |
-| chr22 | 27.11 s | 11.93 s | 15.01 s | 9.74 s |
+| chr11 | 995.94 s | 130.73 s | 77.34 s | 49.46 s |
+| chr21 | 33.49 s | 7.75 s | 12.09 s | 7.79 s |
+| chr22 | 52.72 s | 13.81 s | 17.67 s | 9.71 s |
 
 The current local-search optimization targets have shifted. HDF5-backed local
 search now streams segment row chunks directly into vertical/horizontal
@@ -280,25 +274,29 @@ write-time sort/dedup allocations, and duplicate physical VCF positions are
 collapsed before pairwise LD so common duplicate-position input does not force
 the memory-heavy writer fallback.
 
-Step 2 covariance generation can still be a failing phase until the bounded
-compact writer is remotely validated. The production compact path now counts
-retained pairs by lower SNP and writes compact HDF5 rows in bounded sorted
-chunks, avoiding full-partition pair-index and mapped-position arrays. The
-full/debug covariance schema still uses the materialized writer. In the latest
-chr11 run, local search stayed below 1 GiB and the whole-run 22.14 GiB
-high-water mark occurred in Step 2 worker children. See
-`notes/local-search-memory-speed-handoff.md` for the HDF5 contract and
-validation checklist.
+Step 2 covariance generation is now bounded in the compact production path.
+The writer counts retained pairs by lower SNP and writes compact HDF5 rows in
+bounded sorted chunks, avoiding full-partition pair-index and mapped-position
+arrays. The full/debug covariance schema still uses the materialized writer.
+The compact writer now separates write batching from HDF5 storage layout:
+bounded pair generation keeps 1,000,000-row write batches, while compact
+`lo`/`hi`/`shrink_ld` datasets default to 65,536-row storage chunks and record
+both values in HDF5 attrs/debug logs.
+The latest chr11 whole-run max RSS is 0.774 GiB. See
+`notes/local-search-memory-speed-handoff.md` for the HDF5 contract and current
+read-performance checklist.
 
 ### Post-segment-assembly optimization order
 
-After streamed segment aggregation, the next local-search targets should be
-chosen from the phase ratios, not guessed. The overall optimization order from
-the refreshed chr11 logs is:
+After bounded compact writes, the next targets should be chosen from the phase
+ratios, not guessed. The overall optimization order from the refreshed chr11
+logs is:
 
-1. Step 2 covariance worker memory: remotely validate the new compact
-   `calc_covariance()` phase instrumentation and bounded HDF5 chunk writer;
-2. repeated HDF5 reads/decompression in dense chr11 local-search windows;
+1. local-search HDF5 read/decompression performance, especially whether the
+   smaller compact dataset chunks and per-precompute reader reuse recover the
+   bounded writer's downstream read-time regression;
+2. final-output parity checks for BED/JSON/HDF5 against the previous compact
+   baseline;
 3. duplicate tracking, especially replacing allocation-heavy per-`lo`
    `np.isin`/`np.union1d` work if profiles stay similar;
 4. horizontal aggregation, because `np.unique(row_hi, return_inverse=True)` plus
@@ -312,12 +310,13 @@ the refreshed chr11 logs is:
 9. matrix-to-vector or local-search chunk-size tuning only if remote profiles
    show clear walltime or RSS regressions.
 
-For each profile, inspect Step 2 retained pair count, worker current RSS,
-worker max RSS, output file size, and elapsed partition time alongside
-`append_seconds / precompute_seconds`, `horizontal_seconds / precompute_seconds`,
-`normalize_seconds / precompute_seconds`, `group_total_seconds`,
-`local_search_unaccounted_seconds`, and wall time outside local search. See the
-detailed checklist in `notes/local-search-memory-speed-handoff.md`.
+For each profile, inspect HDF5 chunk layout/compression, local-search
+`hdf5_read_seconds / precompute_seconds`, `hdf5_reader_open_count`,
+`hdf5_reader_reuse_count`, Step 2 retained pair count, worker RSS, output file
+size, `horizontal_seconds / precompute_seconds`,
+`normalize_seconds / precompute_seconds`, `group_total_seconds`, and
+`local_search_unaccounted_seconds`. See the detailed checklist in
+`notes/local-search-memory-speed-handoff.md`.
 
 ### Lower memory-risk candidates
 

@@ -10,6 +10,7 @@ import numpy as np
 
 _FORMAT = "ldetect2-covariance-h5"
 _VERSION = 1
+HDF5_DATASET_CHUNK_ROWS = 65_536
 _REQUIRED_DATASETS = frozenset(
     {
         "covariance/lo",
@@ -288,6 +289,7 @@ def write_compact_covariance_partition_hdf5_chunks(
     end: int | None = None,
     compression: str | None = "lzf",
     chunk_rows: int = 1_000_000,
+    dataset_chunk_rows: int = HDF5_DATASET_CHUNK_ROWS,
 ) -> None:
     """Write compact canonical rows from a bounded sorted chunk iterator.
 
@@ -313,7 +315,7 @@ def write_compact_covariance_partition_hdf5_chunks(
     h5py = _h5py()
     path.parent.mkdir(parents=True, exist_ok=True)
     position_dtype = positions.dtype
-    h5_chunk_rows = max(1, min(int(chunk_rows), max(n_rows, 1)))
+    h5_chunk_rows = max(1, min(int(dataset_chunk_rows), max(n_rows, 1)))
     kwargs = {"compression": compression, "shuffle": True}
 
     diag_pos_parts: list[np.ndarray] = []
@@ -335,6 +337,8 @@ def write_compact_covariance_partition_hdf5_chunks(
         h5.attrs["sorted_by"] = "lo_hi"
         h5.attrs["deduplicated"] = True
         h5.attrs["compact"] = True
+        h5.attrs["dataset_chunk_rows"] = int(h5_chunk_rows) if n_rows else 0
+        h5.attrs["write_chunk_rows"] = int(chunk_rows)
 
         cov = h5.create_group("covariance")
         idx = h5.create_group("index")

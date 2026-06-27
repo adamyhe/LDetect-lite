@@ -9,7 +9,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
+from ldetect2.io.covariance_hdf5 import (
+    HDF5_DATASET_CHUNK_ROWS,
+    open_covariance_reader,
+)
 from ldetect2.shrinkage import calc_covariance, partition_chromosome
 
 _FULL_HDF5_DATASETS = {
@@ -197,6 +200,15 @@ def test_calc_covariance_compact_output_writes_only_compact_schema(
         assert cov["covariance/lo"].dtype == np.int32
         assert cov["covariance/hi"].dtype == np.int32
         assert cov["covariance/shrink_ld"].dtype == np.float64
+        expected_chunk_rows = min(
+            HDF5_DATASET_CHUNK_ROWS,
+            int(cov["covariance/lo"].shape[0]),
+        )
+        assert cov.attrs["dataset_chunk_rows"] == expected_chunk_rows
+        assert cov.attrs["write_chunk_rows"] == 1_000_000
+        assert cov["covariance/lo"].chunks == (expected_chunk_rows,)
+        assert cov["covariance/hi"].chunks == (expected_chunk_rows,)
+        assert cov["covariance/shrink_ld"].chunks == (expected_chunk_rows,)
 
 
 def test_calc_covariance_compact_chunked_writer_matches_full_rows(
@@ -241,6 +253,17 @@ def test_calc_covariance_compact_chunked_writer_matches_full_rows(
     np.testing.assert_array_equal(compact_diag[0], full_diag[0])
     np.testing.assert_allclose(compact_diag[1], full_diag[1])
     np.testing.assert_array_equal(compact_loci, full_loci)
+
+    import h5py
+
+    with h5py.File(compact_path, "r") as cov:
+        expected_chunk_rows = min(
+            HDF5_DATASET_CHUNK_ROWS,
+            int(cov["covariance/lo"].shape[0]),
+        )
+        assert cov.attrs["dataset_chunk_rows"] == expected_chunk_rows
+        assert cov.attrs["write_chunk_rows"] == 2
+        assert cov["covariance/lo"].chunks == (expected_chunk_rows,)
 
 
 def test_partition_chromosome_clamps_uncut_window_to_last_snp(
