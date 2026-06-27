@@ -15,14 +15,13 @@ from ldetect2._util.covariance_array import (
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.local_search import (
+    DenseLocalSearchAccumulator,
     LocalSearch,
     _first_seen_pair_mask,
     _iter_hdf5_canonical_segment_rows,
     _materialize_canonical_row_stream,
-    _merge_sorted_unique,
     _open_hdf5_reader_pool,
     _segment_rows_from_hdf5_partitions,
-    _sorted_membership,
     local_search_hdf5_partition,
 )
 from ldetect2.metric import Metric
@@ -486,20 +485,6 @@ def test_hdf5_segment_stream_matches_with_reader_pool_reuse(tmp_path: Path) -> N
         np.testing.assert_array_equal(pooled_values, baseline_values)
 
 
-def test_sorted_membership_and_merge_preserve_unique_order() -> None:
-    seen = np.array([100, 300, 500], dtype=np.int32)
-    values = np.array([100, 200, 500, 700], dtype=np.int32)
-
-    np.testing.assert_array_equal(
-        _sorted_membership(values, seen),
-        np.array([True, False, True, False]),
-    )
-    np.testing.assert_array_equal(
-        _merge_sorted_unique(seen, values),
-        np.array([100, 200, 300, 500, 700], dtype=np.int32),
-    )
-
-
 def test_first_seen_pair_mask_uses_seen_rows_across_chunks() -> None:
     seen_hi_by_lo: dict[int, np.ndarray] = {}
     first_lo = np.array([100, 100, 100, 200], dtype=np.int32)
@@ -523,6 +508,32 @@ def test_first_seen_pair_mask_uses_seen_rows_across_chunks() -> None:
         seen_hi_by_lo[200],
         np.array([200, 500], dtype=np.int32),
     )
+
+
+def test_dense_local_search_accumulator_sums_known_loci() -> None:
+    accumulator = DenseLocalSearchAccumulator(np.array([100, 200, 300]))
+
+    accumulator.add_vertical(
+        np.array([100, 200, 200, 400]),
+        np.array([1.0, 2.0, 3.0, 4.0]),
+    )
+    accumulator.add_horizontal(
+        np.array([300, 100, 300, 500]),
+        np.array([5.0, 7.0, 11.0, 13.0]),
+    )
+
+    np.testing.assert_allclose(accumulator.sum_vert, np.array([1.0, 5.0, 0.0]))
+    np.testing.assert_allclose(accumulator.sum_horiz, np.array([7.0, 0.0, 16.0]))
+
+
+def test_dense_local_search_accumulator_empty_chunks_are_noops() -> None:
+    accumulator = DenseLocalSearchAccumulator(np.array([100, 200, 300]))
+
+    accumulator.add_vertical(np.array([], dtype=np.int32), np.array([], dtype=float))
+    accumulator.add_horizontal(np.array([400, 500]), np.array([1.0, 2.0]))
+
+    np.testing.assert_allclose(accumulator.sum_vert, np.zeros(3))
+    np.testing.assert_allclose(accumulator.sum_horiz, np.zeros(3))
 
 
 def test_array_local_search_keeps_unchanged_breakpoint(tmp_path: Path) -> None:

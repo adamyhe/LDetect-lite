@@ -179,6 +179,30 @@ HDF5 read time from about 996 s to about 563 s.
 | chr21 | 338.73 s | 0.397 GiB | 64.42 s | 64.08 s | 0.036 s |
 | chr22 | 394.59 s | 0.412 GiB | 68.59 s | 68.31 s | 0.047 s |
 
+The next refreshed logs use the previous optimization sweep, including the
+duplicate-merge path and horizontal `add.reduceat()` grouping, but not the
+dense local-search accumulator migration. They should therefore be read as a
+validation profile for the sweep before dense arrays. RSS remains bounded, and
+the horizontal rewrite is a clear win, but duplicate tracking regressed enough
+to offset much of that gain on the larger chromosomes.
+
+| Chrom | Wall time | Max RSS | Local search | HDF5 read | Dedup | Horizontal |
+|---|---:|---:|---:|---:|---:|---:|
+| chr10 | 1872.15 s | 0.587 GiB | 342.27 s | 144.85 s | 127.02 s | 12.69 s |
+| chr11 | 3922.00 s | 0.837 GiB | 904.80 s | 563.47 s | 243.58 s | 16.44 s |
+| chr13 | 1400.58 s | 0.488 GiB | 304.53 s | 116.04 s | 124.58 s | 13.59 s |
+| chr21 | 320.68 s | 0.405 GiB | 45.94 s | 18.99 s | 13.60 s | 2.92 s |
+| chr22 | 405.62 s | 0.412 GiB | 82.09 s | 33.14 s | 30.44 s | 4.22 s |
+
+Compared with the compact-layout/read-cache baseline above, HDF5 read time is
+essentially unchanged on chr10/chr11, horizontal aggregation improved to about
+0.17x-0.31x of the prior cost, and deduplication worsened to about 1.2x-2.9x
+of the prior cost. On chr11, `dedup_merge_seconds` accounts for 239.39 s of
+243.58 s total dedup time, so the sorted merge implementation is the next
+local-search target unless dense-array validation changes the phase balance.
+The dense accumulator fields are absent from this profile by design; remote
+dense validation remains pending.
+
 Against the previous bounded compact profile, local-search wall time improved
 to 0.76x on chr10, 0.67x on chr11, 0.55x on chr13, 1.01x on chr21, and 0.70x
 on chr22. HDF5 read time improved to 0.56x, 0.57x, 0.41x, 0.70x, and 0.53x
@@ -188,11 +212,11 @@ Refreshed chr11 raw-log split:
 
 | Phase | Seconds | Memory finding |
 |---|---:|---|
-| Step 2 covariance generation | 1322 s | whole-run max RSS now 0.825 GiB |
-| Step 3 matrix-to-vector | 1023 s | parent max RSS 452.6 MiB |
-| Fourier metric/minima setup | 135 s | filter/minima work before first metric |
-| Fourier metric | 262 s | bounded streaming pass |
-| Fourier local search | 857 s | read-layout/reuse mostly recovered regression |
+| Step 2 covariance generation | 1338 s | whole-run max RSS now 0.837 GiB |
+| Step 3 matrix-to-vector | 1025 s | parent max RSS 465.3 MiB |
+| Fourier metric/minima setup | 126 s | filter/minima work before first metric |
+| Fourier metric | 260 s | bounded streaming pass |
+| Fourier local search | 905 s | previous-sweep profile; duplicate tracking regressed |
 | Final Fourier-LS metric | 264 s | bounded streaming pass |
 
 Step 2 generated 378 compact HDF5 partitions for chr11 with `workers=4`.
@@ -225,11 +249,12 @@ now more visible:
 The current local-search optimization targets have shifted. HDF5-backed local
 search now streams segment row chunks directly into vertical/horizontal
 accumulators instead of materializing one full active row range per segment.
-Keep the compact HDF5 layout/read-cache change. The next local-search work
-should focus on dense-window row volume, duplicate tracking, horizontal
-aggregation, and normalization. Continue deferring `_search_array()`
-optimization and JIT. See `notes/local-search-memory-speed-handoff.md` for the
-detailed handoff.
+Keep the compact HDF5 layout/read-cache change. The previous sweep shows that
+horizontal grouping should be kept, while duplicate tracking needs either a
+faster merge implementation, a guarded fallback to the earlier membership path,
+or a profile-driven hybrid. Continue deferring `_search_array()` optimization
+and JIT. See `notes/local-search-memory-speed-handoff.md` for the detailed
+handoff.
 
 Local-search assembly should continue to consume covariance rows through a
 canonical physical-pair stream boundary. The HDF5 implementation uses a
@@ -287,7 +312,7 @@ The compact writer now separates write batching from HDF5 storage layout:
 bounded pair generation keeps 1,000,000-row write batches, while compact
 `lo`/`hi`/`shrink_ld` datasets default to 65,536-row storage chunks and record
 both values in HDF5 attrs/debug logs.
-The latest chr11 whole-run max RSS is 0.825 GiB. See
+The latest chr11 whole-run max RSS is 0.837 GiB. See
 `notes/local-search-memory-speed-handoff.md` for the HDF5 contract and current
 read-performance checklist.
 
@@ -299,11 +324,12 @@ logs is:
 
 1. final-output parity checks for BED/JSON/HDF5 against the previous compact
    baseline;
-2. dense-window local-search row volume and duplicate tracking, especially
-   replacing allocation-heavy per-`lo`
-   `np.isin`/`np.union1d` work if profiles stay similar;
-3. horizontal aggregation, because `np.unique(row_hi, return_inverse=True)` plus
-   `np.bincount()` is still material and allocation-heavy;
+2. duplicate tracking validation after reverting the sorted merge path. The
+   previous-sweep profile showed dedup was worse than the read-cache baseline
+   because `dedup_merge_seconds` dominated the bucket;
+3. dense-window local-search accumulation validation. The dense accumulator
+   migration is implemented locally but was not included in the latest remote
+   logs;
 4. normalization, especially repeated diagonal lookup via `np.searchsorted()`;
 5. metric recomputation around local search, now routed through streaming
    metrics and worth timing separately if wall time shifts there;
@@ -330,11 +356,12 @@ storage layout. Keep the compact 65,536-row HDF5 dataset chunks and
 per-precompute reader reuse unless a future remote profile regresses.
 
 1. **Local-search duplicate tracking.**
-   Replace `_first_seen_pair_mask()`'s `np.isin()`/`np.union1d()` per-`lo`
-   loop with a sorted two-pointer merge for the common sorted-unique case.
-   This targets 134 s of chr11 dedup time and the 55.09-56.41 Mb dense window.
-   Keep first-retained-pair semantics and partition-order precedence exact.
-   Status: implemented locally with `dedup_merge_seconds` profiling.
+   The attempted sorted two-pointer merge was reverted. It moved set-union work
+   from NumPy's C implementation into a Python loop and the latest
+   previous-sweep remote logs showed the expected regression: chr11 dedup rose
+   from 134.21 s to 243.58 s, with 239.39 s in the merge path. Keep the
+   `np.isin()`/`np.union1d()` path for now and validate that the next profile
+   returns dedup near the compact-layout/read-cache baseline.
 2. **Dense local-search accumulators plus horizontal grouping.**
    Replace per-breakpoint `sum_vert_by_locus`/`sum_horiz_by_locus`
    dictionaries with dense arrays scoped to the active locus window. Benchmark
@@ -342,8 +369,9 @@ per-precompute reader reuse unless a future remote profile regresses.
    `np.unique(..., return_inverse=True)`/`np.bincount()` path. This targets
    about 77 s horizontal aggregation and some of the 52 s normalization cost on
    chr11.
-   Status: horizontal grouping switched to `argsort` plus `add.reduceat`;
-   full dense accumulators remain pending remote timing.
+   Status: implemented locally with per-breakpoint dense accumulators,
+   sorted-index `add.reduceat`, and dense lookup/accumulation profiling. The
+   latest remote logs do not include this migration; validate it separately.
 3. **Metric-pass instrumentation and metadata reuse.**
    The two chr11 streaming metric passes take about 8.8 minutes total. Add
    partition read, normalization, crossing-pair, row-read, and row-crossing

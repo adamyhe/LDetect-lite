@@ -51,6 +51,8 @@ BREAKPOINT_COLS = [
     "chunk_filter_seconds",
     "dedup_seconds",
     "dedup_merge_seconds",
+    "dense_lookup_seconds",
+    "dense_accumulate_seconds",
     "accumulator_seconds",
     "candidate_rows",
     "eligible_rows",
@@ -107,6 +109,8 @@ BY_CHROM_COLS = [
     "chunk_filter_seconds",
     "dedup_seconds",
     "dedup_merge_seconds",
+    "dense_lookup_seconds",
+    "dense_accumulate_seconds",
     "accumulator_seconds",
     "candidate_rows",
     "eligible_rows",
@@ -144,6 +148,8 @@ _BREAKPOINT_EXTRA_FLOAT_COLS = [
     "chunk_filter_seconds",
     "dedup_seconds",
     "dedup_merge_seconds",
+    "dense_lookup_seconds",
+    "dense_accumulate_seconds",
     "accumulator_seconds",
 ]
 

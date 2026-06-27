@@ -67,6 +67,8 @@ class LocalSearchPrecomputeStats:
     hdf5_reader_open_count: int = 0
     hdf5_reader_reuse_count: int = 0
     dedup_merge_seconds: float = 0.0
+    dense_lookup_seconds: float = 0.0
+    dense_accumulate_seconds: float = 0.0
 
     def log_fields(self) -> str:
         """Return stable key/value fields for debug profiling logs."""
@@ -83,6 +85,8 @@ class LocalSearchPrecomputeStats:
             f"chunk_filter_seconds={self.chunk_filter_seconds:.6f} "
             f"dedup_seconds={self.dedup_seconds:.6f} "
             f"dedup_merge_seconds={self.dedup_merge_seconds:.6f} "
+            f"dense_lookup_seconds={self.dense_lookup_seconds:.6f} "
+            f"dense_accumulate_seconds={self.dense_accumulate_seconds:.6f} "
             f"accumulator_seconds={self.accumulator_seconds:.6f} "
             f"candidate_rows={self.candidate_rows} "
             f"eligible_rows={self.eligible_rows} "
@@ -114,6 +118,78 @@ class LocalSearchHDF5Partition:
 
 
 _HDF5ReaderPool = dict[tuple[str, int, int], HDF5CovariancePartitionReader]
+
+
+@dataclass(frozen=True)
+class _LocalSearchSegment:
+    """One planned local-search locus segment and its active partitions."""
+
+    loci_start: int
+    loci_stop: int
+    active_min_lo: int
+    active_partitions: tuple
+
+
+class DenseLocalSearchAccumulator:
+    """Dense per-breakpoint local-search vertical/horizontal sum accumulator."""
+
+    def __init__(
+        self,
+        loci: np.ndarray,
+        stats: LocalSearchPrecomputeStats | None = None,
+    ) -> None:
+        self.loci = np.asarray(loci, dtype=np.int64)
+        self.sum_vert = np.zeros(self.loci.size, dtype=np.float64)
+        self.sum_horiz = np.zeros(self.loci.size, dtype=np.float64)
+        self.stats = stats
+
+    def lookup(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return dense indexes for values present in this accumulator's loci."""
+        lookup_start = time.perf_counter()
+        values = np.asarray(values)
+        if values.size == 0 or self.loci.size == 0:
+            idx = np.array([], dtype=np.int64)
+            keep = np.zeros(values.size, dtype=bool)
+        else:
+            idx = np.searchsorted(self.loci, values)
+            in_bounds = idx < self.loci.size
+            safe_idx = np.minimum(idx, self.loci.size - 1)
+            keep = in_bounds & (self.loci[safe_idx] == values)
+        if self.stats is not None:
+            self.stats.dense_lookup_seconds += time.perf_counter() - lookup_start
+        return idx[keep], keep
+
+    def add_vertical(self, row_lo: np.ndarray, r2: np.ndarray) -> None:
+        """Add vertical sums for row lower endpoints present in ``loci``."""
+        self._add(self.sum_vert, row_lo, r2)
+
+    def add_horizontal(self, row_hi: np.ndarray, r2: np.ndarray) -> None:
+        """Add horizontal sums for row upper endpoints present in ``loci``."""
+        self._add(self.sum_horiz, row_hi, r2)
+
+    def _add(self, target: np.ndarray, loci: np.ndarray, values: np.ndarray) -> None:
+        idx, keep = self.lookup(loci)
+        if idx.size == 0:
+            return
+
+        accumulate_start = time.perf_counter()
+        weights = np.asarray(values, dtype=np.float64)[keep]
+        order = np.argsort(idx, kind="stable")
+        sorted_idx = idx[order]
+        sorted_weights = weights[order]
+        group_starts = np.concatenate(
+            (
+                np.array([0], dtype=np.int64),
+                np.flatnonzero(sorted_idx[1:] != sorted_idx[:-1]) + 1,
+            )
+        )
+        grouped_idx = sorted_idx[group_starts]
+        grouped_weights = np.add.reduceat(sorted_weights, group_starts)
+        target[grouped_idx] += grouped_weights
+        if self.stats is not None:
+            self.stats.dense_accumulate_seconds += (
+                time.perf_counter() - accumulate_start
+            )
 
 
 def local_search_hdf5_partition(
@@ -457,8 +533,7 @@ def _add_array_segment_values(
     snp_last: int,
     snp_top: int,
     include_snp_first: bool,
-    sum_vert_by_locus: dict[int, float],
-    sum_horiz_by_locus: dict[int, float],
+    accumulator: DenseLocalSearchAccumulator,
     chunk_size: int = 2_000_000,
     stats: LocalSearchPrecomputeStats | None = None,
 ) -> None:
@@ -473,11 +548,6 @@ def _add_array_segment_values(
         return
     if stats is not None:
         stats.segments += 1
-
-    for locus in segment_loci:
-        locus_key = int(locus)
-        sum_vert_by_locus.setdefault(locus_key, 0.0)
-        sum_horiz_by_locus.setdefault(locus_key, 0.0)
 
     if diag_pos.size == 0:
         return
@@ -554,30 +624,12 @@ def _add_array_segment_values(
             stats.normalize_seconds += time.perf_counter() - normalize_start
 
         vertical_start = time.perf_counter()
-        group_starts = np.concatenate(
-            (
-                np.array([0], dtype=np.int64),
-                np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
-            )
-        )
-        vert_loci = row_lo[group_starts]
-        vert_sums = np.add.reduceat(r2, group_starts)
-        for locus, value in zip(vert_loci, vert_sums):
-            sum_vert_by_locus[int(locus)] = (
-                sum_vert_by_locus.get(int(locus), 0.0) + float(value)
-            )
+        accumulator.add_vertical(row_lo, r2)
         if stats is not None:
             stats.vertical_seconds += time.perf_counter() - vertical_start
 
         horizontal_start = time.perf_counter()
-        horiz_loci, horiz_inverse = np.unique(row_hi, return_inverse=True)
-        horiz_sums = np.bincount(horiz_inverse, weights=r2)
-        for locus, value in zip(horiz_loci, horiz_sums):
-            locus_key = int(locus)
-            sum_horiz_by_locus[locus_key] = (
-                sum_horiz_by_locus.get(locus_key, 0.0) + float(value)
-            )
-            sum_vert_by_locus.setdefault(locus_key, 0.0)
+        accumulator.add_horizontal(row_hi, r2)
         if stats is not None:
             stats.horizontal_seconds += time.perf_counter() - horizontal_start
 
@@ -592,8 +644,7 @@ def _add_hdf5_segment_values(
     snp_last: int,
     snp_top: int,
     include_snp_first: bool,
-    sum_vert_by_locus: dict[int, float],
-    sum_horiz_by_locus: dict[int, float],
+    accumulator: DenseLocalSearchAccumulator,
     *,
     chunk_rows: int = 1_000_000,
     readers_by_partition: _HDF5ReaderPool | None = None,
@@ -604,11 +655,6 @@ def _add_hdf5_segment_values(
         return
     if stats is not None:
         stats.segments += 1
-
-    for locus in segment_loci:
-        locus_key = int(locus)
-        sum_vert_by_locus.setdefault(locus_key, 0.0)
-        sum_horiz_by_locus.setdefault(locus_key, 0.0)
 
     if diag_pos.size == 0:
         return
@@ -679,8 +725,7 @@ def _add_hdf5_segment_values(
             row_shrink,
             diag_pos,
             diag_val,
-            sum_vert_by_locus,
-            sum_horiz_by_locus,
+            accumulator,
             stats=stats,
         )
 
@@ -711,61 +756,13 @@ def _first_seen_pair_mask(
             seen_hi_by_lo[locus] = hi_values.copy()
             continue
 
-        merge_start = time.perf_counter()
-        duplicates = _sorted_membership(hi_values, seen)
+        duplicates = np.isin(hi_values, seen, assume_unique=True)
         if np.any(duplicates):
             keep[start:end] = ~duplicates
         new_hi = hi_values[~duplicates]
         if new_hi.size:
-            seen_hi_by_lo[locus] = _merge_sorted_unique(seen, new_hi)
-        if stats is not None:
-            stats.dedup_merge_seconds += time.perf_counter() - merge_start
+            seen_hi_by_lo[locus] = np.union1d(seen, new_hi)
     return keep
-
-
-def _sorted_membership(values: np.ndarray, seen: np.ndarray) -> np.ndarray:
-    """Return whether each sorted value is present in sorted unique ``seen``."""
-    if values.size == 0 or seen.size == 0:
-        return np.zeros(values.size, dtype=bool)
-    idx = np.searchsorted(seen, values)
-    in_bounds = idx < seen.size
-    safe_idx = np.minimum(idx, seen.size - 1)
-    return in_bounds & (seen[safe_idx] == values)
-
-
-def _merge_sorted_unique(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Merge sorted unique arrays, preserving dtype and uniqueness."""
-    if left.size == 0:
-        return right.copy()
-    if right.size == 0:
-        return left
-    merged = np.empty(left.size + right.size, dtype=np.result_type(left, right))
-    i = 0
-    j = 0
-    out = 0
-    while i < left.size and j < right.size:
-        left_value = left[i]
-        right_value = right[j]
-        if left_value < right_value:
-            merged[out] = left_value
-            i += 1
-        elif right_value < left_value:
-            merged[out] = right_value
-            j += 1
-        else:
-            merged[out] = left_value
-            i += 1
-            j += 1
-        out += 1
-    if i < left.size:
-        tail = left[i:]
-        merged[out : out + tail.size] = tail
-        out += tail.size
-    if j < right.size:
-        tail = right[j:]
-        merged[out : out + tail.size] = tail
-        out += tail.size
-    return merged[:out]
 
 
 def _add_row_chunk_values(
@@ -774,8 +771,7 @@ def _add_row_chunk_values(
     row_shrink: np.ndarray,
     diag_pos: np.ndarray,
     diag_val: np.ndarray,
-    sum_vert_by_locus: dict[int, float],
-    sum_horiz_by_locus: dict[int, float],
+    accumulator: DenseLocalSearchAccumulator,
     *,
     stats: LocalSearchPrecomputeStats | None = None,
 ) -> None:
@@ -815,39 +811,12 @@ def _add_row_chunk_values(
         stats.normalize_seconds += time.perf_counter() - normalize_start
 
     vertical_start = time.perf_counter()
-    group_starts = np.concatenate(
-        (
-            np.array([0], dtype=np.int64),
-            np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
-        )
-    )
-    vert_loci = row_lo[group_starts]
-    vert_sums = np.add.reduceat(r2, group_starts)
-    for locus, value in zip(vert_loci, vert_sums):
-        sum_vert_by_locus[int(locus)] = (
-            sum_vert_by_locus.get(int(locus), 0.0) + float(value)
-        )
+    accumulator.add_vertical(row_lo, r2)
     if stats is not None:
         stats.vertical_seconds += time.perf_counter() - vertical_start
 
     horizontal_start = time.perf_counter()
-    order = np.argsort(row_hi, kind="stable")
-    sorted_hi = row_hi[order]
-    sorted_r2 = r2[order]
-    group_starts = np.concatenate(
-        (
-            np.array([0], dtype=np.int64),
-            np.flatnonzero(sorted_hi[1:] != sorted_hi[:-1]) + 1,
-        )
-    )
-    horiz_loci = sorted_hi[group_starts]
-    horiz_sums = np.add.reduceat(sorted_r2, group_starts)
-    for locus, value in zip(horiz_loci, horiz_sums):
-        locus_key = int(locus)
-        sum_horiz_by_locus[locus_key] = (
-            sum_horiz_by_locus.get(locus_key, 0.0) + float(value)
-        )
-        sum_vert_by_locus.setdefault(locus_key, 0.0)
+    accumulator.add_horizontal(row_hi, r2)
     if stats is not None:
         stats.horizontal_seconds += time.perf_counter() - horizontal_start
 
@@ -1222,8 +1191,7 @@ class LocalSearch:
         active_min_lo = -2**63
         active_loci = np.array([], dtype=np.int64)
         precomputed_loci: list[int] = []
-        sum_vert_by_locus: dict[int, float] = {}
-        sum_horiz_by_locus: dict[int, float] = {}
+        planned_segments: list[_LocalSearchSegment] = []
 
         last_p_num = -1
         for p_num_init in range(len(local_partitions) - 1):
@@ -1310,41 +1278,15 @@ class LocalSearch:
             )
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
+                loci_start = len(precomputed_loci)
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
-                lo_min = int(segment_loci[0])
-                lo_max = int(segment_loci[-1])
-                append_start = time.perf_counter()
-                active_lo, active_hi, active_shrink = _segment_rows_from_partitions(
-                    active_partitions,
-                    active_min_lo,
-                    lo_min,
-                    lo_max,
-                )
-                self.precompute_stats.append_seconds += (
-                    time.perf_counter() - append_start
-                )
-                diagonal_start = time.perf_counter()
-                diag_pos, diag_val = _active_diagonal_from_partitions(
-                    active_partitions,
-                    active_min_lo,
-                )
-                self.precompute_stats.diagonal_seconds += (
-                    time.perf_counter() - diagonal_start
-                )
-                _add_array_segment_values(
-                    segment_loci,
-                    active_lo,
-                    active_hi,
-                    active_shrink,
-                    diag_pos,
-                    diag_val,
-                    self.snp_first,
-                    self.snp_last,
-                    self.snp_top,
-                    self.initial_breakpoint_index == 0,
-                    sum_vert_by_locus,
-                    sum_horiz_by_locus,
-                    stats=self.precompute_stats,
+                planned_segments.append(
+                    _LocalSearchSegment(
+                        loci_start=loci_start,
+                        loci_stop=len(precomputed_loci),
+                        active_min_lo=active_min_lo,
+                        active_partitions=tuple(active_partitions),
+                    )
                 )
 
                 if segment_end_idx < active_loci.size:
@@ -1365,19 +1307,49 @@ class LocalSearch:
             )
 
         loci = np.asarray(precomputed_loci, dtype=np.int64)
-        sum_vert = np.asarray(
-            [sum_vert_by_locus.get(int(locus), 0.0) for locus in loci],
-            dtype=np.float64,
-        )
-        sum_horiz = np.asarray(
-            [sum_horiz_by_locus.get(int(locus), 0.0) for locus in loci],
-            dtype=np.float64,
-        )
+        accumulator = DenseLocalSearchAccumulator(loci, self.precompute_stats)
+        for segment in planned_segments:
+            segment_loci = loci[segment.loci_start : segment.loci_stop]
+            if segment_loci.size == 0:
+                continue
+            lo_min = int(segment_loci[0])
+            lo_max = int(segment_loci[-1])
+            active_partition_list = list(segment.active_partitions)
+            append_start = time.perf_counter()
+            active_lo, active_hi, active_shrink = _segment_rows_from_partitions(
+                active_partition_list,
+                segment.active_min_lo,
+                lo_min,
+                lo_max,
+            )
+            self.precompute_stats.append_seconds += time.perf_counter() - append_start
+            diagonal_start = time.perf_counter()
+            diag_pos, diag_val = _active_diagonal_from_partitions(
+                active_partition_list,
+                segment.active_min_lo,
+            )
+            self.precompute_stats.diagonal_seconds += (
+                time.perf_counter() - diagonal_start
+            )
+            _add_array_segment_values(
+                segment_loci,
+                active_lo,
+                active_hi,
+                active_shrink,
+                diag_pos,
+                diag_val,
+                self.snp_first,
+                self.snp_last,
+                self.snp_top,
+                self.initial_breakpoint_index == 0,
+                accumulator,
+                stats=self.precompute_stats,
+            )
         self.start_locus = start_locus
         self.start_locus_index = start_locus_index
         self.end_locus = end_locus
         self.end_locus_index = end_locus_index
-        return loci, sum_vert, sum_horiz
+        return loci, accumulator.sum_vert, accumulator.sum_horiz
 
     def _precompute_array_from_hdf5_partitions(
         self,
@@ -1401,8 +1373,7 @@ class LocalSearch:
         active_min_lo = -2**63
         active_loci = np.array([], dtype=np.int64)
         precomputed_loci: list[int] = []
-        sum_vert_by_locus: dict[int, float] = {}
-        sum_horiz_by_locus: dict[int, float] = {}
+        planned_segments: list[_LocalSearchSegment] = []
 
         last_p_num = -1
         for p_num_init in range(len(local_partitions) - 1):
@@ -1491,33 +1462,15 @@ class LocalSearch:
             )
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
+                loci_start = len(precomputed_loci)
                 precomputed_loci.extend(int(locus) for locus in segment_loci)
-                diagonal_start = time.perf_counter()
-                diag_pos, diag_val = _active_diagonal_from_hdf5_partitions(
-                    active_partitions,
-                    active_min_lo,
-                )
-                self.precompute_stats.diagonal_seconds += (
-                    time.perf_counter() - diagonal_start
-                )
-                accumulator_start = time.perf_counter()
-                _add_hdf5_segment_values(
-                    segment_loci,
-                    active_partitions,
-                    active_min_lo,
-                    diag_pos,
-                    diag_val,
-                    self.snp_first,
-                    self.snp_last,
-                    self.snp_top,
-                    self.initial_breakpoint_index == 0,
-                    sum_vert_by_locus,
-                    sum_horiz_by_locus,
-                    readers_by_partition=readers_by_partition,
-                    stats=self.precompute_stats,
-                )
-                self.precompute_stats.accumulator_seconds += (
-                    time.perf_counter() - accumulator_start
+                planned_segments.append(
+                    _LocalSearchSegment(
+                        loci_start=loci_start,
+                        loci_stop=len(precomputed_loci),
+                        active_min_lo=active_min_lo,
+                        active_partitions=tuple(active_partitions),
+                    )
                 )
 
                 if segment_end_idx < active_loci.size:
@@ -1538,19 +1491,43 @@ class LocalSearch:
             )
 
         loci = np.asarray(precomputed_loci, dtype=np.int64)
-        sum_vert = np.asarray(
-            [sum_vert_by_locus.get(int(locus), 0.0) for locus in loci],
-            dtype=np.float64,
-        )
-        sum_horiz = np.asarray(
-            [sum_horiz_by_locus.get(int(locus), 0.0) for locus in loci],
-            dtype=np.float64,
-        )
+        accumulator = DenseLocalSearchAccumulator(loci, self.precompute_stats)
+        for segment in planned_segments:
+            segment_loci = loci[segment.loci_start : segment.loci_stop]
+            if segment_loci.size == 0:
+                continue
+            active_partition_list = list(segment.active_partitions)
+            diagonal_start = time.perf_counter()
+            diag_pos, diag_val = _active_diagonal_from_hdf5_partitions(
+                active_partition_list,
+                segment.active_min_lo,
+            )
+            self.precompute_stats.diagonal_seconds += (
+                time.perf_counter() - diagonal_start
+            )
+            accumulator_start = time.perf_counter()
+            _add_hdf5_segment_values(
+                segment_loci,
+                active_partition_list,
+                segment.active_min_lo,
+                diag_pos,
+                diag_val,
+                self.snp_first,
+                self.snp_last,
+                self.snp_top,
+                self.initial_breakpoint_index == 0,
+                accumulator,
+                readers_by_partition=readers_by_partition,
+                stats=self.precompute_stats,
+            )
+            self.precompute_stats.accumulator_seconds += (
+                time.perf_counter() - accumulator_start
+            )
         self.start_locus = start_locus
         self.start_locus_index = start_locus_index
         self.end_locus = end_locus
         self.end_locus_index = end_locus_index
-        return loci, sum_vert, sum_horiz
+        return loci, accumulator.sum_vert, accumulator.sum_horiz
 
     def _add_val(self, val, curr_locus: int, key: int) -> None:
         zero = decimal.Decimal(0) if self.use_decimal else 0.0
