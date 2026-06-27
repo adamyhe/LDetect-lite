@@ -13,7 +13,12 @@ from ldetect2.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     open_covariance_reader,
 )
-from ldetect2.shrinkage import calc_covariance, partition_chromosome
+from ldetect2.shrinkage import (
+    _count_pairwise_ld_by_i_impl,
+    _genetic_stop_bounds_impl,
+    calc_covariance,
+    partition_chromosome,
+)
 
 _FULL_HDF5_DATASETS = {
     "covariance/lo",
@@ -200,15 +205,11 @@ def test_calc_covariance_compact_output_writes_only_compact_schema(
         assert cov["covariance/lo"].dtype == np.int32
         assert cov["covariance/hi"].dtype == np.int32
         assert cov["covariance/shrink_ld"].dtype == np.float64
-        expected_chunk_rows = min(
-            HDF5_DATASET_CHUNK_ROWS,
-            int(cov["covariance/lo"].shape[0]),
-        )
-        assert cov.attrs["dataset_chunk_rows"] == expected_chunk_rows
+        assert cov.attrs["dataset_chunk_rows"] == HDF5_DATASET_CHUNK_ROWS
         assert cov.attrs["write_chunk_rows"] == 1_000_000
-        assert cov["covariance/lo"].chunks == (expected_chunk_rows,)
-        assert cov["covariance/hi"].chunks == (expected_chunk_rows,)
-        assert cov["covariance/shrink_ld"].chunks == (expected_chunk_rows,)
+        assert cov["covariance/lo"].chunks == (HDF5_DATASET_CHUNK_ROWS,)
+        assert cov["covariance/hi"].chunks == (HDF5_DATASET_CHUNK_ROWS,)
+        assert cov["covariance/shrink_ld"].chunks == (HDF5_DATASET_CHUNK_ROWS,)
 
 
 def test_calc_covariance_compact_chunked_writer_matches_full_rows(
@@ -257,13 +258,69 @@ def test_calc_covariance_compact_chunked_writer_matches_full_rows(
     import h5py
 
     with h5py.File(compact_path, "r") as cov:
-        expected_chunk_rows = min(
-            HDF5_DATASET_CHUNK_ROWS,
-            int(cov["covariance/lo"].shape[0]),
-        )
-        assert cov.attrs["dataset_chunk_rows"] == expected_chunk_rows
+        assert cov.attrs["dataset_chunk_rows"] == HDF5_DATASET_CHUNK_ROWS
         assert cov.attrs["write_chunk_rows"] == 2
-        assert cov["covariance/lo"].chunks == (expected_chunk_rows,)
+        assert cov["covariance/lo"].chunks == (HDF5_DATASET_CHUNK_ROWS,)
+        lo = cov["covariance/lo"][:]
+        lo_values = cov["index/lo_values"][:]
+        lo_offsets = cov["index/lo_offsets"][:]
+        expected_values, expected_counts = np.unique(lo, return_counts=True)
+        np.testing.assert_array_equal(lo_values, expected_values)
+        np.testing.assert_array_equal(
+            lo_offsets,
+            np.concatenate(
+                (
+                    np.array([0], dtype=np.int64),
+                    np.cumsum(expected_counts, dtype=np.int64),
+                )
+            ),
+        )
+
+
+def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
+    hap_mat = np.array(
+        [
+            [0, 1, 0, 1],
+            [1, 1, 0, 0],
+            [1, 0, 1, 0],
+            [0, 0, 1, 1],
+        ],
+        dtype=np.uint8,
+    )
+    gpos_arr = np.array([0.0, 0.001, 0.003, 1.0], dtype=np.float64)
+    hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
+    ne = 11418.0
+    n_ind = 2.0
+    theta = 0.01
+    cutoff = 1e-7
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    counts = _count_pairwise_ld_by_i_impl(
+        hap_mat,
+        gpos_arr,
+        hap_sums,
+        j_stop_by_i,
+        ne,
+        n_ind,
+        theta,
+        cutoff,
+    )
+
+    expected = np.zeros(hap_mat.shape[0], dtype=np.int64)
+    n_total = float(hap_mat.shape[1])
+    for i in range(hap_mat.shape[0]):
+        for j in range(i, hap_mat.shape[0]):
+            df = gpos_arr[j] - gpos_arr[i]
+            ee = np.exp(-4.0 * ne * df / (2.0 * n_ind))
+            if ee < cutoff:
+                break
+            f11 = np.sum(hap_mat[i] * hap_mat[j]) / n_total
+            f1 = hap_sums[i] / n_total
+            f2 = hap_sums[j] / n_total
+            ds2 = (1.0 - theta) ** 2 * (f11 - f1 * f2) * ee
+            if abs(ds2) >= cutoff:
+                expected[i] += 1
+
+    np.testing.assert_array_equal(counts, expected)
 
 
 def test_partition_chromosome_clamps_uncut_window_to_last_snp(

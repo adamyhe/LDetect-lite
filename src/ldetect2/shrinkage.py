@@ -15,6 +15,7 @@ import numpy as np
 from ldetect2.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     CovarianceRowChunk,
+    write_compact_covariance_partition_hdf5_append,
     write_compact_covariance_partition_hdf5_chunks,
     write_covariance_partition_hdf5,
 )
@@ -39,6 +40,8 @@ except ImportError:
 def _count_pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
     ne: float,
     n_ind: float,
     theta: float,
@@ -50,18 +53,17 @@ def _count_pairwise_ld_impl(
 
     cnt = 0
     for i in range(n_snps):
-        gpos1 = gpos_arr[i]
-        for j in range(i, n_snps):
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        for j in range(i, j_stop):
+            gpos1 = gpos_arr[i]
             df = gpos_arr[j] - gpos1
             ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-            if ee < cutoff:
-                break
 
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
-            n1x = np.sum(a)
-            nx1 = np.sum(b)
+            nx1 = hap_sums[j]
 
             f11 = n11 / n_total
             f1 = n1x / n_total
@@ -81,6 +83,8 @@ def _count_pairwise_ld_impl(
 def _pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
     ne: float,
     n_ind: float,
     theta: float,
@@ -102,7 +106,9 @@ def _pairwise_ld_impl(
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     n_total = float(n_haps)
-    n_pairs = _count_pairwise_ld_impl(hap_mat, gpos_arr, ne, n_ind, theta, cutoff)
+    n_pairs = _count_pairwise_ld_impl(
+        hap_mat, gpos_arr, hap_sums, j_stop_by_i, ne, n_ind, theta, cutoff
+    )
 
     ii = np.empty(n_pairs, dtype=np.int32)
     jj = np.empty(n_pairs, dtype=np.int32)
@@ -112,17 +118,16 @@ def _pairwise_ld_impl(
     cnt = 0
     for i in range(n_snps):
         gpos1 = gpos_arr[i]
-        for j in range(i, n_snps):
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        for j in range(i, j_stop):
             df = gpos_arr[j] - gpos1
             ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-            if ee < cutoff:
-                break
 
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
-            n1x = np.sum(a)
-            nx1 = np.sum(b)
+            nx1 = hap_sums[j]
 
             f11 = n11 / n_total
             f1 = n1x / n_total
@@ -149,6 +154,8 @@ def _pairwise_ld_impl(
 def _count_pairwise_ld_by_i_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
     ne: float,
     n_ind: float,
     theta: float,
@@ -161,18 +168,17 @@ def _count_pairwise_ld_by_i_impl(
 
     for i in range(n_snps):
         gpos1 = gpos_arr[i]
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
         row_count = 0
-        for j in range(i, n_snps):
+        for j in range(i, j_stop):
             df = gpos_arr[j] - gpos1
             ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-            if ee < cutoff:
-                break
 
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
-            n1x = np.sum(a)
-            nx1 = np.sum(b)
+            nx1 = hap_sums[j]
 
             f11 = n11 / n_total
             f1 = n1x / n_total
@@ -193,6 +199,8 @@ def _count_pairwise_ld_by_i_impl(
 def _pairwise_ld_compact_range_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
     ne: float,
     n_ind: float,
     theta: float,
@@ -201,7 +209,6 @@ def _pairwise_ld_compact_range_impl(
     i_stop: int,
     n_pairs: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     n_total = float(n_haps)
 
@@ -212,17 +219,16 @@ def _pairwise_ld_compact_range_impl(
     cnt = 0
     for i in range(i_start, i_stop):
         gpos1 = gpos_arr[i]
-        for j in range(i, n_snps):
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        for j in range(i, j_stop):
             df = gpos_arr[j] - gpos1
             ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-            if ee < cutoff:
-                break
 
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
-            n1x = np.sum(a)
-            nx1 = np.sum(b)
+            nx1 = hap_sums[j]
 
             f11 = n11 / n_total
             f1 = n1x / n_total
@@ -244,9 +250,96 @@ def _pairwise_ld_compact_range_impl(
     return ii, jj, ds2_arr
 
 
+@_njit_fallback
+def _genetic_stop_bounds_impl(
+    gpos_arr: np.ndarray,
+    ne: float,
+    n_ind: float,
+    cutoff: float,
+) -> np.ndarray:
+    n_snps = gpos_arr.shape[0]
+    stops = np.empty(n_snps, dtype=np.int32)
+    stop = 0
+    for i in range(n_snps):
+        if stop < i:
+            stop = i
+        gpos1 = gpos_arr[i]
+        while stop < n_snps:
+            df = gpos_arr[stop] - gpos1
+            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+            if ee < cutoff:
+                break
+            stop += 1
+        stops[i] = stop
+    return stops
+
+
+@_njit_fallback
+def _pairwise_ld_compact_chunk_impl(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    i_start: int,
+    target_rows: int,
+    capacity: int,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    n_haps = hap_mat.shape[1]
+    n_total = float(n_haps)
+    n_snps = hap_mat.shape[0]
+
+    ii = np.empty(capacity, dtype=np.int32)
+    jj = np.empty(capacity, dtype=np.int32)
+    ds2_arr = np.empty(capacity, dtype=np.float64)
+
+    cnt = 0
+    i = i_start
+    while i < n_snps:
+        gpos1 = gpos_arr[i]
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        for j in range(i, j_stop):
+            df = gpos_arr[j] - gpos1
+            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+
+            a = hap_mat[i]
+            b = hap_mat[j]
+            n11 = np.sum(a * b)
+            nx1 = hap_sums[j]
+
+            f11 = n11 / n_total
+            f1 = n1x / n_total
+            f2 = nx1 / n_total
+            d_naive = f11 - f1 * f2
+            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+
+            if math.fabs(ds2) < cutoff:
+                continue
+
+            if i == j:
+                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
+
+            ii[cnt] = i
+            jj[cnt] = j
+            ds2_arr[cnt] = ds2
+            cnt += 1
+
+        i += 1
+        if cnt >= target_rows:
+            break
+
+    return i, ii[:cnt], jj[:cnt], ds2_arr[:cnt]
+
+
 def _compact_pair_chunks(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
     pos_arr: np.ndarray,
     row_counts: np.ndarray,
     ne: float,
@@ -280,6 +373,8 @@ def _compact_pair_chunks(
         ii, jj, shrink_ld = _pairwise_ld_compact_range_impl(
             hap_mat,
             gpos_arr,
+            hap_sums,
+            j_stop_by_i,
             ne,
             n_ind,
             theta,
@@ -293,6 +388,48 @@ def _compact_pair_chunks(
             hi=pos_arr[jj],
             shrink_ld=shrink_ld,
         )
+        i_start = i_stop
+
+
+def _compact_pair_chunks_single_pass(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    pos_arr: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    chunk_rows: int,
+) -> Iterator[CovarianceRowChunk]:
+    """Yield compact covariance rows once in sorted ``(lo, hi)`` order."""
+    target_rows = max(int(chunk_rows), 1)
+    capacity = target_rows + hap_mat.shape[0]
+    i_start = 0
+    n_snps = hap_mat.shape[0]
+    while i_start < n_snps:
+        i_stop, ii, jj, shrink_ld = _pairwise_ld_compact_chunk_impl(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            i_start,
+            target_rows,
+            capacity,
+        )
+        if ii.size:
+            yield CovarianceRowChunk(
+                lo=pos_arr[ii],
+                hi=pos_arr[jj],
+                shrink_ld=shrink_ld,
+            )
+        if i_stop <= i_start:
+            raise RuntimeError("compact covariance chunk generation did not advance")
         i_start = i_stop
 
 
@@ -530,6 +667,8 @@ def calc_covariance(
     array_start = time.perf_counter()
     hap_mat = np.array(haps, dtype=np.uint8)  # (n_snps, n_haps)
     gpos_arr = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)  # (n_snps,)
+    hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, float(n_ind), cutoff)
     log_debug(
         "calc_covariance arrays_built "
         f"n_snps={hap_mat.shape[0]} n_haps={hap_mat.shape[1]} "
@@ -543,9 +682,51 @@ def calc_covariance(
     )
 
     if compact_output and assume_sorted_unique_rows:
+        write_start = time.perf_counter()
+        try:
+            n_pairs = write_compact_covariance_partition_hdf5_append(
+                output_path,
+                positions=pos_arr,
+                row_chunks=_compact_pair_chunks_single_pass(
+                    hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                ),
+                chunk_rows=compact_chunk_rows,
+            )
+            dataset_chunk_rows = HDF5_DATASET_CHUNK_ROWS if n_pairs else 0
+            log_debug(
+                "calc_covariance compact_hdf5_written "
+                f"n_pairs={n_pairs} output_bytes={output_path.stat().st_size} "
+                f"dataset_chunk_rows={dataset_chunk_rows} "
+                f"write_chunk_rows={compact_chunk_rows} "
+                "single_pass=true "
+                f"seconds={time.perf_counter() - write_start:.3f} "
+                f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
+            )
+            log_memory_checkpoint("calc_covariance_compact_written", debug=True)
+            return
+        except Exception:
+            output_path.unlink(missing_ok=True)
+            log_debug("calc_covariance compact_single_pass_failed using fallback")
+
         count_start = time.perf_counter()
         row_counts = _count_pairwise_ld_by_i_impl(
-            hap_mat, gpos_arr, ne, float(n_ind), theta, cutoff
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            ne,
+            float(n_ind),
+            theta,
+            cutoff,
         )
         n_pairs = int(row_counts.sum())
         max_pairs_per_locus = int(row_counts.max(initial=0))
@@ -566,6 +747,8 @@ def calc_covariance(
             row_chunks=_compact_pair_chunks(
                 hap_mat,
                 gpos_arr,
+                hap_sums,
+                j_stop_by_i,
                 pos_arr,
                 row_counts,
                 ne,
@@ -581,6 +764,7 @@ def calc_covariance(
             f"n_pairs={n_pairs} output_bytes={output_path.stat().st_size} "
             f"dataset_chunk_rows={dataset_chunk_rows} "
             f"write_chunk_rows={compact_chunk_rows} "
+            "single_pass=false "
             f"seconds={time.perf_counter() - write_start:.3f} "
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
         )
@@ -590,7 +774,7 @@ def calc_covariance(
     # --- compute pairwise LD (Numba-accelerated when available) ---
     pair_start = time.perf_counter()
     ii, jj, d_naive_arr, ds2_arr = _pairwise_ld_impl(
-        hap_mat, gpos_arr, ne, float(n_ind), theta, cutoff
+        hap_mat, gpos_arr, hap_sums, j_stop_by_i, ne, float(n_ind), theta, cutoff
     )
     log_debug(
         "calc_covariance pair_arrays_materialized "
