@@ -1,7 +1,7 @@
 population: EUR
-chromosomes: [21, 22]
-case_chromosome: 22
-control_chromosome: 21
+chromosomes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+case_chromosome: 10
+control_chromosome: 13
 high_precision: false
 covariance_cache: compact
 subset: fourier_ls
@@ -15,7 +15,7 @@ omni_chromosomes: [10]
 omni_maps_base_url: "https://raw.githubusercontent.com/joepickrell/1000-genomes-genetic-maps/master/interpolated_OMNI"
 omni_map_filename_template: "chr{chrom}.OMNI.interpolated_genetic_map.gz"
 
-# Fallback for the now-unavailable nygcresearch Bitbucket account. This mirror
+# Fallback for the nygcresearch Bitbucket account. This mirror
 # contains the EUR genome-wide fourier_ls all-BED used by JASS.
 ldetect_ref_fallback_urls:
   EUR: "https://gitlab.pasteur.fr/statistical-genetics/jass/-/raw/7b88d5c53dd7418bbc5f43ad366c0a387a7ed69c/data/fourier_ls-all.bed"
