@@ -35,6 +35,11 @@ configfile: "config.yaml"
 CHROMS = config["chromosomes"]
 POPS = list(config["populations"].keys())
 RUN_TIMESTAMP = config.get("run_timestamp", datetime.now().strftime("%Y%m%dT%H%M%S"))
+RUNTIME_BENCHMARK = bool(config.get("runtime_benchmark", False))
+RUNTIME_POP = config.get("runtime_benchmark_population", POPS[0])
+RUNTIME_CHROM = str(config.get("runtime_benchmark_chromosome", CHROMS[-1]))
+RUNTIME_START = int(config.get("runtime_benchmark_start", 39967768))
+RUNTIME_END = int(config.get("runtime_benchmark_end", 40067768))
 RAW_DIR = Path(config["raw_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
@@ -52,6 +57,12 @@ def pop_subpops(population):
     return config["populations"][population]["subpops"]
 
 
+def runtime_benchmark_targets():
+    if not RUNTIME_BENCHMARK:
+        return []
+    return [str(RESULTS / "runtime_benchmark" / "direct_vs_matrix_vector.tsv")]
+
+
 # ---------------------------------------------------------------------------
 # Target rule
 # ---------------------------------------------------------------------------
@@ -64,6 +75,7 @@ rule all:
             str(RESULTS / "compare" / "{population}_block_comparison.tsv"),
             population=POPS,
         ),
+        runtime_benchmark_targets(),
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +251,7 @@ rule run_ldetect2:
         cutoff=config["cov_cutoff"],
         cov_workers=config["cov_workers"],
         covariance_cache=config.get("covariance_cache", "compact"),
+        vector_mode=config.get("vector_mode", "matrix"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
         metric_workers=config.get("metric_workers", 1),
@@ -256,12 +269,134 @@ rule run_ldetect2:
             --ne {params.ne} \
             --cov-cutoff {params.cutoff} \
             --covariance-cache {params.covariance_cache} \
+            --vector-mode {params.vector_mode} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.cov_workers} \
             --metric-workers {params.metric_workers} \
             --local-search-workers {params.local_search_workers} \
             >{log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 3b: Runtime benchmark for direct vector vs covariance+matrix-to-vector
+# ---------------------------------------------------------------------------
+
+
+RUNTIME_DIR = RESULTS / "runtime_benchmark" / RUNTIME_POP / RUNTIME_CHROM
+RUNTIME_REGION = f"{RUNTIME_CHROM}:{RUNTIME_START}-{RUNTIME_END}"
+RUNTIME_STORE = RUNTIME_DIR / "matrix"
+RUNTIME_H5 = (
+    RUNTIME_STORE
+    / RUNTIME_CHROM
+    / f"{RUNTIME_CHROM}.{RUNTIME_START}.{RUNTIME_END}.h5"
+)
+RUNTIME_PARTS = RUNTIME_STORE / f"{RUNTIME_CHROM}_partitions.txt"
+RUNTIME_MATRIX_VECTOR = RUNTIME_DIR / f"matrix-vector-{RUNTIME_CHROM}.txt.gz"
+RUNTIME_DIRECT_VECTOR = RUNTIME_DIR / f"direct-vector-{RUNTIME_CHROM}.txt.gz"
+
+
+rule benchmark_matrix_vector:
+    input:
+        genetic_map=str(MAPS_DIR / f"chr{RUNTIME_CHROM}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.format(population=RUNTIME_POP, chrom=RUNTIME_CHROM),
+        tbi=FILT_VCF.format(population=RUNTIME_POP, chrom=RUNTIME_CHROM) + ".tbi",
+        individuals=str(RES_DIR / f"{RUNTIME_POP}_inds.txt"),
+    output:
+        vector=str(RUNTIME_MATRIX_VECTOR),
+        h5=str(RUNTIME_H5),
+        parts=str(RUNTIME_PARTS),
+    log:
+        str(RUNTIME_DIR / "matrix-vector.time.log"),
+    benchmark:
+        str(RUNTIME_DIR / "matrix-vector.benchmark.tsv")
+    params:
+        store=str(RUNTIME_STORE),
+        h5_dir=str(RUNTIME_H5.parent),
+        region=RUNTIME_REGION,
+        chrom=RUNTIME_CHROM,
+        start=RUNTIME_START,
+        end=RUNTIME_END,
+        ne=lambda wc: pop_ne(RUNTIME_POP),
+        cutoff=config["cov_cutoff"],
+    shell:
+        """
+        mkdir -p {params.h5_dir}
+        printf "{params.start} {params.end}\\n" >{output.parts}
+        /usr/bin/time -v -o {log} sh -c '
+            tabix -h {input.vcf} {params.region} | \
+                {LDETECT2} calc-covariance \
+                    --genetic-map {input.genetic_map} \
+                    --individuals {input.individuals} \
+                    --output {output.h5} \
+                    --ne {params.ne} \
+                    --cutoff {params.cutoff}
+            {LDETECT2} matrix-to-vector \
+                --dataset-path {params.store} \
+                --name {params.chrom} \
+                --output {output.vector}
+        '
+        """
+
+
+rule benchmark_direct_vector:
+    input:
+        genetic_map=str(MAPS_DIR / f"chr{RUNTIME_CHROM}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.format(population=RUNTIME_POP, chrom=RUNTIME_CHROM),
+        tbi=FILT_VCF.format(population=RUNTIME_POP, chrom=RUNTIME_CHROM) + ".tbi",
+        individuals=str(RES_DIR / f"{RUNTIME_POP}_inds.txt"),
+    output:
+        vector=str(RUNTIME_DIRECT_VECTOR),
+    log:
+        str(RUNTIME_DIR / "direct-vector.time.log"),
+    benchmark:
+        str(RUNTIME_DIR / "direct-vector.benchmark.tsv")
+    params:
+        region=RUNTIME_REGION,
+        ne=lambda wc: pop_ne(RUNTIME_POP),
+        cutoff=config["cov_cutoff"],
+    shell:
+        """
+        mkdir -p $(dirname {output.vector})
+        /usr/bin/time -v -o {log} sh -c '
+            tabix -h {input.vcf} {params.region} | \
+                {LDETECT2} calc-covariance \
+                    --genetic-map {input.genetic_map} \
+                    --individuals {input.individuals} \
+                    --vector-output {output.vector} \
+                    --ne {params.ne} \
+                    --cutoff {params.cutoff}
+        '
+        """
+
+
+rule compare_vector_runtime:
+    input:
+        matrix_vector=str(RUNTIME_MATRIX_VECTOR),
+        direct_vector=str(RUNTIME_DIRECT_VECTOR),
+        matrix_benchmark=str(RUNTIME_DIR / "matrix-vector.benchmark.tsv"),
+        direct_benchmark=str(RUNTIME_DIR / "direct-vector.benchmark.tsv"),
+    output:
+        str(RESULTS / "runtime_benchmark" / "direct_vs_matrix_vector.tsv"),
+    params:
+        population=RUNTIME_POP,
+        chrom=RUNTIME_CHROM,
+        start=RUNTIME_START,
+        end=RUNTIME_END,
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        awk -v mode=matrix -v pop={params.population} -v chrom={params.chrom} \
+            -v start={params.start} -v end={params.end} \
+            'BEGIN{{OFS="\\t"}} NR==1{{next}} NR==2{{print mode,pop,chrom,start,end,$1,$2,$3,$4,$5,$6,$7,$8,$9}}' \
+            {input.matrix_benchmark} >{output}
+        awk -v mode=direct -v pop={params.population} -v chrom={params.chrom} \
+            -v start={params.start} -v end={params.end} \
+            'BEGIN{{OFS="\\t"}} NR==1{{next}} NR==2{{print mode,pop,chrom,start,end,$1,$2,$3,$4,$5,$6,$7,$8,$9}}' \
+            {input.direct_benchmark} >>{output}
+        sed -i.bak '1imode\tpopulation\tchrom\tstart\tend\ts\th:m:s\tmax_rss\tmax_vms\tmax_uss\tmax_pss\tio_in\tio_out\tmean_load' {output}
+        rm -f {output}.bak
         """
 
 

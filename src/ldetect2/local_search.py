@@ -9,6 +9,7 @@ from bisect import bisect_left
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -33,6 +34,7 @@ from ldetect2.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
+from ldetect2.io.r2_zarr import R2RowChunk, open_r2_zarr_reader
 
 _PREC = 50
 
@@ -121,6 +123,18 @@ class LocalSearchHDF5Partition:
     loci: np.ndarray
     diag_pos: np.ndarray
     diag_val: np.ndarray
+
+
+@dataclass(frozen=True)
+class LocalSearchR2ZarrPartition:
+    """Small r2 Zarr partition metadata used for chunked local search."""
+
+    start: int
+    end: int
+    name: str
+    root: object
+    source_row_count: int
+    loci: np.ndarray
 
 
 _HDF5ReaderPool = dict[tuple[str, int, int], HDF5CovariancePartitionReader]
@@ -216,6 +230,24 @@ def local_search_hdf5_partition(
             loci=reader.read_loci(),
             diag_pos=diag_pos,
             diag_val=diag_val,
+        )
+
+
+def local_search_r2_zarr_partition(
+    name: str,
+    store: CovarianceStore,
+    start: int,
+    end: int,
+) -> LocalSearchR2ZarrPartition:
+    """Load only r2 Zarr index metadata for one local-search partition."""
+    with open_r2_zarr_reader(store.root, name, start, end) as reader:
+        return LocalSearchR2ZarrPartition(
+            start=start,
+            end=end,
+            name=name,
+            root=store.root,
+            source_row_count=reader.row_count,
+            loci=reader.read_loci(),
         )
 
 
@@ -381,6 +413,36 @@ def _active_row_count_from_hdf5_partitions(
     return total
 
 
+def _active_loci_from_r2_zarr_partitions(
+    partitions: list[LocalSearchR2ZarrPartition],
+    active_min_lo: int,
+) -> np.ndarray:
+    """Return sorted unique active ``lo`` loci across r2 Zarr partition indexes."""
+    loci_arrays = []
+    for partition in partitions:
+        left = int(np.searchsorted(partition.loci, active_min_lo, side="left"))
+        if left < partition.loci.size:
+            loci_arrays.append(partition.loci[left:])
+    if not loci_arrays:
+        return np.array([], dtype=np.int64)
+    loci = np.concatenate(loci_arrays).astype(np.int64, copy=False)
+    loci.sort()
+    return _unique_sorted(loci)
+
+
+def _active_row_count_from_r2_zarr_partitions(
+    partitions: list[LocalSearchR2ZarrPartition],
+    active_min_lo: int,
+) -> int:
+    """Return an approximate active row count from r2 Zarr indexes."""
+    total = 0
+    for partition in partitions:
+        left = int(np.searchsorted(partition.loci, active_min_lo, side="left"))
+        if left < partition.loci.size:
+            total += partition.source_row_count
+    return total
+
+
 def _segment_rows_from_hdf5_partitions(
     partitions: list[LocalSearchHDF5Partition],
     active_min_lo: int,
@@ -429,6 +491,26 @@ def _iter_hdf5_canonical_segment_rows(
                 partition.path, partition.start, partition.end
             ) as reader:
                 yield from reader.iter_rows(min_lo, lo_max, chunk_rows)
+
+
+def _iter_r2_zarr_canonical_segment_rows(
+    partitions: list[LocalSearchR2ZarrPartition],
+    active_min_lo: int,
+    lo_min: int,
+    lo_max: int,
+    *,
+    chunk_rows: int = 1_000_000,
+) -> Iterator[R2RowChunk]:
+    """Yield canonical normalized r2 segment rows in partition precedence order."""
+    min_lo = max(active_min_lo, lo_min)
+    for partition in partitions:
+        with open_r2_zarr_reader(
+            Path(partition.root),
+            partition.name,
+            partition.start,
+            partition.end,
+        ) as reader:
+            yield from reader.iter_rows(min_lo, lo_max, chunk_rows)
 
 
 def _materialize_canonical_row_stream(
@@ -740,6 +822,90 @@ def _add_hdf5_segment_values(
         )
 
 
+def _add_r2_zarr_segment_values(
+    segment_loci: np.ndarray,
+    active_partitions: list[LocalSearchR2ZarrPartition],
+    active_min_lo: int,
+    snp_first: int,
+    snp_last: int,
+    snp_top: int,
+    include_snp_first: bool,
+    accumulator: DenseLocalSearchAccumulator,
+    *,
+    chunk_rows: int = 1_000_000,
+    stats: LocalSearchPrecomputeStats | None = None,
+) -> None:
+    """Stream normalized r2 Zarr segment rows into local-search accumulators."""
+    if segment_loci.size == 0:
+        return
+    if stats is not None:
+        stats.segments += 1
+        stats.hdf5_segment_loci += int(segment_loci.size)
+
+    lo_min = int(segment_loci[0])
+    lo_max = int(segment_loci[-1])
+    seen_hi_by_lo: dict[int, np.ndarray] = {}
+    if stats is not None:
+        stats.hdf5_segment_partition_reads += len(active_partitions)
+    chunk_iter = _iter_r2_zarr_canonical_segment_rows(
+        active_partitions,
+        active_min_lo,
+        lo_min,
+        lo_max,
+        chunk_rows=chunk_rows,
+    )
+    while True:
+        read_start = time.perf_counter()
+        try:
+            chunk = next(chunk_iter)
+        except StopIteration:
+            break
+        if stats is not None:
+            stats.hdf5_read_seconds += time.perf_counter() - read_start
+            stats.rows_read += int(chunk.lo.size)
+            stats.hdf5_read_calls += 1
+            stats.peak_chunk_rows = max(stats.peak_chunk_rows, int(chunk.lo.size))
+
+        filter_start = time.perf_counter()
+        eligible = (chunk.lo <= snp_last) & (chunk.hi <= snp_top)
+        if include_snp_first:
+            eligible &= chunk.lo >= snp_first
+        else:
+            eligible &= chunk.lo > snp_first
+        if stats is not None:
+            stats.chunk_filter_seconds += time.perf_counter() - filter_start
+            stats.rows_after_filter += int(np.count_nonzero(eligible))
+        if not np.any(eligible):
+            continue
+
+        row_lo = chunk.lo[eligible]
+        row_hi = chunk.hi[eligible]
+        row_r2 = chunk.r2[eligible]
+
+        dedup_start = time.perf_counter()
+        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
+        if stats is not None:
+            stats.dedup_seconds += time.perf_counter() - dedup_start
+            stats.duplicate_rows_skipped += int(
+                row_lo.size - np.count_nonzero(first_seen)
+            )
+        if not np.any(first_seen):
+            continue
+
+        row_lo = row_lo[first_seen]
+        row_hi = row_hi[first_seen]
+        row_r2 = row_r2[first_seen]
+        if stats is not None:
+            kept = int(row_lo.size)
+            stats.candidate_rows += kept
+            stats.eligible_rows += kept
+            stats.rows_after_dedup += kept
+            stats.normalized_rows += kept
+            stats.chunks += 1
+
+        _add_r2_row_chunk_values(row_lo, row_hi, row_r2, accumulator, stats=stats)
+
+
 def _first_seen_pair_mask(
     row_lo: np.ndarray,
     row_hi: np.ndarray,
@@ -773,6 +939,31 @@ def _first_seen_pair_mask(
         if new_hi.size:
             seen_hi_by_lo[locus] = np.union1d(seen, new_hi)
     return keep
+
+
+def _add_r2_row_chunk_values(
+    row_lo: np.ndarray,
+    row_hi: np.ndarray,
+    row_r2: np.ndarray,
+    accumulator: DenseLocalSearchAccumulator,
+    *,
+    stats: LocalSearchPrecomputeStats | None = None,
+) -> None:
+    """Add already-normalized r2 rows to local-search sums."""
+    normalize_start = time.perf_counter()
+    r2 = np.asarray(row_r2, dtype=np.float64)
+    if stats is not None:
+        stats.normalize_seconds += time.perf_counter() - normalize_start
+
+    vertical_start = time.perf_counter()
+    accumulator.add_vertical(row_lo, r2)
+    if stats is not None:
+        stats.vertical_seconds += time.perf_counter() - vertical_start
+
+    horizontal_start = time.perf_counter()
+    accumulator.add_horizontal(row_hi, r2)
+    if stats is not None:
+        stats.horizontal_seconds += time.perf_counter() - horizontal_start
 
 
 def _add_row_chunk_values(
@@ -870,6 +1061,8 @@ class LocalSearch:
         local_search_partitions: tuple[LocalSearchPartition, ...] | None = None,
         local_search_hdf5_partitions: tuple[LocalSearchHDF5Partition, ...]
         | None = None,
+        local_search_r2_zarr_partitions: tuple[LocalSearchR2ZarrPartition, ...]
+        | None = None,
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -892,6 +1085,7 @@ class LocalSearch:
         self.covariance_cache = covariance_cache
         self.local_search_partitions = local_search_partitions
         self.local_search_hdf5_partitions = local_search_hdf5_partitions
+        self.local_search_r2_zarr_partitions = local_search_r2_zarr_partitions
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -1111,7 +1305,18 @@ class LocalSearch:
         """Precompute local-search deltas with exact legacy locus semantics."""
         log_debug("Start local search init (array)")
         self.precompute_stats = LocalSearchPrecomputeStats()
-        if self.local_search_hdf5_partitions is not None:
+        if self.local_search_r2_zarr_partitions is not None:
+            self.loaded_partition_count = len(self.local_search_r2_zarr_partitions)
+            self.loaded_row_count = int(
+                sum(
+                    partition.source_row_count
+                    for partition in self.local_search_r2_zarr_partitions
+                )
+            )
+            loci, sum_vert, sum_horiz = self._precompute_array_from_r2_zarr_partitions(
+                self.local_search_r2_zarr_partitions
+            )
+        elif self.local_search_hdf5_partitions is not None:
             self.loaded_partition_count = len(self.local_search_hdf5_partitions)
             self.loaded_row_count = int(
                 sum(
@@ -1528,6 +1733,160 @@ class LocalSearch:
                 self.initial_breakpoint_index == 0,
                 accumulator,
                 readers_by_partition=readers_by_partition,
+                stats=self.precompute_stats,
+            )
+            self.precompute_stats.accumulator_seconds += (
+                time.perf_counter() - accumulator_start
+            )
+        self.start_locus = start_locus
+        self.start_locus_index = start_locus_index
+        self.end_locus = end_locus
+        self.end_locus_index = end_locus_index
+        return loci, accumulator.sum_vert, accumulator.sum_horiz
+
+    def _precompute_array_from_r2_zarr_partitions(
+        self,
+        local_partitions: tuple[LocalSearchR2ZarrPartition, ...],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Precompute local-search arrays from normalized r2 Zarr row chunks."""
+        active_partitions: list[LocalSearchR2ZarrPartition] = []
+        active_min_lo = -2**63
+        active_loci = np.array([], dtype=np.int64)
+        precomputed_loci: list[int] = []
+        planned_segments: list[_LocalSearchSegment] = []
+
+        last_p_num = -1
+        for p_num_init in range(len(local_partitions) - 1):
+            if self.snp_bottom >= local_partitions[p_num_init + 1].start:
+                append_start = time.perf_counter()
+                active_partitions.append(local_partitions[p_num_init])
+                active_loci = _active_loci_from_r2_zarr_partitions(
+                    active_partitions, active_min_lo
+                )
+                self.precompute_stats.append_seconds += (
+                    time.perf_counter() - append_start
+                )
+                self.precompute_stats.active_rows_peak = max(
+                    self.precompute_stats.active_rows_peak,
+                    _active_row_count_from_r2_zarr_partitions(
+                        active_partitions, active_min_lo
+                    ),
+                )
+                last_p_num = p_num_init
+            else:
+                break
+
+        curr_locus = -1
+        start_locus = -1
+        start_locus_index = -1
+        end_locus = -1
+        end_locus_index = -1
+
+        for p_num in range(last_p_num + 1, len(local_partitions)):
+            append_start = time.perf_counter()
+            active_partitions.append(local_partitions[p_num])
+            active_loci = _active_loci_from_r2_zarr_partitions(
+                active_partitions, active_min_lo
+            )
+            self.precompute_stats.append_seconds += time.perf_counter() - append_start
+            self.precompute_stats.active_rows_peak = max(
+                self.precompute_stats.active_rows_peak,
+                _active_row_count_from_r2_zarr_partitions(
+                    active_partitions, active_min_lo
+                ),
+            )
+
+            if curr_locus < 0:
+                if active_loci.size == 0:
+                    raise RuntimeError("locus_list is empty")
+                curr_locus_index = int(
+                    np.searchsorted(active_loci, self.snp_bottom, side="left")
+                )
+                if curr_locus_index >= active_loci.size:
+                    log_debug(
+                        "Warning: curr_locus not found in partition "
+                        f"{self.partitions[p_num]} (snp_bottom={self.snp_bottom}); "
+                        "skipping"
+                    )
+                    continue
+                curr_locus = int(active_loci[curr_locus_index])
+                start_locus = curr_locus
+                start_locus_index = curr_locus_index
+            else:
+                curr_locus_index = int(
+                    np.searchsorted(active_loci, curr_locus, side="left")
+                )
+                if (
+                    curr_locus_index >= active_loci.size
+                    or int(active_loci[curr_locus_index]) != curr_locus
+                ):
+                    if active_loci.size == 0:
+                        raise RuntimeError("locus_list is empty")
+                    curr_locus_index = 0
+                    curr_locus = int(active_loci[0])
+
+            if p_num + 1 < len(local_partitions):
+                end_locus = local_partitions[p_num + 1].start
+                end_locus_index = -1
+            else:
+                end_idx = int(np.searchsorted(active_loci, self.snp_last, side="right"))
+                if end_idx > 0:
+                    end_locus_index = end_idx - 1
+                    end_locus = int(active_loci[end_locus_index])
+                else:
+                    end_locus_index = 0
+                    end_locus = int(active_loci[0])
+
+            segment_end_idx = int(
+                np.searchsorted(active_loci, end_locus, side="right")
+            )
+            if curr_locus_index < segment_end_idx:
+                segment_loci = active_loci[curr_locus_index:segment_end_idx]
+                loci_start = len(precomputed_loci)
+                precomputed_loci.extend(int(locus) for locus in segment_loci)
+                planned_segments.append(
+                    _LocalSearchSegment(
+                        loci_start=loci_start,
+                        loci_stop=len(precomputed_loci),
+                        active_min_lo=active_min_lo,
+                        active_partitions=tuple(active_partitions),
+                    )
+                )
+
+                if segment_end_idx < active_loci.size:
+                    curr_locus_index = segment_end_idx
+                    curr_locus = int(active_loci[curr_locus_index])
+                else:
+                    log_debug("curr_locus_index out of bounds")
+                    break
+
+            active_min_lo = end_locus
+            active_partitions = [
+                partition
+                for partition in active_partitions
+                if partition.end >= active_min_lo
+            ]
+            active_loci = _active_loci_from_r2_zarr_partitions(
+                active_partitions, active_min_lo
+            )
+
+        loci = np.asarray(precomputed_loci, dtype=np.int64)
+        accumulator = DenseLocalSearchAccumulator(loci, self.precompute_stats)
+        for segment in planned_segments:
+            segment_loci = loci[segment.loci_start : segment.loci_stop]
+            if segment_loci.size == 0:
+                continue
+            active_partition_list = list(segment.active_partitions)
+            accumulator_start = time.perf_counter()
+            _add_r2_zarr_segment_values(
+                segment_loci,
+                active_partition_list,
+                segment.active_min_lo,
+                self.snp_first,
+                self.snp_last,
+                self.snp_top,
+                self.initial_breakpoint_index == 0,
+                accumulator,
                 stats=self.precompute_stats,
             )
             self.precompute_stats.accumulator_seconds += (

@@ -2,7 +2,8 @@
 
 Usage:
     uv run python benchmarks/bench_ld_kernel.py
-    uv run python benchmarks/bench_ld_kernel.py --n-snps 100 200 500 --n-haps 200 400 800
+    uv run python benchmarks/bench_ld_kernel.py --n-snps 100 200 500
+        --n-haps 200 400 800
     uv run python benchmarks/bench_ld_kernel.py --plot speedup.png
 """
 

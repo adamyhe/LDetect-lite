@@ -1,0 +1,288 @@
+"""Real-data exactness and runtime comparison for ldetect2 pair-cache modes.
+
+This workflow compares:
+    matrix_hdf5: compact HDF5 covariance + matrix-to-vector
+    direct_hdf5: compact HDF5 covariance + direct vector fragments
+    r2_zarr: experimental normalized r2 Zarr cache + direct vector fragments
+
+The workflow intentionally lives outside ldetect_example/ldetect_original:
+it is an experimental backend benchmark, not a toy fixture reproduction or the
+published-block reproduction pipeline.
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+
+
+CHROMS = [str(chrom) for chrom in config["chromosomes"]]
+POP = config["population"]
+SUBPOPS = config["subpops"]
+MODES = config.get("modes", ["matrix_hdf5", "direct_hdf5", "r2_zarr"])
+BASELINE_MODE = config.get("baseline_mode", "matrix_hdf5")
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+PYTHON = config.get("python_command", "uv run python")
+LDETECT2 = config.get("ldetect2_command", "uv run ldetect2")
+
+MODE_ARGS = {
+    "matrix_hdf5": "--covariance-cache compact --vector-mode matrix --pair-cache hdf5",
+    "direct_hdf5": "--covariance-cache compact --vector-mode direct --pair-cache hdf5",
+    "r2_zarr": "--covariance-cache compact --pair-cache r2-zarr",
+}
+
+if BASELINE_MODE not in MODES:
+    raise ValueError("baseline_mode must be included in modes")
+unknown_modes = sorted(set(MODES) - set(MODE_ARGS))
+if unknown_modes:
+    raise ValueError(f"Unsupported mode(s): {', '.join(unknown_modes)}")
+
+
+def run_dir(mode, population, chrom):
+    return RESULTS / "runs" / mode / population / chrom
+
+
+def vector_path(mode, population, chrom):
+    return run_dir(mode, population, chrom) / f"vector-{chrom}.txt.gz"
+
+
+def breakpoints_path(mode, population, chrom):
+    return run_dir(mode, population, chrom) / f"breakpoints-{chrom}.json"
+
+
+def bed_path(mode, population, chrom):
+    return run_dir(mode, population, chrom) / f"{chrom}-ld-blocks.bed"
+
+
+def benchmark_path(mode, population, chrom):
+    return RESULTS / "benchmarks" / mode / population / f"{chrom}.benchmark.tsv"
+
+
+def log_path(mode, population, chrom):
+    return RESULTS / "logs" / mode / population / f"{chrom}.ldetect2.log"
+
+
+def mode_inputs(kind):
+    if kind == "vector":
+        return lambda wc: [
+            str(vector_path(mode, wc.population, wc.chrom)) for mode in MODES
+        ]
+    if kind == "breakpoints":
+        return lambda wc: [
+            str(breakpoints_path(mode, wc.population, wc.chrom)) for mode in MODES
+        ]
+    if kind == "bed":
+        return lambda wc: [str(bed_path(mode, wc.population, wc.chrom)) for mode in MODES]
+    if kind == "benchmark":
+        return lambda wc: [
+            str(benchmark_path(mode, wc.population, wc.chrom)) for mode in MODES
+        ]
+    raise ValueError(kind)
+
+
+rule all:
+    input:
+        expand(
+            str(RESULTS / "compare" / "{population}.{chrom}.exactness.tsv"),
+            population=[POP],
+            chrom=CHROMS,
+        ),
+        expand(
+            str(RESULTS / "runtime" / "{population}.{chrom}.runtime.tsv"),
+            population=[POP],
+            chrom=CHROMS,
+        ),
+
+
+rule download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = RESULTS / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR / POP / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+
+
+rule prep_individuals:
+    input:
+        panel=rules.download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", CHROMS[-1]),
+        tbi=RAW_VCF.replace("{chrom}", CHROMS[-1]) + ".tbi",
+    output:
+        str(RES_DIR / f"{POP}_inds.txt"),
+    params:
+        subpops=" ".join(SUBPOPS),
+    shell:
+        """
+        {PYTHON} ../ldetect_original/scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / f"{POP}_inds.txt"),
+    output:
+        vcf=FILT_VCF.replace("{chrom}", "{chrom}"),
+        tbi=FILT_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+rule run_ldetect2_mode:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.replace("{chrom}", "{chrom}"),
+        tbi=FILT_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / f"{POP}_inds.txt"),
+    output:
+        vector=str(
+            RESULTS
+            / "runs"
+            / "{mode}"
+            / "{population}"
+            / "{chrom}"
+            / "vector-{chrom}.txt.gz"
+        ),
+        breakpoints=str(
+            RESULTS
+            / "runs"
+            / "{mode}"
+            / "{population}"
+            / "{chrom}"
+            / "breakpoints-{chrom}.json"
+        ),
+        bed=str(
+            RESULTS
+            / "runs"
+            / "{mode}"
+            / "{population}"
+            / "{chrom}"
+            / "{chrom}-ld-blocks.bed"
+        ),
+    log:
+        str(RESULTS / "logs" / "{mode}" / "{population}" / "{chrom}.ldetect2.log"),
+    benchmark:
+        str(
+            RESULTS
+            / "benchmarks"
+            / "{mode}"
+            / "{population}"
+            / "{chrom}.benchmark.tsv"
+        )
+    threads: config.get("ldetect2_job_threads", config["cov_workers"])
+    params:
+        output_dir=lambda wc: str(run_dir(wc.mode, wc.population, wc.chrom)),
+        benchmark_dir=lambda wc: str(
+            benchmark_path(wc.mode, wc.population, wc.chrom).parent
+        ),
+        mode_args=lambda wc: MODE_ARGS[wc.mode],
+        ne=config["ne"],
+        cutoff=config["cov_cutoff"],
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config["subset"],
+        cov_workers=config["cov_workers"],
+        metric_workers=config.get("metric_workers", 1),
+        local_search_workers=config.get("local_search_workers", 1),
+        all_subsets=(
+            "--all-breakpoint-subsets"
+            if bool(config.get("all_breakpoint_subsets", False))
+            else ""
+        ),
+    shell:
+        """
+        mkdir -p $(dirname {log}) {params.benchmark_dir}
+        {LDETECT2} run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            {params.mode_args} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --metric-workers {params.metric_workers} \
+            --local-search-workers {params.local_search_workers} \
+            {params.all_subsets} \
+            >{log} 2>&1
+        """
+
+
+rule compare_modes:
+    input:
+        vectors=mode_inputs("vector"),
+        breakpoints=mode_inputs("breakpoints"),
+        beds=mode_inputs("bed"),
+        benchmarks=mode_inputs("benchmark"),
+    output:
+        exactness=str(RESULTS / "compare" / "{population}.{chrom}.exactness.tsv"),
+        runtime=str(RESULTS / "runtime" / "{population}.{chrom}.runtime.tsv"),
+    params:
+        modes=" ".join(MODES),
+        baseline=BASELINE_MODE,
+        subset=config["subset"],
+    shell:
+        """
+        {PYTHON} scripts/compare_run_modes.py \
+            --modes {params.modes} \
+            --baseline {params.baseline} \
+            --subset {params.subset} \
+            --vectors {input.vectors} \
+            --breakpoints {input.breakpoints} \
+            --beds {input.beds} \
+            --benchmarks {input.benchmarks} \
+            --exactness-output {output.exactness} \
+            --runtime-output {output.runtime}
+        """

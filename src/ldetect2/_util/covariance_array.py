@@ -12,6 +12,7 @@ import numpy as np
 from ldetect2._util.logging import log_debug
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
+from ldetect2.io.r2_zarr import open_r2_zarr_reader
 
 _DEFAULT_CHUNK_ROWS = 1_000_000
 _METRIC_WORKER_BREAKPOINTS: np.ndarray | None = None
@@ -450,6 +451,111 @@ def metric_from_files(
         f"worker_merge_seconds={worker_merge_seconds:.6f} "
         f"row_read_seconds={row_read_seconds:.6f} "
         f"normalize_seconds={normalize_seconds:.6f} "
+        f"crossing_seconds={crossing_seconds:.6f}"
+    )
+    return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
+
+
+def metric_from_r2_zarr_files(
+    name: str,
+    store: CovarianceStore,
+    partitions: list[tuple[int, int]],
+    snp_first: int,
+    snp_last: int,
+    breakpoints: list[int],
+    workers: int = 1,
+) -> dict:
+    """Compute the LD block metric from normalized r2 Zarr partitions."""
+    bp = np.asarray(breakpoints, dtype=np.int64)
+    if bp.size == 0:
+        return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
+
+    loci_chunks: list[np.ndarray] = []
+    index_read_seconds = 0.0
+    row_read_seconds = 0.0
+    crossing_seconds = 0.0
+    rows_read = 0
+    pair_rows = 0
+    crossing_rows = 0
+
+    for p_index, (start, end) in enumerate(partitions):
+        lower_min, lower_max, include_lower_min = _owned_bounds(
+            partitions, p_index, snp_first, snp_last
+        )
+        with open_r2_zarr_reader(store.root, name, start, end) as reader:
+            index_start = time.perf_counter()
+            loci = reader.read_loci()
+            lower_owned = loci >= lower_min if include_lower_min else loci > lower_min
+            loci_in_range = (
+                (loci >= snp_first)
+                & (loci <= snp_last)
+                & lower_owned
+                & (loci <= lower_max)
+            )
+            if np.any(loci_in_range):
+                loci_chunks.append(loci[loci_in_range])
+            index_read_seconds += time.perf_counter() - index_start
+
+    if not loci_chunks:
+        return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
+
+    loci = np.unique(np.concatenate(loci_chunks))
+    n_zero = _metric_n_zero(loci, bp)
+    total_sum = 0.0
+    n_nonzero = 0
+
+    if workers > 1 and len(partitions) > 1:
+        log_debug(
+            "metric_from_r2_zarr_files currently streams in one process; "
+            f"ignoring workers={workers}"
+        )
+
+    for p_index, (start, end) in enumerate(partitions):
+        lower_min, lower_max, include_lower_min = _owned_bounds(
+            partitions, p_index, snp_first, snp_last
+        )
+        with open_r2_zarr_reader(store.root, name, start, end) as reader:
+            chunk_iter = reader.iter_owned_rows(
+                lower_min,
+                lower_max,
+                snp_first,
+                snp_last,
+                _DEFAULT_CHUNK_ROWS,
+                include_lower_min=include_lower_min,
+            )
+            while True:
+                read_start = time.perf_counter()
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    break
+                row_read_seconds += time.perf_counter() - read_start
+                rows_read += int(chunk.lo.size)
+                pair_mask = chunk.lo < chunk.hi
+                if not np.any(pair_mask):
+                    continue
+                pair_i = chunk.lo[pair_mask]
+                pair_j = chunk.hi[pair_mask]
+                pair_r2 = chunk.r2[pair_mask]
+                pair_rows += int(pair_i.size)
+
+                crossing_start = time.perf_counter()
+                i_blocks = np.searchsorted(bp, pair_i, side="left")
+                j_blocks = np.searchsorted(bp, pair_j, side="left")
+                crossing = i_blocks != j_blocks
+                crossing_count = int(np.count_nonzero(crossing))
+                if crossing_count:
+                    total_sum += float(np.sum(pair_r2[crossing]))
+                    n_nonzero += crossing_count
+                    crossing_rows += crossing_count
+                crossing_seconds += time.perf_counter() - crossing_start
+
+    log_debug(
+        "metric_from_r2_zarr_files profile "
+        f"partitions={len(partitions)} rows_read={rows_read} "
+        f"pair_rows={pair_rows} crossing_rows={crossing_rows} "
+        f"index_read_seconds={index_read_seconds:.6f} "
+        f"row_read_seconds={row_read_seconds:.6f} "
         f"crossing_seconds={crossing_seconds:.6f}"
     )
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}

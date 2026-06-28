@@ -23,6 +23,10 @@ results_dir: results
 # ldetect2 parameters
 cov_cutoff: 0.0000001
 covariance_cache: compact
+# matrix = existing covariance-cache matrix-to-vector path.
+# direct = compute ownership-bounded direct vector fragments during covariance
+#          calculation, then concatenate them for Step 3.
+vector_mode: matrix
 n_snps_bw_bpoints: 10000
 subset: fourier_ls
 cov_workers: 4

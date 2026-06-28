@@ -7,7 +7,7 @@ joe_map = Path("ldetect_original/data/maps/chr2.interpolated_genetic_map.gz")
 
 def read_map(p):
     with gzip.open(p, "rt") as f:
-        rows = [l.split() for l in f]
+        rows = [line.split() for line in f]
     positions = {int(r[1]): float(r[2]) for r in rows}
     return positions
 

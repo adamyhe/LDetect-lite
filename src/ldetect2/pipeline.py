@@ -22,7 +22,11 @@ from ldetect2._util.memory import log_memory_checkpoint, max_rss_mib
 from ldetect2.filters import apply_filter, apply_filter_get_minima, get_minima_loc
 from ldetect2.find_minima import custom_binary_search_with_trackback
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
-from ldetect2.local_search import LocalSearch, local_search_hdf5_partition
+from ldetect2.local_search import (
+    LocalSearch,
+    local_search_hdf5_partition,
+    local_search_r2_zarr_partition,
+)
 from ldetect2.metric import Metric
 
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
@@ -49,6 +53,7 @@ def find_breakpoints(
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
     subsets: set[str] | None = None,
+    pair_cache: str = "hdf5",
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
 
@@ -87,6 +92,11 @@ def find_breakpoints(
         subsets: Optional breakpoint subsets to compute and write.  ``None``
             preserves the historical behavior and writes all four subsets.
     """
+    if pair_cache != "hdf5" and use_decimal:
+        raise ValueError(
+            "Experimental r2-zarr pair cache does not support Decimal mode"
+        )
+
     requested_subsets, explicit_subsets = _normalise_subsets(subsets)
     needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
     needs_uniform = bool(requested_subsets & {"uniform", "uniform_ls"})
@@ -144,6 +154,7 @@ def find_breakpoints(
             use_decimal,
             metric_cov,
             metric_workers,
+            pair_cache,
         )
         _log_metric(fourier_metric)
         log_memory_checkpoint("fourier_metric_end")
@@ -165,6 +176,7 @@ def find_breakpoints(
             use_decimal,
             metric_cov,
             metric_workers,
+            pair_cache,
         )
         _log_metric(uniform_metric)
         log_memory_checkpoint("uniform_metric_end")
@@ -189,6 +201,7 @@ def find_breakpoints(
             use_decimal=use_decimal,
             covariance_cache=covariance_cache,
             subset_name="fourier_ls",
+            pair_cache=pair_cache,
         )
         log_memory_checkpoint("fourier_local_search_end")
     # 7. Local search on uniform
@@ -209,6 +222,7 @@ def find_breakpoints(
             use_decimal=use_decimal,
             covariance_cache=covariance_cache,
             subset_name="uniform_ls",
+            pair_cache=pair_cache,
         )
         log_memory_checkpoint("uniform_local_search_end")
     fourier_ls_metric = None
@@ -223,6 +237,7 @@ def find_breakpoints(
             use_decimal,
             metric_cov,
             metric_workers,
+            pair_cache,
         )
         log_memory_checkpoint("fourier_ls_metric_end")
     uniform_ls_metric = None
@@ -237,6 +252,7 @@ def find_breakpoints(
             use_decimal,
             metric_cov,
             metric_workers,
+            pair_cache,
         )
         log_memory_checkpoint("uniform_ls_metric_end")
 
@@ -335,8 +351,9 @@ def _apply_metric(
     use_decimal: bool = False,
     covariance_arrays=None,
     metric_workers: int = 1,
+    pair_cache: str = "hdf5",
 ) -> dict:
-    if covariance_arrays is not None and not use_decimal:
+    if covariance_arrays is not None and not use_decimal and pair_cache == "hdf5":
         return metric_from_arrays(covariance_arrays, loci)
     m = Metric(
         chr_name,
@@ -346,6 +363,7 @@ def _apply_metric(
         snp_last,
         use_decimal=use_decimal,
         workers=metric_workers,
+        pair_cache=pair_cache,
     )
     return m.calc_metric()
 
@@ -378,6 +396,7 @@ def _local_search_worker(
     covariance_cache: ChromosomeCovariance | None = None,
     local_search_partitions=None,
     local_search_hdf5_partitions=None,
+    local_search_r2_zarr_partitions=None,
     subset_name: str = "local_search",
 ) -> tuple[int, dict | None]:
     """Run one breakpoint refinement and emit debug timing/memory diagnostics.
@@ -405,6 +424,7 @@ def _local_search_worker(
             covariance_cache=covariance_cache,
             local_search_partitions=local_search_partitions,
             local_search_hdf5_partitions=local_search_hdf5_partitions,
+            local_search_r2_zarr_partitions=local_search_r2_zarr_partitions,
         )
         init_start = time.perf_counter()
         ls.init_search()
@@ -449,6 +469,7 @@ def _run_local_search(
     use_decimal: bool = False,
     covariance_cache: ChromosomeCovariance | None = None,
     subset_name: str = "local_search",
+    pair_cache: str = "hdf5",
 ) -> dict:
     """Refine all breakpoints for one subset and log aggregate elapsed time.
 
@@ -481,7 +502,7 @@ def _run_local_search(
 
     results: dict[int, tuple[int, dict | None]] = {}
 
-    if covariance_cache is not None and not use_decimal:
+    if covariance_cache is not None and not use_decimal and pair_cache == "hdf5":
         if workers > 1:
             log_msg(
                 "Using cached in-memory array local search in a single process; "
@@ -507,6 +528,8 @@ def _run_local_search(
                 log_memory_checkpoint(f"{subset_name}_breakpoint0_end")
     elif workers == 1:
         if use_decimal:
+            if pair_cache != "hdf5":
+                raise ValueError("Decimal local search requires the HDF5 pair cache")
             for idx, start, stop in tasks:
                 if idx == 0:
                     log_memory_checkpoint(f"{subset_name}_breakpoint0_start")
@@ -530,14 +553,29 @@ def _run_local_search(
             )
             for partition_bounds, group in grouped_tasks:
                 group_load_start = time.perf_counter()
-                group_hdf5_partitions = tuple(
-                    local_search_hdf5_partition(chr_name, store, start, end)
-                    for start, end in partition_bounds
-                )
+                if pair_cache == "r2-zarr":
+                    group_hdf5_partitions = None
+                    group_r2_zarr_partitions = tuple(
+                        local_search_r2_zarr_partition(chr_name, store, start, end)
+                        for start, end in partition_bounds
+                    )
+                    group_row_count = sum(
+                        partition.source_row_count
+                        for partition in group_r2_zarr_partitions
+                    )
+                elif pair_cache == "hdf5":
+                    group_r2_zarr_partitions = None
+                    group_hdf5_partitions = tuple(
+                        local_search_hdf5_partition(chr_name, store, start, end)
+                        for start, end in partition_bounds
+                    )
+                    group_row_count = sum(
+                        partition.source_row_count
+                        for partition in group_hdf5_partitions
+                    )
+                else:
+                    raise ValueError(f"Unsupported pair cache backend: {pair_cache}")
                 group_load_seconds = time.perf_counter() - group_load_start
-                group_row_count = sum(
-                    partition.source_row_count for partition in group_hdf5_partitions
-                )
                 log_msg(
                     f"Local search {subset_name} group loaded: "
                     f"breakpoints={len(group)} partitions={len(partition_bounds)} "
@@ -568,11 +606,30 @@ def _run_local_search(
                         use_decimal,
                         covariance_cache=group_cache,
                         local_search_hdf5_partitions=group_hdf5_partitions,
+                        local_search_r2_zarr_partitions=group_r2_zarr_partitions,
                         subset_name=subset_name,
                     )
                     if idx == 0:
                         log_memory_checkpoint(f"{subset_name}_breakpoint0_end")
     else:
+        if pair_cache != "hdf5":
+            log_msg(
+                "Using experimental r2-zarr local search in a single process; "
+                "ignoring local-search worker parallelism"
+            )
+            return _run_local_search(
+                chr_name,
+                breakpoint_loci,
+                snp_first,
+                snp_last,
+                store,
+                metric_out,
+                workers=1,
+                use_decimal=use_decimal,
+                covariance_cache=covariance_cache,
+                subset_name=subset_name,
+                pair_cache=pair_cache,
+            )
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(

@@ -1,0 +1,40 @@
+chromosomes: [22]
+population: EUR
+subpops: [CEU, TSI, FIN, GBR, IBS]
+ne: 11418
+
+# Modes compared against the matrix_hdf5 baseline.
+modes: [matrix_hdf5, direct_hdf5, r2_zarr]
+baseline_mode: matrix_hdf5
+
+# Directories
+raw_vcf_dir: data/raw
+maps_dir: data/maps
+resources_dir: resources
+results_dir: results
+
+# ldetect2 parameters
+cov_cutoff: 0.0000001
+n_snps_bw_bpoints: 10000
+subset: fourier_ls
+cov_workers: 4
+metric_workers: 4
+local_search_workers: 1
+ldetect2_job_threads: 4
+all_breakpoint_subsets: false
+
+# Commands
+python_command: "uv run python"
+ldetect2_command: "uv run ldetect2"
+
+# 1000G Phase 1 reference panel (GRCh37, release 20110521).
+# VCF CHROM fields use bare integers (1, 2, ...) without a "chr" prefix.
+vcf_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521"
+vcf_filename_template: "ALL.chr{chrom}.phase1_release_v3.20101123.snps_indels_svs.genotypes.vcf.gz"
+
+# Panel annotation from the same release.
+panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+
+# HapMap-interpolated genetic maps, GRCh37 positions.
+maps_base_url: "https://raw.githubusercontent.com/joepickrell/1000-genomes-genetic-maps/master/interpolated_from_hapmap"
+map_filename_template: "chr{chrom}.interpolated_genetic_map.gz"

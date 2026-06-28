@@ -5,7 +5,7 @@ from __future__ import annotations
 import decimal
 from bisect import bisect_left
 
-from ldetect2._util.covariance_array import metric_from_files
+from ldetect2._util.covariance_array import metric_from_files, metric_from_r2_zarr_files
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
@@ -43,6 +43,7 @@ class Metric:
         snp_last: int = -1,
         use_decimal: bool = False,
         workers: int = 1,
+        pair_cache: str = "hdf5",
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -52,6 +53,7 @@ class Metric:
         self.breakpoints = breakpoints
         self.use_decimal = use_decimal
         self.workers = max(1, int(workers))
+        self.pair_cache = pair_cache
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -89,16 +91,30 @@ class Metric:
         return self._calc_metric_lean()
 
     def _calc_metric_array(self) -> dict:
-        log_msg("Start metric (streaming array)")
-        metric = metric_from_files(
-            self.name,
-            self.store,
-            self.partitions,
-            self.snp_first,
-            self.snp_last,
-            self.breakpoints,
-            workers=self.workers,
-        )
+        if self.pair_cache == "r2-zarr":
+            log_msg("Start metric (streaming r2-zarr)")
+            metric = metric_from_r2_zarr_files(
+                self.name,
+                self.store,
+                self.partitions,
+                self.snp_first,
+                self.snp_last,
+                self.breakpoints,
+                workers=self.workers,
+            )
+        elif self.pair_cache == "hdf5":
+            log_msg("Start metric (streaming array)")
+            metric = metric_from_files(
+                self.name,
+                self.store,
+                self.partitions,
+                self.snp_first,
+                self.snp_last,
+                self.breakpoints,
+                workers=self.workers,
+            )
+        else:
+            raise ValueError(f"Unsupported pair cache backend: {self.pair_cache}")
         log_msg(f"Metric done: sum={metric['sum']}, N_zero={metric['N_zero']}")
         self.metric = metric
         self.calculation_complete = True

@@ -13,3 +13,10 @@ bitbucket_base: "https://bitbucket.org/nygcresearch/ldetect/raw/master/ldetect/e
 ref_dir: "ref"
 work_dir: "work"
 results_dir: "results"
+
+# Optional runtime comparison from a VCF. The default reproduction uses the
+# reference covariance file because the original example VCF is not archived.
+# Set this to a local bgzipped+tabixed VCF to add a direct-vector vs
+# covariance+matrix-to-vector benchmark target.
+runtime_benchmark_reference_panel:
+runtime_benchmark_vcf_chromosome: "2"

@@ -35,11 +35,14 @@ START     = config["region_start"]
 END       = config["region_end"]
 N_INDS    = config["n_individuals"]
 NE        = config["ne"]
+COV_CUTOFF = config["cov_cutoff"]
 N_SNPS    = config["n_snps_bw_bpoints"]
 SUBSET    = config["subset"]
 BB_BASE   = config["bitbucket_base"]
 PYTHON    = config.get("python_command", "uv run python")
 LDETECT2  = config.get("ldetect2_command", "uv run ldetect2")
+RUNTIME_REFERENCE_PANEL = config.get("runtime_benchmark_reference_panel")
+RUNTIME_VCF_CHROM = config.get("runtime_benchmark_vcf_chromosome", CHROM)
 
 REF_DIR   = Path(config["ref_dir"])
 WORK_DIR  = Path(config["work_dir"])
@@ -61,6 +64,18 @@ WORK_VECTOR = WORK_DIR / f"vector-{CHROM}.txt.gz"
 WORK_BPTS   = WORK_DIR / f"breakpoints-{CHROM}.json"
 WORK_BED    = WORK_DIR / f"{CHROM}-ld-blocks.bed"
 WORK_GEN_PARTS = WORK_DIR / f"generated_partitions/{CHROM}_partitions"
+RUNTIME_DIR = WORK_DIR / "runtime_benchmark"
+RUNTIME_STORE = RUNTIME_DIR / "matrix"
+RUNTIME_H5 = RUNTIME_STORE / f"{CHROM}/{CHROM}.{START}.{END}.h5"
+RUNTIME_PARTS = RUNTIME_STORE / f"{CHROM}_partitions.txt"
+RUNTIME_MATRIX_VECTOR = RUNTIME_DIR / f"matrix-vector-{CHROM}.txt.gz"
+RUNTIME_DIRECT_VECTOR = RUNTIME_DIR / f"direct-vector-{CHROM}.txt.gz"
+
+
+def runtime_benchmark_targets():
+    if not RUNTIME_REFERENCE_PANEL:
+        return []
+    return [str(RES_DIR / "runtime_direct_vs_matrix_vector.tsv")]
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +87,7 @@ rule all:
         str(RES_DIR / "compare_vector.tsv"),
         str(RES_DIR / "compare_bpoints.tsv"),
         str(RES_DIR / "compare_bed.tsv"),
+        runtime_benchmark_targets(),
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +172,95 @@ rule matrix_to_vector:
             --dataset-path {WORK_DIR} \
             --name {CHROM} \
             --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Optional: Direct-vector runtime comparison from a configured VCF
+# ---------------------------------------------------------------------------
+
+rule runtime_matrix_vector:
+    input:
+        map_=str(REF_MAP),
+        inds=str(REF_INDS),
+    output:
+        vector=str(RUNTIME_MATRIX_VECTOR),
+        h5=str(RUNTIME_H5),
+        parts=str(RUNTIME_PARTS),
+    log:
+        str(RUNTIME_DIR / "matrix-vector.time.log"),
+    benchmark:
+        str(RUNTIME_DIR / "matrix-vector.benchmark.tsv")
+    params:
+        reference_panel=RUNTIME_REFERENCE_PANEL,
+        region=f"{RUNTIME_VCF_CHROM}:{START}-{END}",
+        store=str(RUNTIME_STORE),
+        cutoff=COV_CUTOFF,
+    shell:
+        """
+        mkdir -p $(dirname {output.h5})
+        printf "{START} {END}\\n" >{output.parts}
+        /usr/bin/time -v -o {log} sh -c '
+            tabix -h {params.reference_panel} {params.region} | \
+                {LDETECT2} calc-covariance \
+                    --genetic-map {input.map_} \
+                    --individuals {input.inds} \
+                    --output {output.h5} \
+                    --ne {NE} \
+                    --cutoff {params.cutoff}
+            {LDETECT2} matrix-to-vector \
+                --dataset-path {params.store} \
+                --name {CHROM} \
+                --output {output.vector}
+        '
+        """
+
+
+rule runtime_direct_vector:
+    input:
+        map_=str(REF_MAP),
+        inds=str(REF_INDS),
+    output:
+        vector=str(RUNTIME_DIRECT_VECTOR),
+    log:
+        str(RUNTIME_DIR / "direct-vector.time.log"),
+    benchmark:
+        str(RUNTIME_DIR / "direct-vector.benchmark.tsv")
+    params:
+        reference_panel=RUNTIME_REFERENCE_PANEL,
+        region=f"{RUNTIME_VCF_CHROM}:{START}-{END}",
+        cutoff=COV_CUTOFF,
+    shell:
+        """
+        mkdir -p $(dirname {output.vector})
+        /usr/bin/time -v -o {log} sh -c '
+            tabix -h {params.reference_panel} {params.region} | \
+                {LDETECT2} calc-covariance \
+                    --genetic-map {input.map_} \
+                    --individuals {input.inds} \
+                    --vector-output {output.vector} \
+                    --ne {NE} \
+                    --cutoff {params.cutoff}
+        '
+        """
+
+
+rule runtime_compare_vector:
+    input:
+        matrix_vector=str(RUNTIME_MATRIX_VECTOR),
+        direct_vector=str(RUNTIME_DIRECT_VECTOR),
+        matrix_benchmark=str(RUNTIME_DIR / "matrix-vector.benchmark.tsv"),
+        direct_benchmark=str(RUNTIME_DIR / "direct-vector.benchmark.tsv"),
+    output:
+        str(RES_DIR / "runtime_direct_vs_matrix_vector.tsv"),
+    shell:
+        """
+        mkdir -p {RES_DIR}
+        printf "mode\\ts\\th:m:s\\tmax_rss\\tmax_vms\\tmax_uss\\tmax_pss\\tio_in\\tio_out\\tmean_load\\n" >{output}
+        awk 'BEGIN{{OFS="\\t"}} NR==2{{print "matrix",$1,$2,$3,$4,$5,$6,$7,$8,$9}}' \
+            {input.matrix_benchmark} >>{output}
+        awk 'BEGIN{{OFS="\\t"}} NR==2{{print "direct",$1,$2,$3,$4,$5,$6,$7,$8,$9}}' \
+            {input.direct_benchmark} >>{output}
         """
 
 

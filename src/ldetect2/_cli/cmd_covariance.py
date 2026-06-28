@@ -28,10 +28,46 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     )
     p.add_argument(
         "--output",
-        required=True,
+        required=False,
         type=Path,
         metavar="PATH",
         help="Gzipped 8-column covariance output file.",
+    )
+    p.add_argument(
+        "--vector-output",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Optional gzipped direct correlation-sum vector output "
+            "(position, corr_sum), computed without materializing covariance rows."
+        ),
+    )
+    p.add_argument(
+        "--center-lower-bound",
+        type=int,
+        metavar="INT",
+        help="Only write direct-vector center loci at or above this position.",
+    )
+    p.add_argument(
+        "--center-lower-exclusive",
+        action="store_true",
+        help="Treat --center-lower-bound as exclusive for direct-vector output.",
+    )
+    p.add_argument(
+        "--center-upper-bound",
+        type=int,
+        metavar="INT",
+        help="Only write direct-vector center loci at or below this position.",
+    )
+    p.add_argument(
+        "--center-upper-exclusive",
+        action="store_true",
+        help="Treat --center-upper-bound as exclusive for direct-vector output.",
+    )
+    p.add_argument(
+        "--append-vector-output",
+        action="store_true",
+        help="Append direct-vector rows instead of truncating --vector-output.",
     )
     p.add_argument(
         "--ne",
@@ -51,14 +87,59 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.shrinkage import calc_covariance
+    from ldetect2.shrinkage import calc_covariance, calc_covariance_vector
 
-    calc_covariance(
-        vcf_stream=sys.stdin,
-        genetic_map_path=args.genetic_map,
-        individuals_path=args.individuals,
-        output_path=args.output,
-        ne=args.ne,
-        cutoff=args.cutoff,
-    )
+    if args.output is None and args.vector_output is None:
+        raise SystemExit("calc-covariance requires --output or --vector-output")
+
+    if args.output is not None and args.vector_output is not None:
+        import io
+
+        vcf_text = sys.stdin.read()
+        calc_covariance(
+            vcf_stream=io.StringIO(vcf_text),
+            genetic_map_path=args.genetic_map,
+            individuals_path=args.individuals,
+            output_path=args.output,
+            ne=args.ne,
+            cutoff=args.cutoff,
+        )
+        calc_covariance_vector(
+            vcf_stream=io.StringIO(vcf_text),
+            genetic_map_path=args.genetic_map,
+            individuals_path=args.individuals,
+            output_path=args.vector_output,
+            ne=args.ne,
+            cutoff=args.cutoff,
+            center_lower_bound=args.center_lower_bound,
+            center_lower_inclusive=not args.center_lower_exclusive,
+            center_upper_bound=args.center_upper_bound,
+            center_upper_inclusive=not args.center_upper_exclusive,
+            append_output=args.append_vector_output,
+        )
+        return 0
+
+    if args.output is not None:
+        calc_covariance(
+            vcf_stream=sys.stdin,
+            genetic_map_path=args.genetic_map,
+            individuals_path=args.individuals,
+            output_path=args.output,
+            ne=args.ne,
+            cutoff=args.cutoff,
+        )
+    else:
+        calc_covariance_vector(
+            vcf_stream=sys.stdin,
+            genetic_map_path=args.genetic_map,
+            individuals_path=args.individuals,
+            output_path=args.vector_output,
+            ne=args.ne,
+            cutoff=args.cutoff,
+            center_lower_bound=args.center_lower_bound,
+            center_lower_inclusive=not args.center_lower_exclusive,
+            center_upper_bound=args.center_upper_bound,
+            center_upper_inclusive=not args.center_upper_exclusive,
+            append_output=args.append_vector_output,
+        )
     return 0
