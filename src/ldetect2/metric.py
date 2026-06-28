@@ -42,6 +42,7 @@ class Metric:
         snp_first: int = -1,
         snp_last: int = -1,
         use_decimal: bool = False,
+        workers: int = 1,
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -50,6 +51,7 @@ class Metric:
         self.store = store
         self.breakpoints = breakpoints
         self.use_decimal = use_decimal
+        self.workers = max(1, int(workers))
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -95,6 +97,7 @@ class Metric:
             self.snp_first,
             self.snp_last,
             self.breakpoints,
+            workers=self.workers,
         )
         log_msg(f"Metric done: sum={metric['sum']}, N_zero={metric['N_zero']}")
         self.metric = metric

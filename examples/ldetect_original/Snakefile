@@ -227,6 +227,7 @@ rule run_ldetect2:
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
+        metric_workers=config.get("metric_workers", 1),
         local_search_workers=config.get("local_search_workers", 1),
     shell:
         """
@@ -244,6 +245,7 @@ rule run_ldetect2:
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.cov_workers} \
+            --metric-workers {params.metric_workers} \
             --local-search-workers {params.local_search_workers} \
             > {log.run} 2>&1
         """

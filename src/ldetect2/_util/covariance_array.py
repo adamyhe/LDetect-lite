@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -12,6 +14,9 @@ from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
 _DEFAULT_CHUNK_ROWS = 1_000_000
+_METRIC_WORKER_BREAKPOINTS: np.ndarray | None = None
+_METRIC_WORKER_DIAG_POS: np.ndarray | None = None
+_METRIC_WORKER_DIAG_VAL: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -56,6 +61,20 @@ class ChromosomeCovariance:
     r2: np.ndarray
     partitions: tuple[tuple[int, int], ...]
     partition_arrays: tuple[CovariancePartition, ...]
+
+
+@dataclass(frozen=True)
+class _MetricPartitionResult:
+    p_index: int
+    total_sum: float
+    n_nonzero: int
+    rows_read: int
+    pair_rows: int
+    normalized_rows: int
+    crossing_rows: int
+    row_read_seconds: float
+    normalize_seconds: float
+    crossing_seconds: float
 
 
 CovarianceArrays = ChromosomeCovariance
@@ -290,6 +309,7 @@ def metric_from_files(
     snp_first: int,
     snp_last: int,
     breakpoints: list[int],
+    workers: int = 1,
 ) -> dict:
     """Compute the LD block metric without materializing chromosome-wide pairs.
 
@@ -370,100 +390,290 @@ def metric_from_files(
 
     total_sum = 0.0
     n_nonzero = 0
-    for p_index, (start, end) in enumerate(partitions):
-        path = store.partition_path(name, start, end)
-        lower_min, lower_max, include_lower_min = _owned_bounds(
-            partitions, p_index, snp_first, snp_last
+    worker_wait_seconds = 0.0
+    worker_merge_seconds = 0.0
+    metric_workers = max(1, int(workers))
+    if metric_workers > 1 and len(partitions) > 1:
+        worker_start = time.perf_counter()
+        results = _metric_partition_results_parallel(
+            name=name,
+            store=store,
+            partitions=partitions,
+            snp_first=snp_first,
+            snp_last=snp_last,
+            breakpoints=bp,
+            unique_diag_pos=unique_diag_pos,
+            unique_diag_val=unique_diag_val,
+            workers=metric_workers,
         )
-        with open_covariance_reader(path, start, end) as reader:
-            chunk_iter = reader.iter_owned_rows(
-                lower_min,
-                lower_max,
-                snp_first,
-                snp_last,
-                _DEFAULT_CHUNK_ROWS,
-                include_lower_min=include_lower_min,
+        worker_wait_seconds += time.perf_counter() - worker_start
+    else:
+        results = [
+            _metric_partition_result(
+                name=name,
+                store=store,
+                partitions=partitions,
+                p_index=p_index,
+                start=start,
+                end=end,
+                snp_first=snp_first,
+                snp_last=snp_last,
+                breakpoints=bp,
+                unique_diag_pos=unique_diag_pos,
+                unique_diag_val=unique_diag_val,
             )
-            while True:
-                read_start = time.perf_counter()
-                try:
-                    chunk = next(chunk_iter)
-                except StopIteration:
-                    break
-                row_read_seconds += time.perf_counter() - read_start
-                rows_read += int(chunk.lo.size)
-                pair_mask = chunk.lo < chunk.hi
-                if not np.any(pair_mask):
-                    continue
-                pair_i = chunk.lo[pair_mask]
-                pair_j = chunk.hi[pair_mask]
-                pair_s = chunk.shrink_ld[pair_mask]
-                pair_rows += int(pair_i.size)
+            for p_index, (start, end) in enumerate(partitions)
+        ]
 
-                normalize_start = time.perf_counter()
-                diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
-                diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
-                has_diag = (diag_i_idx < unique_diag_pos.size) & (
-                    diag_j_idx < unique_diag_pos.size
-                )
-                safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
-                safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
-                has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
-                    unique_diag_pos[safe_j_idx] == pair_j
-                )
-                if not np.any(has_diag):
-                    normalize_seconds += time.perf_counter() - normalize_start
-                    continue
-
-                pair_i = pair_i[has_diag]
-                pair_j = pair_j[has_diag]
-                pair_s = pair_s[has_diag]
-                diag_i = unique_diag_val[diag_i_idx[has_diag]]
-                diag_j = unique_diag_val[diag_j_idx[has_diag]]
-
-                positive = (diag_i > 0.0) & (diag_j > 0.0)
-                if not np.any(positive):
-                    normalize_seconds += time.perf_counter() - normalize_start
-                    continue
-
-                pair_i = pair_i[positive]
-                pair_j = pair_j[positive]
-                pair_s = pair_s[positive]
-                diag_i = diag_i[positive]
-                diag_j = diag_j[positive]
-                normalized_rows += int(pair_i.size)
-                normalize_seconds += time.perf_counter() - normalize_start
-
-                crossing_start = time.perf_counter()
-                i_blocks = np.searchsorted(bp, pair_i, side="left")
-                j_blocks = np.searchsorted(bp, pair_j, side="left")
-                crossing = i_blocks != j_blocks
-                if not np.any(crossing):
-                    crossing_seconds += time.perf_counter() - crossing_start
-                    continue
-
-                r2 = (
-                    pair_s[crossing]
-                    * pair_s[crossing]
-                    / (diag_i[crossing] * diag_j[crossing])
-                )
-                total_sum += float(np.sum(r2))
-                n_nonzero += int(np.count_nonzero(crossing))
-                crossing_rows += int(np.count_nonzero(crossing))
-                crossing_seconds += time.perf_counter() - crossing_start
+    for result in results:
+        merge_start = time.perf_counter()
+        total_sum += result.total_sum
+        n_nonzero += result.n_nonzero
+        rows_read += result.rows_read
+        pair_rows += result.pair_rows
+        normalized_rows += result.normalized_rows
+        crossing_rows += result.crossing_rows
+        row_read_seconds += result.row_read_seconds
+        normalize_seconds += result.normalize_seconds
+        crossing_seconds += result.crossing_seconds
+        worker_merge_seconds += time.perf_counter() - merge_start
 
     log_debug(
         "metric_from_files profile "
         f"partitions={len(partitions)} rows_read={rows_read} pair_rows={pair_rows} "
         f"normalized_rows={normalized_rows} crossing_rows={crossing_rows} "
+        f"metric_workers={metric_workers} "
         f"index_read_seconds={index_read_seconds:.6f} "
         f"loci_index_seconds={loci_index_seconds:.6f} "
         f"diag_read_seconds={diag_read_seconds:.6f} "
+        f"worker_wait_seconds={worker_wait_seconds:.6f} "
+        f"worker_merge_seconds={worker_merge_seconds:.6f} "
         f"row_read_seconds={row_read_seconds:.6f} "
         f"normalize_seconds={normalize_seconds:.6f} "
         f"crossing_seconds={crossing_seconds:.6f}"
     )
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
+
+
+def _metric_partition_results_parallel(
+    *,
+    name: str,
+    store: CovarianceStore,
+    partitions: list[tuple[int, int]],
+    snp_first: int,
+    snp_last: int,
+    breakpoints: np.ndarray,
+    unique_diag_pos: np.ndarray,
+    unique_diag_val: np.ndarray,
+    workers: int,
+) -> list[_MetricPartitionResult]:
+    task_args = [
+        (
+            name,
+            store.root,
+            p_index,
+            start,
+            end,
+            tuple(partitions),
+            snp_first,
+            snp_last,
+        )
+        for p_index, (start, end) in enumerate(partitions)
+    ]
+    results: list[_MetricPartitionResult | None] = [None] * len(task_args)
+    next_submit = 0
+    pending = {}
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_init_metric_worker,
+        initargs=(breakpoints, unique_diag_pos, unique_diag_val),
+    ) as pool:
+        while next_submit < len(task_args) and len(pending) < workers:
+            pending[pool.submit(_metric_partition_worker, task_args[next_submit])] = (
+                next_submit
+            )
+            next_submit += 1
+
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                result_index = pending.pop(future)
+                results[result_index] = future.result()
+
+            while next_submit < len(task_args) and len(pending) < workers:
+                pending[
+                    pool.submit(_metric_partition_worker, task_args[next_submit])
+                ] = next_submit
+                next_submit += 1
+
+    return [result for result in results if result is not None]
+
+
+def _init_metric_worker(
+    breakpoints: np.ndarray,
+    unique_diag_pos: np.ndarray,
+    unique_diag_val: np.ndarray,
+) -> None:
+    global _METRIC_WORKER_BREAKPOINTS
+    global _METRIC_WORKER_DIAG_POS
+    global _METRIC_WORKER_DIAG_VAL
+    _METRIC_WORKER_BREAKPOINTS = breakpoints
+    _METRIC_WORKER_DIAG_POS = unique_diag_pos
+    _METRIC_WORKER_DIAG_VAL = unique_diag_val
+
+
+def _metric_partition_worker(
+    args: tuple[
+        str,
+        Path,
+        int,
+        int,
+        int,
+        tuple[tuple[int, int], ...],
+        int,
+        int,
+    ],
+) -> _MetricPartitionResult:
+    if (
+        _METRIC_WORKER_BREAKPOINTS is None
+        or _METRIC_WORKER_DIAG_POS is None
+        or _METRIC_WORKER_DIAG_VAL is None
+    ):
+        raise RuntimeError("metric worker was not initialized")
+    name, root, p_index, start, end, partitions, snp_first, snp_last = args
+    return _metric_partition_result(
+        name=name,
+        store=CovarianceStore(root=root),
+        partitions=list(partitions),
+        p_index=p_index,
+        start=start,
+        end=end,
+        snp_first=snp_first,
+        snp_last=snp_last,
+        breakpoints=_METRIC_WORKER_BREAKPOINTS,
+        unique_diag_pos=_METRIC_WORKER_DIAG_POS,
+        unique_diag_val=_METRIC_WORKER_DIAG_VAL,
+    )
+
+
+def _metric_partition_result(
+    *,
+    name: str,
+    store: CovarianceStore,
+    partitions: list[tuple[int, int]],
+    p_index: int,
+    start: int,
+    end: int,
+    snp_first: int,
+    snp_last: int,
+    breakpoints: np.ndarray,
+    unique_diag_pos: np.ndarray,
+    unique_diag_val: np.ndarray,
+) -> _MetricPartitionResult:
+    lower_min, lower_max, include_lower_min = _owned_bounds(
+        partitions, p_index, snp_first, snp_last
+    )
+    total_sum = 0.0
+    n_nonzero = 0
+    rows_read = 0
+    pair_rows = 0
+    normalized_rows = 0
+    crossing_rows = 0
+    row_read_seconds = 0.0
+    normalize_seconds = 0.0
+    crossing_seconds = 0.0
+
+    path = store.partition_path(name, start, end)
+    with open_covariance_reader(path, start, end) as reader:
+        chunk_iter = reader.iter_owned_rows(
+            lower_min,
+            lower_max,
+            snp_first,
+            snp_last,
+            _DEFAULT_CHUNK_ROWS,
+            include_lower_min=include_lower_min,
+        )
+        while True:
+            read_start = time.perf_counter()
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            row_read_seconds += time.perf_counter() - read_start
+            rows_read += int(chunk.lo.size)
+            pair_mask = chunk.lo < chunk.hi
+            if not np.any(pair_mask):
+                continue
+            pair_i = chunk.lo[pair_mask]
+            pair_j = chunk.hi[pair_mask]
+            pair_s = chunk.shrink_ld[pair_mask]
+            pair_rows += int(pair_i.size)
+
+            normalize_start = time.perf_counter()
+            diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
+            diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
+            has_diag = (diag_i_idx < unique_diag_pos.size) & (
+                diag_j_idx < unique_diag_pos.size
+            )
+            safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
+            safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
+            has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
+                unique_diag_pos[safe_j_idx] == pair_j
+            )
+            if not np.any(has_diag):
+                normalize_seconds += time.perf_counter() - normalize_start
+                continue
+
+            pair_i = pair_i[has_diag]
+            pair_j = pair_j[has_diag]
+            pair_s = pair_s[has_diag]
+            diag_i = unique_diag_val[diag_i_idx[has_diag]]
+            diag_j = unique_diag_val[diag_j_idx[has_diag]]
+
+            positive = (diag_i > 0.0) & (diag_j > 0.0)
+            if not np.any(positive):
+                normalize_seconds += time.perf_counter() - normalize_start
+                continue
+
+            pair_i = pair_i[positive]
+            pair_j = pair_j[positive]
+            pair_s = pair_s[positive]
+            diag_i = diag_i[positive]
+            diag_j = diag_j[positive]
+            normalized_rows += int(pair_i.size)
+            normalize_seconds += time.perf_counter() - normalize_start
+
+            crossing_start = time.perf_counter()
+            i_blocks = np.searchsorted(breakpoints, pair_i, side="left")
+            j_blocks = np.searchsorted(breakpoints, pair_j, side="left")
+            crossing = i_blocks != j_blocks
+            crossing_count = int(np.count_nonzero(crossing))
+            if crossing_count == 0:
+                crossing_seconds += time.perf_counter() - crossing_start
+                continue
+
+            r2 = (
+                pair_s[crossing]
+                * pair_s[crossing]
+                / (diag_i[crossing] * diag_j[crossing])
+            )
+            total_sum += float(np.sum(r2))
+            n_nonzero += crossing_count
+            crossing_rows += crossing_count
+            crossing_seconds += time.perf_counter() - crossing_start
+
+    return _MetricPartitionResult(
+        p_index=p_index,
+        total_sum=total_sum,
+        n_nonzero=n_nonzero,
+        rows_read=rows_read,
+        pair_rows=pair_rows,
+        normalized_rows=normalized_rows,
+        crossing_rows=crossing_rows,
+        row_read_seconds=row_read_seconds,
+        normalize_seconds=normalize_seconds,
+        crossing_seconds=crossing_seconds,
+    )
 
 
 def _owned_bounds(

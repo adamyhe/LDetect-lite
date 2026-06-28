@@ -87,6 +87,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--metric-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for streaming metric row passes "
+            "(default: 1)."
+        ),
+    )
+    p.add_argument(
         "--high-precision",
         action="store_true",
         help="Use 50-digit Decimal arithmetic for local search (slower).",
@@ -129,6 +139,7 @@ def _run(args: argparse.Namespace) -> int:
         trackback_step=args.trackback_step,
         init_search_location=args.init_search_loc,
         workers=args.workers,
+        metric_workers=args.metric_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
         subsets=set(args.subset) if args.subset else None,

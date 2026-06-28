@@ -44,6 +44,7 @@ def find_breakpoints(
     trackback_step: int = 20,
     init_search_location: int = 1000,
     workers: int = 1,
+    metric_workers: int = 1,
     use_decimal: bool = False,
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
@@ -74,6 +75,9 @@ def find_breakpoints(
         trackback_step: Coarse trackback step size.
         init_search_location: Starting width for exponential search.
         workers: Number of parallel workers for local search (default: 1).
+        metric_workers: Number of parallel workers for streaming metric row
+            passes when not using Decimal arithmetic or an in-memory covariance
+            cache (default: 1).
         use_decimal: Use 50-digit Decimal arithmetic instead of float
             (default: False).
         n_bpoints: Direct target breakpoint count.  When provided,
@@ -132,7 +136,14 @@ def find_breakpoints(
         log_msg("Computing Fourier metric")
         log_memory_checkpoint("fourier_metric_start")
         fourier_metric = _apply_metric(
-            chr_name, snp_first, snp_last, store, fourier_loci, use_decimal, metric_cov
+            chr_name,
+            snp_first,
+            snp_last,
+            store,
+            fourier_loci,
+            use_decimal,
+            metric_cov,
+            metric_workers,
         )
         _log_metric(fourier_metric)
         log_memory_checkpoint("fourier_metric_end")
@@ -146,7 +157,14 @@ def find_breakpoints(
         log_msg("Computing uniform metric")
         log_memory_checkpoint("uniform_metric_start")
         uniform_metric = _apply_metric(
-            chr_name, snp_first, snp_last, store, uniform_loci, use_decimal, metric_cov
+            chr_name,
+            snp_first,
+            snp_last,
+            store,
+            uniform_loci,
+            use_decimal,
+            metric_cov,
+            metric_workers,
         )
         _log_metric(uniform_metric)
         log_memory_checkpoint("uniform_metric_end")
@@ -204,6 +222,7 @@ def find_breakpoints(
             fourier_ls["loci"],
             use_decimal,
             metric_cov,
+            metric_workers,
         )
         log_memory_checkpoint("fourier_ls_metric_end")
     uniform_ls_metric = None
@@ -217,6 +236,7 @@ def find_breakpoints(
             uniform_ls["loci"],
             use_decimal,
             metric_cov,
+            metric_workers,
         )
         log_memory_checkpoint("uniform_ls_metric_end")
 
@@ -314,10 +334,19 @@ def _apply_metric(
     loci: list[int],
     use_decimal: bool = False,
     covariance_arrays=None,
+    metric_workers: int = 1,
 ) -> dict:
     if covariance_arrays is not None and not use_decimal:
         return metric_from_arrays(covariance_arrays, loci)
-    m = Metric(chr_name, store, loci, snp_first, snp_last, use_decimal=use_decimal)
+    m = Metric(
+        chr_name,
+        store,
+        loci,
+        snp_first,
+        snp_last,
+        use_decimal=use_decimal,
+        workers=metric_workers,
+    )
     return m.calc_metric()
 
 

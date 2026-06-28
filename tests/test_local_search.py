@@ -526,6 +526,19 @@ def test_dense_local_search_accumulator_sums_known_loci() -> None:
     np.testing.assert_allclose(accumulator.sum_horiz, np.array([7.0, 0.0, 16.0]))
 
 
+def test_dense_local_search_accumulator_add_pairs_sums_known_loci() -> None:
+    accumulator = DenseLocalSearchAccumulator(np.array([100, 200, 300]))
+
+    accumulator.add_pairs(
+        np.array([100, 200, 200, 400]),
+        np.array([300, 100, 300, 500]),
+        np.array([1.0, 2.0, 3.0, 4.0]),
+    )
+
+    np.testing.assert_allclose(accumulator.sum_vert, np.array([1.0, 5.0, 0.0]))
+    np.testing.assert_allclose(accumulator.sum_horiz, np.array([2.0, 0.0, 4.0]))
+
+
 def test_dense_local_search_accumulator_empty_chunks_are_noops() -> None:
     accumulator = DenseLocalSearchAccumulator(np.array([100, 200, 300]))
 

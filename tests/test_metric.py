@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -179,6 +180,40 @@ def test_streaming_metric_matches_materialized_array_for_multiple_breakpoints(
     assert metric_from_files(
         "chr1", store, partitions, 100, 600, breakpoints
     ) == pytest.approx(metric_from_arrays(materialized, breakpoints))
+
+
+def test_streaming_metric_workers_match_single_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ldetect2._util.covariance_array as covariance_array
+    from ldetect2._util.covariance_array import metric_from_files
+
+    loci = [100, 200, 300, 400, 500, 600]
+    r2 = {
+        (100, 300): 0.5,
+        (100, 500): 0.2,
+        (200, 400): 0.25,
+        (300, 500): 0.75,
+        (400, 600): 0.125,
+    }
+    partitions = [(100, 400), (200, 600)]
+    store = _make_store(tmp_path, loci, r2, partitions=partitions, compact=True)
+    breakpoints = [250, 450]
+    monkeypatch.setattr(covariance_array, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    single = metric_from_files("chr1", store, partitions, 100, 600, breakpoints)
+    parallel = metric_from_files(
+        "chr1",
+        store,
+        partitions,
+        100,
+        600,
+        breakpoints,
+        workers=2,
+    )
+
+    assert parallel == pytest.approx(single)
 
 
 def test_metric_accepts_compact_covariance_partition(tmp_path: Path) -> None:

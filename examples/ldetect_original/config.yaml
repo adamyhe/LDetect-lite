@@ -26,6 +26,7 @@ covariance_cache: compact
 n_snps_bw_bpoints: 10000
 subset: fourier_ls
 cov_workers: 4
+metric_workers: 1
 local_search_workers: 1
 
 # Post-processing

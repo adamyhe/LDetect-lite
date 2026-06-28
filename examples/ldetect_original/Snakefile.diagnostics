@@ -55,6 +55,7 @@ PROFILE_ROOT = DIAG_ROOT / "profiling"
 INTERNAL_WORKERS = max(
     int(config.get("cov_workers", 4)),
     int(config.get("matrix_workers", 1)),
+    int(config.get("metric_workers", 1)),
     int(config.get("local_search_workers", 1)),
 )
 
@@ -309,6 +310,7 @@ rule diagnostic_run_ldetect2:
         cutoff=config["cov_cutoff"],
         cov_workers=config.get("cov_workers", 4),
         matrix_workers=config.get("matrix_workers", 1),
+        metric_workers=config.get("metric_workers", 1),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -333,6 +335,7 @@ rule diagnostic_run_ldetect2:
             --subset {params.subset} \
             --workers {params.cov_workers} \
             --matrix-workers {params.matrix_workers} \
+            --metric-workers {params.metric_workers} \
             --local-search-workers {params.local_search_workers} \
             {params.high_precision} \
             > {log.run} 2>&1
@@ -411,6 +414,7 @@ rule diagnostic_run_ldetect2_omni:
         ne=pop_ne(DIAG_POP),
         cutoff=config["cov_cutoff"],
         cov_workers=config.get("cov_workers", 4),
+        metric_workers=config.get("metric_workers", 1),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -434,6 +438,7 @@ rule diagnostic_run_ldetect2_omni:
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.cov_workers} \
+            --metric-workers {params.metric_workers} \
             --local-search-workers {params.local_search_workers} \
             {params.high_precision} \
             > {log.run} 2>&1

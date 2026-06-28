@@ -136,6 +136,41 @@ class _LocalSearchSegment:
     active_partitions: tuple
 
 
+def _coalesce_local_search_segments(
+    segments: list[_LocalSearchSegment],
+) -> list[_LocalSearchSegment]:
+    """Merge adjacent HDF5 local-search segments with identical readers."""
+    if len(segments) <= 1:
+        return segments
+
+    merged: list[_LocalSearchSegment] = []
+    current = segments[0]
+    for segment in segments[1:]:
+        if (
+            current.loci_stop == segment.loci_start
+            and _partition_keys(current.active_partitions)
+            == _partition_keys(segment.active_partitions)
+        ):
+            current = _LocalSearchSegment(
+                loci_start=current.loci_start,
+                loci_stop=segment.loci_stop,
+                active_min_lo=current.active_min_lo,
+                active_partitions=current.active_partitions,
+            )
+        else:
+            merged.append(current)
+            current = segment
+    merged.append(current)
+    return merged
+
+
+def _partition_keys(partitions: tuple) -> tuple[tuple[object, int, int], ...]:
+    return tuple(
+        (getattr(partition, "path", None), partition.start, partition.end)
+        for partition in partitions
+    )
+
+
 class DenseLocalSearchAccumulator:
     """Dense per-breakpoint local-search vertical/horizontal sum accumulator."""
 
@@ -173,6 +208,49 @@ class DenseLocalSearchAccumulator:
         """Add horizontal sums for row upper endpoints present in ``loci``."""
         self._add(self.sum_horiz, row_hi, r2)
 
+    def add_pairs(self, row_lo: np.ndarray, row_hi: np.ndarray, r2: np.ndarray) -> None:
+        """Add vertical and horizontal sums with one dense endpoint lookup."""
+        lookup_start = time.perf_counter()
+        row_lo = np.asarray(row_lo)
+        row_hi = np.asarray(row_hi)
+        r2 = np.asarray(r2, dtype=np.float64)
+        if row_lo.size == 0 or self.loci.size == 0:
+            if self.stats is not None:
+                self.stats.dense_lookup_seconds += time.perf_counter() - lookup_start
+            return
+
+        endpoints = np.concatenate((row_lo, row_hi))
+        idx = np.searchsorted(self.loci, endpoints)
+        in_bounds = idx < self.loci.size
+        safe_idx = np.minimum(idx, self.loci.size - 1)
+        keep = in_bounds & (self.loci[safe_idx] == endpoints)
+        if self.stats is not None:
+            self.stats.dense_lookup_seconds += time.perf_counter() - lookup_start
+        if not np.any(keep):
+            return
+
+        values = np.concatenate((r2, r2))
+        vertical = np.arange(endpoints.size) < row_lo.size
+        paired_accumulate_start = time.perf_counter()
+        accumulate_start = paired_accumulate_start
+        self._add_indexed(self.sum_vert, idx[keep & vertical], values[keep & vertical])
+        if self.stats is not None:
+            self.stats.vertical_seconds += time.perf_counter() - accumulate_start
+
+        accumulate_start = time.perf_counter()
+        horizontal = ~vertical
+        self._add_indexed(
+            self.sum_horiz,
+            idx[keep & horizontal],
+            values[keep & horizontal],
+        )
+        if self.stats is not None:
+            horizontal_elapsed = time.perf_counter() - accumulate_start
+            self.stats.horizontal_seconds += horizontal_elapsed
+            self.stats.dense_accumulate_seconds += (
+                time.perf_counter() - paired_accumulate_start
+            )
+
     def _add(self, target: np.ndarray, loci: np.ndarray, values: np.ndarray) -> None:
         idx, keep = self.lookup(loci)
         if idx.size == 0:
@@ -180,6 +258,20 @@ class DenseLocalSearchAccumulator:
 
         accumulate_start = time.perf_counter()
         weights = np.asarray(values, dtype=np.float64)[keep]
+        self._add_indexed(target, idx, weights)
+        if self.stats is not None:
+            self.stats.dense_accumulate_seconds += (
+                time.perf_counter() - accumulate_start
+            )
+
+    def _add_indexed(
+        self,
+        target: np.ndarray,
+        idx: np.ndarray,
+        weights: np.ndarray,
+    ) -> None:
+        if idx.size == 0:
+            return
         order = np.argsort(idx, kind="stable")
         sorted_idx = idx[order]
         sorted_weights = weights[order]
@@ -192,10 +284,6 @@ class DenseLocalSearchAccumulator:
         grouped_idx = sorted_idx[group_starts]
         grouped_weights = np.add.reduceat(sorted_weights, group_starts)
         target[grouped_idx] += grouped_weights
-        if self.stats is not None:
-            self.stats.dense_accumulate_seconds += (
-                time.perf_counter() - accumulate_start
-            )
 
 
 def local_search_hdf5_partition(
@@ -820,15 +908,7 @@ def _add_row_chunk_values(
         stats.normalized_rows += int(r2.size)
         stats.normalize_seconds += time.perf_counter() - normalize_start
 
-    vertical_start = time.perf_counter()
-    accumulator.add_vertical(row_lo, r2)
-    if stats is not None:
-        stats.vertical_seconds += time.perf_counter() - vertical_start
-
-    horizontal_start = time.perf_counter()
-    accumulator.add_horizontal(row_hi, r2)
-    if stats is not None:
-        stats.horizontal_seconds += time.perf_counter() - horizontal_start
+    accumulator.add_pairs(row_lo, row_hi, r2)
 
 
 def _diag_lookup(
@@ -1318,7 +1398,7 @@ class LocalSearch:
 
         loci = np.asarray(precomputed_loci, dtype=np.int64)
         accumulator = DenseLocalSearchAccumulator(loci, self.precompute_stats)
-        for segment in planned_segments:
+        for segment in _coalesce_local_search_segments(planned_segments):
             segment_loci = loci[segment.loci_start : segment.loci_stop]
             if segment_loci.size == 0:
                 continue
