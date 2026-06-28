@@ -110,7 +110,9 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
                 "rows_read=1100 rows_after_filter=800 rows_after_dedup=750 "
                 "duplicate_rows_skipped=50 chunks=2 segments=1 "
                 "active_rows_peak=12345 peak_chunk_rows=600 "
-                "hdf5_reader_open_count=3 hdf5_reader_reuse_count=5",
+                "hdf5_reader_open_count=3 hdf5_reader_reuse_count=5 "
+                "hdf5_read_calls=7 hdf5_segment_partition_reads=11 "
+                "hdf5_segment_loci=13",
                 "[12:00:02] fourier_ls breakpoint idx=1 start=200 stop=300 "
                 "partitions=3 rows=None precompute_seconds=2.500 "
                 "search_seconds=0.100 total_seconds=2.650",
@@ -186,6 +188,9 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
     assert breakpoints[0]["peak_chunk_rows"] == "600"
     assert breakpoints[0]["hdf5_reader_open_count"] == "3"
     assert breakpoints[0]["hdf5_reader_reuse_count"] == "5"
+    assert breakpoints[0]["hdf5_read_calls"] == "7"
+    assert breakpoints[0]["hdf5_segment_partition_reads"] == "11"
+    assert breakpoints[0]["hdf5_segment_loci"] == "13"
     assert breakpoints[1]["rows"] == ""
     assert by_chrom[0]["precompute_seconds"] == "3.750000"
     assert by_chrom[0]["search_seconds"] == "0.150000"
@@ -205,6 +210,9 @@ def test_parse_ldetect2_log_local_search_rows(tmp_path: Path) -> None:
     assert by_chrom[0]["peak_chunk_rows"] == "600"
     assert by_chrom[0]["hdf5_reader_open_count"] == "3"
     assert by_chrom[0]["hdf5_reader_reuse_count"] == "5"
+    assert by_chrom[0]["hdf5_read_calls"] == "7"
+    assert by_chrom[0]["hdf5_segment_partition_reads"] == "11"
+    assert by_chrom[0]["hdf5_segment_loci"] == "13"
     assert by_chrom[0]["group_count"] == "1"
     assert by_chrom[0]["group_load_seconds"] == "0.250000"
     assert by_chrom[0]["group_canonicalize_seconds"] == "0.750000"

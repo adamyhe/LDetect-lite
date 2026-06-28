@@ -23,21 +23,21 @@ partition/chunk/window or stay opt-in until remote profiles prove otherwise.
 
 | Area | State | Notes |
 | --- | --- | --- |
-| Compact HDF5 covariance | Implemented; local single-pass writer added | Bounded compact path is the production cache. Single-pass append writer is local-only until remote validation. |
-| Step 2 RSS | Remotely validated | chr10/chr11/chr13/chr21/chr22 all below 1 GiB whole-run RSS before the latest local single-pass writer. |
+| Compact HDF5 covariance | Implemented and remotely validated | Single-pass append writer ran on chr10/chr11/chr13/chr21/chr22 with no fallback and no compact pair-count pass. |
+| Step 2 RSS | Remotely validated | chr10/chr11/chr13/chr21/chr22 remain below 1 GiB whole-run RSS after the single-pass writer. |
 | Step 3 matrix-to-vector | Bounded and remotely validated | Chunked HDF5 path keeps chr11 Step 3 parent RSS around 0.45 GiB, but wall time remains large. |
 | Streaming metrics | Implemented and remotely profiled | Avoids full-chromosome metric arrays; two chr11 metric passes still cost about 8.8 minutes total. |
 | HDF5 read layout/reuse | Remotely validated | 65,536-row storage chunks plus per-precompute reader reuse recovered most local-search HDF5 read regression. |
-| Local-search dense accumulator | Implemented locally | Remote dense profile is currently running; latest downloaded logs predate it. |
-| Horizontal aggregation | Implemented and remotely profiled | Previous sweep cut chr11 horizontal time from 77.46 s to 16.44 s before dense accumulators. |
-| Duplicate merge path | Reverted locally | Python sorted merge caused a major dedup regression; code is back to `np.isin()`/`np.union1d()`. |
-| Multiprocessing in Step 3/4 | Planned only | Step 3/metric partition multiprocessing looks worth testing; naive per-breakpoint local-search multiprocessing should stay off by default. |
+| Local-search dense accumulator | Implemented and remotely profiled | Net local-search result is mixed but mostly positive; dense lookup/accumulate time is now visible and should be watched. |
+| Horizontal aggregation | Implemented and remotely profiled | Dense path keeps dictionary growth out of the hot path, but vertical/horizontal buckets include new dense accumulation detail. |
+| Duplicate merge path | Reverted and remotely profiled | `dedup_merge_seconds` is back to zero; do not reintroduce the Python sorted merge. |
+| Multiprocessing in Step 3/4 | Step 3 opt-in implemented | `--matrix-workers` now parallelizes bounded HDF5 partition compute for Step 3; metric workers remain planned only. |
 
 ## Working Change Notes
 
 ### Bounded Compact Covariance
 
-Validated remote baseline before the latest local single-pass writer:
+Previous remote baseline before the single-pass writer:
 
 - chr11 whole-run max RSS: 0.837 GiB.
 - Step 2 used `workers=4` and generated 378 compact HDF5 partitions.
@@ -46,23 +46,33 @@ Validated remote baseline before the latest local single-pass writer:
 - Compact pair counting summed to about 1877 s across workers.
 - Compact generation/HDF5 writing summed to about 2593 s across workers.
 
-Current local follow-up:
+Current implemented path:
 
 - `calc_covariance()` now precomputes per-SNP allele counts and genetic cutoff
   stop bounds for full and compact kernels.
-- Compact production path now attempts a single-pass appendable HDF5 writer.
+- Compact production path now uses a single-pass appendable HDF5 writer.
 - The old count-then-generate compact writer remains as a fallback if an
   invariant fails.
 - Compact dataset storage chunks remain `HDF5_DATASET_CHUNK_ROWS = 65_536`;
   write batches remain `COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000`.
 
-Remote validation target:
+Latest remote validation:
 
-- `compact_pair_counts` should disappear from successful single-pass compact
-  runs.
-- `compact_hdf5_written ... single_pass=true` should be present.
-- Step 2 wall time should improve without raising max RSS or changing output
-  validation.
+- `compact_hdf5_written ... single_pass=true` appeared for every compact
+  partition in the downloaded profiles.
+- No fallback was used and `compact_pair_counts` did not appear:
+
+| Chrom | Compact partitions | Single-pass writes | Fallbacks | Pair-count profiles |
+| --- | ---: | ---: | ---: | ---: |
+| chr10 | 376 | 376 | 0 | 0 |
+| chr11 | 378 | 378 | 0 | 0 |
+| chr13 | 274 | 274 | 0 | 0 |
+| chr21 | 103 | 103 | 0 | 0 |
+| chr22 | 98 | 98 | 0 | 0 |
+
+The chr11 Step 2 wall split improved from about 1338 s to about 707 s. Whole
+run wall improved from 3922.00 s to 3236.81 s, while max RSS moved from
+0.837 GiB to 0.811 GiB.
 
 ### HDF5 Storage and Reader Layout
 
@@ -100,27 +110,23 @@ Avoid:
 
 ### Local Search
 
-Latest downloaded remote profile does not include dense accumulators. It does
-include the previous sweep with horizontal grouped reduction and the now-reverted
-Python duplicate merge path.
+Latest downloaded remote profile includes dense accumulators and the duplicate
+merge revert.
 
-chr11 previous-sweep local-search split:
+| Chrom | Local search | HDF5 read | Dedup | Dense lookup | Dense accumulate | Normalize |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| chr10 | 327.89 s | 145.42 s | 69.93 s | 34.68 s | 18.28 s | 44.95 s |
+| chr11 | 844.41 s | 563.38 s | 134.84 s | 42.22 s | 21.35 s | 52.98 s |
+| chr13 | 200.44 s | 83.94 s | 43.20 s | 23.93 s | 12.54 s | 28.22 s |
+| chr21 | 48.63 s | 19.16 s | 7.93 s | 6.80 s | 4.09 s | 8.03 s |
+| chr22 | 60.06 s | 25.36 s | 10.83 s | 7.44 s | 4.39 s | 8.99 s |
 
-| Bucket | Seconds | Interpretation |
-| --- | ---: | --- |
-| HDF5 read/decompression | 563.47 | Still the largest bucket. |
-| Duplicate tracking | 243.58 | Inflated by reverted Python merge path. |
-| `dedup_merge_seconds` | 239.39 | Should return to ~0 after revert. |
-| Normalization | 51.92 | Secondary target. |
-| Horizontal aggregation | 16.44 | Keep the grouped reduction win. |
-
-Dense accumulator expectations for the in-progress remote run:
-
-- `dense_lookup_seconds` and `dense_accumulate_seconds` should be present.
-- `horizontal_seconds` should stay near or below the previous-sweep values.
-- `dedup_merge_seconds` should be zero or negligible after the revert.
-- chr11 dedup should move back toward the compact-layout/read-cache baseline
-  of about 134 s, not the previous-sweep 244 s.
+Compared with the previous sweep, the duplicate merge revert did what we
+wanted: `dedup_merge_seconds` is zero and chr11 dedup fell from 243.58 s to
+134.84 s. Dense accumulation did not create a dramatic standalone speedup;
+chr11 dense lookup plus dense accumulation now accounts for about 63.6 s. Net
+local-search wall still improved on the large downloaded chromosomes except for
+minor small-chromosome noise.
 
 Do not prioritize `_search_array()` or JIT candidate scoring. Search time is
 effectively zero compared with precompute.
@@ -136,25 +142,42 @@ Validated remote baseline:
 | chr22 | ~76 s | ~372 MiB |
 
 The current chunked helper solved the memory problem but not the wall-time
-problem. Summed profile buckets under-account Step 3 wall time, so add more
-instrumentation before assuming where time is going.
+problem. Latest local changes add:
 
-Planned optimization:
+- compact-index locus discovery instead of a row-streaming loci pass;
+- per-partition debug timing for HDF5 open, locus index read, diagonal read,
+  row read, normalization, and center accumulation;
+- parent-level `matrix_to_vector_array profile` timing for wall, merge, flush,
+  and worker wait;
+- opt-in `--matrix-workers` for `ldetect2 run` and `ldetect2 matrix-to-vector`.
 
-- partition-level compute workers may be worth restoring;
-- parent must own ordered vector writes and `pending_sums`;
-- workers should return bounded sparse `(locus, sum)` outputs plus profile
-  counters, not write gzip rows directly.
+The worker path is bounded by at most `matrix_workers` in-flight partition
+results. Workers compute partition sums; the parent merges and flushes output in
+partition order.
+
+Remote validation target:
+
+- first compare `--matrix-workers 1` with current baseline to measure the
+  compact-index loci pass win;
+- then test `--matrix-workers 2` and `--matrix-workers 4` on chr21/chr22,
+  followed by chr10/chr11 if RSS stays bounded;
+- verify vector/BED/JSON validation unchanged.
 
 ### Streaming Metrics
 
 Current path avoids resident chromosome-wide metric arrays, but chr11 still has
 two streaming metric passes of about 260 s each.
 
+Latest local change:
+
+- metric denominator/loci discovery now uses compact HDF5 `lo_values` indexes
+  instead of streaming all owned rows in the metadata pass;
+- metric debug profile now splits `loci_index_seconds` and
+  `diag_read_seconds` from broader `index_read_seconds`.
+
 Planned optimization:
 
-- first remove row streaming from the metadata/diagonal/loci pass if possible;
-- then consider partition-level metric workers that return partial sums and
+- next consider partition-level metric workers that return partial sums and
   counters for parent reduction;
 - do not fuse Fourier and Fourier-LS metric passes until a larger pipeline
   restructure makes both breakpoint sets available at once.
@@ -168,73 +191,62 @@ examples/ldetect_original/results/diagnostics/EUR/logs/
 examples/ldetect_original/results/diagnostics/EUR/profiling/
 ```
 
-Run summary after compact-layout/read-cache baseline plus previous sweep:
+Run summary after dense accumulation, duplicate-merge revert, and single-pass
+compact covariance:
 
 | Chrom | Wall time | Max RSS | Local search | HDF5 read | Dedup | Horizontal |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| chr10 | 1872.15 s | 0.587 GiB | 342.27 s | 144.85 s | 127.02 s | 12.69 s |
-| chr11 | 3922.00 s | 0.837 GiB | 904.80 s | 563.47 s | 243.58 s | 16.44 s |
-| chr13 | 1400.58 s | 0.488 GiB | 304.53 s | 116.04 s | 124.58 s | 13.59 s |
-| chr21 | 320.68 s | 0.405 GiB | 45.94 s | 18.99 s | 13.60 s | 2.92 s |
-| chr22 | 405.62 s | 0.412 GiB | 82.09 s | 33.14 s | 30.44 s | 4.22 s |
+| chr10 | 1505.05 s | 0.598 GiB | 327.89 s | 145.42 s | 69.93 s | 28.19 s |
+| chr11 | 3236.81 s | 0.811 GiB | 844.41 s | 563.38 s | 134.84 s | 33.68 s |
+| chr13 | 997.88 s | 0.493 GiB | 200.44 s | 83.94 s | 43.20 s | 19.70 s |
+| chr21 | 267.31 s | 0.410 GiB | 48.63 s | 19.16 s | 7.93 s | 6.22 s |
+| chr22 | 308.48 s | 0.412 GiB | 60.06 s | 25.36 s | 10.83 s | 6.57 s |
 
 chr11 raw-log wall split:
 
 | Phase | Seconds | Notes |
 | --- | ---: | --- |
 | Step 1 partitioning | 2 | negligible |
-| Step 2 covariance | 1338 | compact HDF5, `workers=4` |
-| Step 3 matrix-to-vector | 1025 | bounded RSS, still major wall time |
+| Step 2 covariance | 707 | single-pass compact HDF5, `workers=4` |
+| Step 3 matrix-to-vector | 1032 | bounded RSS, now larger than Step 2 |
 | Filter/minima before metric | 126 | lower priority |
-| Fourier metric | 260 | streaming |
-| Fourier local search | 905 | pre-dense, duplicate merge regression included |
-| Final Fourier-LS metric | 264 | streaming |
+| Fourier metric | 261 | streaming |
+| Fourier local search | 844 | dense accumulator plus duplicate merge revert |
+| Final Fourier-LS metric | 262 | streaming |
 
 ## Next Optimization Plans
 
-### 1. Validate Current Local Changes Remotely
+### 1. Output Parity and Profile Hygiene
 
-Run chr21/chr22 first, then chr10/chr11:
+The newest profiles validate the main runtime/RSS expectations, but keep the
+next remote run focused on correctness and clean counters:
 
-- dense local-search accumulator;
-- duplicate merge revert;
-- single-pass compact covariance writer.
+- confirm BED/JSON/HDF5 validation unchanged;
+- keep whole-run max RSS near the current sub-1 GiB profile;
+- keep `single_pass=true`, zero compact fallbacks, and zero compact pair-count
+  profiles;
+- keep `dedup_merge_seconds` at zero;
+- compare `dense_lookup_seconds` and `dense_accumulate_seconds` across another
+  chr10/chr11 run before micro-optimizing the dense path.
+- watch new local-search read amplification counters:
+  `hdf5_read_calls`, `hdf5_segment_partition_reads`, and `hdf5_segment_loci`.
 
-Acceptance:
+### 2. Matrix Worker Validation
 
-- BED/JSON/HDF5 validation unchanged;
-- whole-run max RSS remains near current sub-1 GiB profile;
-- compact covariance logs show `single_pass=true`;
-- `dedup_merge_seconds` no longer dominates local search;
-- dense fields are present and do not move time into a larger bucket.
+Goal: decide whether Step 3 partition workers are worth keeping on by default
+or exposing in production runbooks.
 
-### 2. Metric Metadata-First Pass
+Run order:
 
-Goal: reduce the two streaming metric passes without resident covariance caches.
+- chr21/chr22 with `--matrix-workers 1`, `2`, and `4`;
+- chr10/chr11 with the best small-chromosome setting;
+- compare Step 3 wall, whole-run RSS, output validation, and parent
+  `worker_wait_seconds`.
 
-Implementation direction:
+### 3. Metric Worker Prototype
 
-- derive `loci`, `diag_pos`, and `diag_val` from HDF5 indexes/diagonals rather
-  than streaming all rows just to collect loci;
-- keep the row streaming pass only for normalized crossing pairs;
-- add profile fields for metadata read, row read, normalization, crossing, and
-  unaccounted time.
-
-### 3. Bounded Step 3 Multiprocessing
-
-Goal: reduce Step 3 wall time while preserving the bounded helper-scope RSS.
-
-Implementation direction:
-
-- worker processes compute partition partial sums only;
-- parent merges in partition order and writes the vector file;
-- bound in-flight futures to worker count;
-- expose as opt-in `--matrix-workers`, default `1`.
-
-### 4. Metric Partition Multiprocessing
-
-Goal: reduce streaming metric wall time if metadata-first pass is still
-expensive.
+Goal: reduce streaming metric wall time after the metadata-first metric pass is
+remotely measured.
 
 Implementation direction:
 
@@ -242,12 +254,12 @@ Implementation direction:
 - each worker streams assigned partitions and returns partial metric sums;
 - parent reduces partials deterministically.
 
-### 5. Local-Search Grouped Multiprocessing
+### 4. Local-Search Grouped Multiprocessing
 
 Do not restore naive per-breakpoint multiprocessing by default. It discards the
 current grouped HDF5 reuse and can multiply decompression and RSS.
 
-Only revisit after dense profiling:
+Only revisit if later profiles show enough remaining local-search CPU work:
 
 - submit partition groups, not individual breakpoints;
 - each worker opens group metadata/readers once and processes breakpoints

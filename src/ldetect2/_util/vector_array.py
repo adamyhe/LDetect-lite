@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import gzip
 import time
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +18,27 @@ from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
 MATRIX_TO_VECTOR_CHUNK_ROWS = 1_000_000
+
+
+@dataclass(frozen=True)
+class _DiagVectorPartitionPlan:
+    p_index: int
+    start: int
+    end: int
+    next_start: int | None
+    center_lower_bound: int
+    center_lower_inclusive: bool
+    checkpoint: str
+
+
+@dataclass(frozen=True)
+class _DiagVectorPartitionResult:
+    loci: np.ndarray
+    sum_loci: np.ndarray
+    sum_values: np.ndarray
+    end_locus: int
+    write_cutoff: int
+    profile: dict[str, object]
 
 
 def _position_array(arr: np.ndarray) -> np.ndarray:
@@ -40,9 +63,11 @@ def write_diag_vector_array(
     snp_last: int,
     out_path: Path,
     covariance_cache: ChromosomeCovariance | None = None,
+    matrix_workers: int = 1,
 ) -> None:
     """Write the diagonal correlation-sum vector from HDF5 partitions."""
     _log_vector_checkpoint("matrix_to_vector_array_start")
+    wall_start = time.perf_counter()
     out_path.unlink(missing_ok=True)
     pending_sums: dict[int, float] = {}
     current_locus = snp_first
@@ -57,9 +82,80 @@ def write_diag_vector_array(
             "Chromosome covariance cache partitions do not match matrix-to-vector "
             "partitions"
         )
+    plans = _plan_diag_vector_partitions(partitions, snp_first, snp_last)
+    parent_profile: dict[str, float | int] = {
+        "merge_seconds": 0.0,
+        "flush_seconds": 0.0,
+        "worker_wait_seconds": 0.0,
+        "partitions": 0,
+    }
+    if (
+        matrix_workers > 1
+        and covariance_cache is None
+        and len(plans) > 1
+    ):
+        _write_diag_vector_array_hdf5_parallel(
+            name=name,
+            store=store,
+            plans=plans,
+            snp_first=snp_first,
+            snp_last=snp_last,
+            pending_sums=pending_sums,
+            out_path=out_path,
+            matrix_workers=matrix_workers,
+            parent_profile=parent_profile,
+        )
+    else:
+        for plan in plans:
+            checkpoint = plan.checkpoint
+            _log_vector_checkpoint(f"{checkpoint}_start")
+            result = _process_diag_vector_partition(
+                name=name,
+                store=store,
+                partition_arrays=partition_arrays,
+                p_index=plan.p_index,
+                start=plan.start,
+                end=plan.end,
+                next_start=plan.next_start,
+                snp_first=snp_first,
+                snp_last=snp_last,
+                current_locus=current_locus,
+                center_lower_bound=plan.center_lower_bound,
+                center_lower_inclusive=plan.center_lower_inclusive,
+                checkpoint=checkpoint,
+            )
+            current_locus = _merge_diag_vector_partition_result(
+                result=result,
+                snp_first=snp_first,
+                snp_last=snp_last,
+                current_locus=current_locus,
+                pending_sums=pending_sums,
+                out_path=out_path,
+                parent_profile=parent_profile,
+            )
+            _log_vector_checkpoint(f"{checkpoint}_helper_return")
+    log_debug(
+        "matrix_to_vector_array profile "
+        f"partitions={int(parent_profile['partitions'])} "
+        f"matrix_workers={matrix_workers} "
+        f"wall_seconds={time.perf_counter() - wall_start:.6f} "
+        f"merge_seconds={parent_profile['merge_seconds']:.6f} "
+        f"flush_seconds={parent_profile['flush_seconds']:.6f} "
+        f"worker_wait_seconds={parent_profile['worker_wait_seconds']:.6f}"
+    )
+    _log_vector_checkpoint("matrix_to_vector_array_end")
+
+
+def _plan_diag_vector_partitions(
+    partitions: list[tuple[int, int]],
+    snp_first: int,
+    snp_last: int,
+) -> list[_DiagVectorPartitionPlan]:
+    """Plan matrix-to-vector partitions with independent center-locus bounds."""
+    plans: list[_DiagVectorPartitionPlan] = []
+    previous_end_locus: int | None = None
     for p_index, (start, end) in enumerate(partitions):
         checkpoint = _partition_checkpoint_label(p_index, start, end)
-        _log_vector_checkpoint(f"{checkpoint}_start")
         if p_index + 1 < len(partitions) and snp_first >= partitions[p_index + 1][0]:
             _log_vector_checkpoint(f"{checkpoint}_skip_before_snp_first")
             continue
@@ -67,23 +163,173 @@ def write_diag_vector_array(
         next_start = (
             partitions[p_index + 1][0] if p_index + 1 < len(partitions) else None
         )
-        current_locus = _process_diag_vector_partition(
-            name=name,
-            store=store,
-            partition_arrays=partition_arrays,
-            p_index=p_index,
-            start=start,
-            end=end,
-            next_start=next_start,
-            snp_first=snp_first,
-            snp_last=snp_last,
-            current_locus=current_locus,
-            pending_sums=pending_sums,
-            out_path=out_path,
-            checkpoint=checkpoint,
+        if previous_end_locus is None:
+            center_lower_bound = snp_first
+            center_lower_inclusive = True
+        else:
+            center_lower_bound = previous_end_locus
+            center_lower_inclusive = False
+        if next_start is not None:
+            end_locus = int((end + next_start) / 2)
+        else:
+            end_locus = snp_last
+        plans.append(
+            _DiagVectorPartitionPlan(
+                p_index=p_index,
+                start=start,
+                end=end,
+                next_start=next_start,
+                center_lower_bound=center_lower_bound,
+                center_lower_inclusive=center_lower_inclusive,
+                checkpoint=checkpoint,
+            )
         )
-        _log_vector_checkpoint(f"{checkpoint}_helper_return")
-    _log_vector_checkpoint("matrix_to_vector_array_end")
+        previous_end_locus = end_locus
+    return plans
+
+
+def _write_diag_vector_array_hdf5_parallel(
+    *,
+    name: str,
+    store: CovarianceStore,
+    plans: list[_DiagVectorPartitionPlan],
+    snp_first: int,
+    snp_last: int,
+    pending_sums: dict[int, float],
+    out_path: Path,
+    matrix_workers: int,
+    parent_profile: dict[str, float | int],
+) -> None:
+    """Compute HDF5 matrix-to-vector partitions in workers and merge in order."""
+    task_args = [
+        (
+            name,
+            store.root,
+            plan.start,
+            plan.end,
+            plan.next_start,
+            snp_first,
+            snp_last,
+            plan.center_lower_bound,
+            plan.center_lower_inclusive,
+            plan.checkpoint,
+        )
+        for plan in plans
+    ]
+    current_locus = snp_first
+    next_submit = 0
+    next_emit = 0
+    pending = {}
+    completed: dict[int, _DiagVectorPartitionResult] = {}
+    with ProcessPoolExecutor(max_workers=matrix_workers) as pool:
+        while next_submit < len(task_args) and len(pending) < matrix_workers:
+            pending[
+                pool.submit(
+                    _compute_diag_vector_partition_hdf5_worker,
+                    task_args[next_submit],
+                )
+            ] = next_submit
+            next_submit += 1
+
+        while pending:
+            wait_start = time.perf_counter()
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            parent_profile["worker_wait_seconds"] += time.perf_counter() - wait_start
+            for future in done:
+                result_index = pending.pop(future)
+                completed[result_index] = future.result()
+
+            while next_emit in completed:
+                current_locus = _merge_diag_vector_partition_result(
+                    result=completed.pop(next_emit),
+                    snp_first=snp_first,
+                    snp_last=snp_last,
+                    current_locus=current_locus,
+                    pending_sums=pending_sums,
+                    out_path=out_path,
+                    parent_profile=parent_profile,
+                )
+                next_emit += 1
+
+            while next_submit < len(task_args) and len(pending) < matrix_workers:
+                pending[
+                    pool.submit(
+                        _compute_diag_vector_partition_hdf5_worker,
+                        task_args[next_submit],
+                    )
+                ] = next_submit
+                next_submit += 1
+
+
+def _compute_diag_vector_partition_hdf5_worker(
+    args: tuple[
+        str,
+        Path,
+        int,
+        int,
+        int | None,
+        int,
+        int,
+        int,
+        bool,
+        str,
+    ],
+) -> _DiagVectorPartitionResult:
+    (
+        name,
+        root,
+        start,
+        end,
+        next_start,
+        snp_first,
+        snp_last,
+        center_lower_bound,
+        center_lower_inclusive,
+        checkpoint,
+    ) = args
+    return _compute_diag_vector_partition_hdf5(
+        name=name,
+        store=CovarianceStore(root=root),
+        start=start,
+        end=end,
+        next_start=next_start,
+        snp_first=snp_first,
+        snp_last=snp_last,
+        center_lower_bound=center_lower_bound,
+        center_lower_inclusive=center_lower_inclusive,
+        checkpoint=checkpoint,
+    )
+
+
+def _merge_diag_vector_partition_result(
+    *,
+    result: _DiagVectorPartitionResult,
+    snp_first: int,
+    snp_last: int,
+    current_locus: int,
+    pending_sums: dict[int, float],
+    out_path: Path,
+    parent_profile: dict[str, float | int],
+) -> int:
+    merge_start = time.perf_counter()
+    for locus, value in zip(result.sum_loci, result.sum_values):
+        pending_sums[int(locus)] = pending_sums.get(int(locus), 0.0) + float(value)
+    parent_profile["merge_seconds"] += time.perf_counter() - merge_start
+    parent_profile["partitions"] += 1
+    flush_before = time.perf_counter()
+    next_locus = _finish_diag_vector_partition(
+        loci=result.loci,
+        end_locus=result.end_locus,
+        write_cutoff=result.write_cutoff,
+        snp_first=snp_first,
+        snp_last=snp_last,
+        current_locus=current_locus,
+        pending_sums=pending_sums,
+        out_path=out_path,
+        checkpoint=str(result.profile.get("checkpoint", "matrix_to_vector")),
+    )
+    parent_profile["flush_seconds"] += time.perf_counter() - flush_before
+    return next_locus
 
 
 def _process_diag_vector_partition(
@@ -98,13 +344,13 @@ def _process_diag_vector_partition(
     snp_first: int,
     snp_last: int,
     current_locus: int,
-    pending_sums: dict[int, float],
-    out_path: Path,
+    center_lower_bound: int,
+    center_lower_inclusive: bool,
     checkpoint: str,
-) -> int:
+) -> _DiagVectorPartitionResult:
     """Process one matrix-to-vector partition and return the next locus state."""
     if partition_arrays is None:
-        return _process_diag_vector_partition_hdf5(
+        return _compute_diag_vector_partition_hdf5(
             name=name,
             store=store,
             start=start,
@@ -112,13 +358,12 @@ def _process_diag_vector_partition(
             next_start=next_start,
             snp_first=snp_first,
             snp_last=snp_last,
-            current_locus=current_locus,
-            pending_sums=pending_sums,
-            out_path=out_path,
+            center_lower_bound=center_lower_bound,
+            center_lower_inclusive=center_lower_inclusive,
             checkpoint=checkpoint,
         )
 
-    return _process_diag_vector_partition_array(
+    return _compute_diag_vector_partition_array(
         partition_arrays=partition_arrays,
         p_index=p_index,
         start=start,
@@ -127,13 +372,11 @@ def _process_diag_vector_partition(
         snp_first=snp_first,
         snp_last=snp_last,
         current_locus=current_locus,
-        pending_sums=pending_sums,
-        out_path=out_path,
         checkpoint=checkpoint,
     )
 
 
-def _process_diag_vector_partition_array(
+def _compute_diag_vector_partition_array(
     *,
     partition_arrays: tuple,
     p_index: int,
@@ -143,10 +386,8 @@ def _process_diag_vector_partition_array(
     snp_first: int,
     snp_last: int,
     current_locus: int,
-    pending_sums: dict[int, float],
-    out_path: Path,
     checkpoint: str,
-) -> int:
+) -> _DiagVectorPartitionResult:
     """Process one cached array partition with the materialized reference path."""
     _log_vector_checkpoint(f"{checkpoint}_cache_load_start")
     partition = partition_arrays[p_index]
@@ -161,7 +402,7 @@ def _process_diag_vector_partition_array(
     _log_vector_checkpoint(f"{checkpoint}_filter_mask_end")
     if not np.any(rows_in_partition):
         _log_vector_checkpoint(f"{checkpoint}_no_owned_rows")
-        return current_locus
+        return _empty_diag_vector_partition_result(checkpoint)
 
     i_pos = i_pos[rows_in_partition]
     j_pos = j_pos[rows_in_partition]
@@ -180,7 +421,7 @@ def _process_diag_vector_partition_array(
     _log_vector_checkpoint(f"{checkpoint}_loci_unique_end")
     if loci.size == 0:
         _log_vector_checkpoint(f"{checkpoint}_no_loci")
-        return current_locus
+        return _empty_diag_vector_partition_result(checkpoint)
 
     if next_start is not None:
         end_locus = int((end + next_start) / 2)
@@ -189,13 +430,14 @@ def _process_diag_vector_partition_array(
         in_requested_range = loci[loci <= snp_last]
         if in_requested_range.size == 0:
             _log_vector_checkpoint(f"{checkpoint}_no_requested_loci")
-            return current_locus
+            return _empty_diag_vector_partition_result(checkpoint)
         end_locus = int(in_requested_range[-1])
         write_cutoff = end_locus
 
     _log_vector_checkpoint(f"{checkpoint}_r2_rows_start")
     r2_lo, r2_hi, r2 = _r2_rows(lo, hi, shrink)
     _log_vector_checkpoint(f"{checkpoint}_r2_rows_end")
+    partition_sums = np.zeros(loci.size, dtype=np.float64)
     if r2.size:
         _log_vector_checkpoint(f"{checkpoint}_center_search_start")
         lo_idx = np.searchsorted(loci, r2_lo)
@@ -221,33 +463,24 @@ def _process_diag_vector_partition_array(
             _log_vector_checkpoint(f"{checkpoint}_center_filter_end")
             if np.any(keep_center):
                 _log_vector_checkpoint(f"{checkpoint}_bincount_start")
-                sums = np.bincount(
+                partition_sums += np.bincount(
                     center_idx[keep_center],
                     weights=r2[keep_center],
                     minlength=loci.size,
                 )
                 _log_vector_checkpoint(f"{checkpoint}_bincount_end")
-                _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_start")
-                for locus, value in zip(loci[sums > 0.0], sums[sums > 0.0]):
-                    pending_sums[int(locus)] = pending_sums.get(
-                        int(locus), 0.0
-                    ) + float(value)
-                _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_end")
-
-    return _finish_diag_vector_partition(
+    nonzero = partition_sums > 0.0
+    return _DiagVectorPartitionResult(
         loci=loci,
+        sum_loci=loci[nonzero],
+        sum_values=partition_sums[nonzero],
         end_locus=end_locus,
         write_cutoff=write_cutoff,
-        snp_first=snp_first,
-        snp_last=snp_last,
-        current_locus=current_locus,
-        pending_sums=pending_sums,
-        out_path=out_path,
-        checkpoint=checkpoint,
+        profile={"checkpoint": checkpoint},
     )
 
 
-def _process_diag_vector_partition_hdf5(
+def _compute_diag_vector_partition_hdf5(
     *,
     name: str,
     store: CovarianceStore,
@@ -256,11 +489,10 @@ def _process_diag_vector_partition_hdf5(
     next_start: int | None,
     snp_first: int,
     snp_last: int,
-    current_locus: int,
-    pending_sums: dict[int, float],
-    out_path: Path,
+    center_lower_bound: int,
+    center_lower_inclusive: bool,
     checkpoint: str,
-) -> int:
+) -> _DiagVectorPartitionResult:
     """Process one HDF5 partition with chunked normalization and accumulation."""
     path = store.partition_path(name, start, end)
     if not path.exists():
@@ -271,14 +503,18 @@ def _process_diag_vector_partition_hdf5(
         )
 
     _log_vector_checkpoint(f"{checkpoint}_hdf5_open_start")
+    open_start = time.perf_counter()
     with open_covariance_reader(path, start, end) as reader:
+        open_seconds = time.perf_counter() - open_start
         _log_vector_checkpoint(f"{checkpoint}_hdf5_open_end")
         _log_vector_checkpoint(f"{checkpoint}_loci_pass_start")
+        loci_start = time.perf_counter()
         loci = _chunked_owned_loci(reader, start, end)
+        loci_seconds = time.perf_counter() - loci_start
         _log_vector_checkpoint(f"{checkpoint}_loci_pass_end")
         if loci.size == 0:
             _log_vector_checkpoint(f"{checkpoint}_no_loci")
-            return current_locus
+            return _empty_diag_vector_partition_result(checkpoint)
 
         if next_start is not None:
             end_locus = int((end + next_start) / 2)
@@ -287,43 +523,43 @@ def _process_diag_vector_partition_hdf5(
             in_requested_range = loci[loci <= snp_last]
             if in_requested_range.size == 0:
                 _log_vector_checkpoint(f"{checkpoint}_no_requested_loci")
-                return current_locus
+                return _empty_diag_vector_partition_result(checkpoint)
             end_locus = int(in_requested_range[-1])
             write_cutoff = end_locus
 
         _log_vector_checkpoint(f"{checkpoint}_diag_lookup_start")
+        diag_start = time.perf_counter()
         diag_pos, diag_val = reader.read_diagonal()
         diag_mask = (diag_pos >= start) & (diag_pos <= end)
         diag_pos = diag_pos[diag_mask]
         diag_val = diag_val[diag_mask]
+        diag_seconds = time.perf_counter() - diag_start
         _log_vector_checkpoint(f"{checkpoint}_diag_lookup_end")
-        if diag_pos.size == 0:
-            return _finish_diag_vector_partition(
-                loci=loci,
-                end_locus=end_locus,
-                write_cutoff=write_cutoff,
-                snp_first=snp_first,
-                snp_last=snp_last,
-                current_locus=current_locus,
-                pending_sums=pending_sums,
-                out_path=out_path,
-                checkpoint=checkpoint,
-            )
 
         _log_vector_checkpoint(f"{checkpoint}_chunked_r2_accum_start")
         partition_sums = np.zeros(loci.size, dtype=np.float64)
         profile = {
+            "checkpoint": checkpoint,
             "hdf5_read_seconds": 0.0,
             "normalize_seconds": 0.0,
             "center_seconds": 0.0,
+            "open_seconds": open_seconds,
+            "loci_seconds": loci_seconds,
+            "diag_seconds": diag_seconds,
             "rows_read": 0,
             "rows_accumulated": 0,
             "chunks": 0,
         }
         center_hi = min(end_locus, snp_last)
-        center_left = int(np.searchsorted(loci, current_locus, side="left"))
+        center_left = int(
+            np.searchsorted(
+                loci,
+                center_lower_bound,
+                side="left" if center_lower_inclusive else "right",
+            )
+        )
         center_right = int(np.searchsorted(loci, center_hi, side="right"))
-        if center_left < center_right:
+        if diag_pos.size and center_left < center_right:
             chunk_iter = reader.iter_owned_rows(
                 start,
                 end,
@@ -358,44 +594,43 @@ def _process_diag_vector_partition_hdf5(
             f"checkpoint={checkpoint} chunks={int(profile['chunks'])} "
             f"rows_read={int(profile['rows_read'])} "
             f"rows_accumulated={int(profile['rows_accumulated'])} "
+            f"open_seconds={profile['open_seconds']:.6f} "
+            f"loci_seconds={profile['loci_seconds']:.6f} "
+            f"diag_seconds={profile['diag_seconds']:.6f} "
             f"hdf5_read_seconds={profile['hdf5_read_seconds']:.6f} "
             f"normalize_seconds={profile['normalize_seconds']:.6f} "
             f"center_seconds={profile['center_seconds']:.6f}"
         )
 
-    _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_start")
     nonzero = partition_sums > 0.0
-    for locus, value in zip(loci[nonzero], partition_sums[nonzero]):
-        pending_sums[int(locus)] = pending_sums.get(int(locus), 0.0) + float(value)
-    _log_vector_checkpoint(f"{checkpoint}_pending_sum_update_end")
-
-    return _finish_diag_vector_partition(
+    return _DiagVectorPartitionResult(
         loci=loci,
+        sum_loci=loci[nonzero],
+        sum_values=partition_sums[nonzero],
         end_locus=end_locus,
         write_cutoff=write_cutoff,
-        snp_first=snp_first,
-        snp_last=snp_last,
-        current_locus=current_locus,
-        pending_sums=pending_sums,
-        out_path=out_path,
-        checkpoint=checkpoint,
+        profile=profile,
+    )
+
+
+def _empty_diag_vector_partition_result(checkpoint: str) -> _DiagVectorPartitionResult:
+    empty_i = np.array([], dtype=np.int64)
+    empty_f = np.array([], dtype=np.float64)
+    return _DiagVectorPartitionResult(
+        loci=empty_i,
+        sum_loci=empty_i,
+        sum_values=empty_f,
+        end_locus=-1,
+        write_cutoff=-1,
+        profile={"checkpoint": checkpoint},
     )
 
 
 def _chunked_owned_loci(reader, start: int, end: int) -> np.ndarray:
-    """Return sorted unique loci from owned HDF5 rows using bounded chunks."""
-    loci_chunks = []
-    for chunk in reader.iter_owned_rows(
-        start,
-        end,
-        start,
-        end,
-        MATRIX_TO_VECTOR_CHUNK_ROWS,
-    ):
-        loci_chunks.append(np.unique(np.concatenate((chunk.lo, chunk.hi))))
-    if not loci_chunks:
-        return np.array([], dtype=np.int32)
-    return _position_array(np.unique(np.concatenate(loci_chunks)))
+    """Return sorted unique owned loci from the compact HDF5 index."""
+    loci = reader.read_loci()
+    mask = (loci >= start) & (loci <= end)
+    return _position_array(loci[mask])
 
 
 def _accumulate_vector_chunk(

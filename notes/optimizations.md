@@ -3,7 +3,7 @@
 This document is the human-readable optimization summary for `ldetect2`. It is
 intended for reports, write-ups, and project context. Detailed agent handoff
 notes, active implementation plans, and profiling runbooks live in
-`notes/local-search-memory-speed-handoff.md`.
+`notes/optimizations-handoff.md`.
 
 ## Executive Summary
 
@@ -24,9 +24,15 @@ now below 1 GiB. Earlier chr10/chr11 runs could exceed tens of GiB because Step
 2, Step 3, metrics, and local search each had ways to materialize large
 covariance arrays.
 
-The remaining runtime is distributed across covariance generation,
-matrix-to-vector conversion, streaming metric passes, and local-search
-precompute. Candidate scoring itself is not a meaningful bottleneck.
+The newest profiles include both dense local-search accumulation and the
+single-pass compact covariance writer. The largest recent runtime win came from
+removing the compact covariance count-then-generate double pass: chr11 Step 2
+fell from about 22.3 minutes to about 11.8 minutes, and whole-run wall time fell
+from about 65.4 minutes to about 54.0 minutes without increasing RSS.
+
+The remaining runtime is now led by matrix-to-vector conversion, streaming
+metric passes, local-search HDF5 reads, and still-nontrivial covariance
+generation. Candidate scoring itself is not a meaningful bottleneck.
 
 ## Main Improvements
 
@@ -37,9 +43,10 @@ hot inner loop now operates on typed NumPy arrays and avoids Python per-pair
 overhead. In small benchmarks this was roughly 50x faster than the pure Python
 implementation.
 
-Recent local changes also precompute per-SNP allele counts and genetic cutoff
+The current kernels also precompute per-SNP allele counts and genetic cutoff
 bounds so the compact/full kernels do less repeated inner-loop work. These
-latest kernel refinements still need remote real-data validation.
+refinements are part of the remotely profiled single-pass compact covariance
+path.
 
 ### 2. Parallel Covariance Generation
 
@@ -76,7 +83,7 @@ The compact covariance writer removed the old Step 2 memory spike from full
 partition pair materialization. Instead of allocating all retained pair indexes
 and mapped positions, the compact path writes sorted rows in bounded chunks.
 
-Remote chr11 validation before the latest single-pass local change:
+Remote chr11 validation before the single-pass writer:
 
 | Metric | Value |
 | --- | ---: |
@@ -87,9 +94,17 @@ Remote chr11 validation before the latest single-pass local change:
 | Compact pair counting, summed across workers | ~1877 s |
 | Compact generation/HDF5 writing, summed across workers | ~2593 s |
 
-The latest local code adds a single-pass appendable compact HDF5 writer to
-remove the count-then-generate double pass. It is expected to reduce Step 2
-runtime while preserving bounded RSS, but remote validation is pending.
+The newest remote profiles validate the single-pass appendable compact HDF5
+writer. Every downloaded compact partition used `single_pass=true`, no fallback
+was used, and the compact pair-count profile disappeared:
+
+| Chrom | Compact partitions | Wall time after change | Max RSS after change |
+| --- | ---: | ---: | ---: |
+| chr10 | 376 | 1505.05 s | 0.598 GiB |
+| chr11 | 378 | 3236.81 s | 0.811 GiB |
+| chr13 | 274 | 997.88 s | 0.493 GiB |
+| chr21 | 103 | 267.31 s | 0.410 GiB |
+| chr22 | 98 | 308.48 s | 0.412 GiB |
 
 ### 5. Bounded Step 3 Matrix-To-Vector
 
@@ -107,7 +122,9 @@ Remote validation showed the memory win clearly:
 | chr22 | ~76 s | ~372 MiB |
 
 Step 3 is no longer the primary RSS risk, but it remains a major wall-time
-phase on large chromosomes.
+phase on large chromosomes. The latest local implementation starts addressing
+that runtime directly: Step 3 now uses compact HDF5 locus indexes for the loci
+pass and exposes opt-in bounded partition workers via `--matrix-workers`.
 
 ### 6. Streaming Metric Calculation
 
@@ -117,8 +134,9 @@ arrays with Step 3 or local-search memory.
 
 The tradeoff is runtime: chr11 currently spends roughly 260 seconds on the
 Fourier metric and another 264 seconds on the final Fourier-LS metric. Future
-work should reduce unnecessary metadata/row reads and consider bounded
-partition-level metric workers.
+work should consider bounded partition-level metric workers. The current metric
+path now avoids row streaming during loci discovery by using compact HDF5
+indexes and reports separate loci-index and diagonal-read timings.
 
 ### 7. Selective Breakpoint Subsets
 
@@ -144,9 +162,12 @@ Validated wins include:
 - grouped horizontal reductions, which cut chr11 horizontal aggregation from
   77.46 s to 16.44 s in the previous remote profile.
 
-The latest local code replaces temporary sum dictionaries with a
-per-breakpoint dense accumulator. Remote dense-accumulator profiling is in
-progress.
+The newest remote profiles include the dense accumulator and the duplicate
+merge revert. The dense path is a modest net win, not a dramatic one: chr11
+local search moved from 904.80 s in the previous sweep to 844.41 s, while dense
+lookup plus dense accumulation now accounts for about 63.6 s. The bigger
+cleanup was reverting the Python duplicate merge; `dedup_merge_seconds` is back
+to zero and chr11 duplicate tracking fell from 243.58 s to 134.84 s.
 
 ### 9. Failed or Reverted Optimization: Python Duplicate Merge
 
@@ -155,50 +176,52 @@ NumPy into a Python sorted merge loop. Remote profiling showed this was a clear
 regression: chr11 dedup time rose from 134.21 s to 243.58 s, with nearly all
 of the new time in `dedup_merge_seconds`.
 
-That path has been reverted. The code is back to NumPy's
-`np.isin(..., assume_unique=True)` plus `np.union1d()` behavior for duplicate
-tracking.
+That path has been reverted and remotely validated. The code is back to
+NumPy's `np.isin(..., assume_unique=True)` plus `np.union1d()` behavior for
+duplicate tracking.
 
 ## Remote Profiling Highlights
 
-Latest downloaded previous-sweep profile, before dense-accumulator validation:
+Latest downloaded profile, including dense accumulation and single-pass compact
+covariance:
 
 | Chrom | Wall time | Max RSS | Local search |
 | --- | ---: | ---: | ---: |
-| chr10 | 1872.15 s | 0.587 GiB | 342.27 s |
-| chr11 | 3922.00 s | 0.837 GiB | 904.80 s |
-| chr13 | 1400.58 s | 0.488 GiB | 304.53 s |
-| chr21 | 320.68 s | 0.405 GiB | 45.94 s |
-| chr22 | 405.62 s | 0.412 GiB | 82.09 s |
+| chr10 | 1505.05 s | 0.598 GiB | 327.89 s |
+| chr11 | 3236.81 s | 0.811 GiB | 844.41 s |
+| chr13 | 997.88 s | 0.493 GiB | 200.44 s |
+| chr21 | 267.31 s | 0.410 GiB | 48.63 s |
+| chr22 | 308.48 s | 0.412 GiB | 60.06 s |
 
 chr11 phase split:
 
 | Phase | Seconds | Notes |
 | --- | ---: | --- |
-| Step 2 covariance | 1338 | compact HDF5, `workers=4` |
-| Step 3 matrix-to-vector | 1025 | bounded RSS, still high wall time |
+| Step 2 covariance | 707 | single-pass compact HDF5, `workers=4` |
+| Step 3 matrix-to-vector | 1032 | bounded RSS, now larger than Step 2 |
 | Filter/minima before metric | 126 | lower priority |
-| Fourier metric | 260 | streaming metric pass |
-| Fourier local search | 905 | pre-dense, includes reverted duplicate regression |
-| Final Fourier-LS metric | 264 | streaming metric pass |
+| Fourier metric | 261 | streaming metric pass |
+| Fourier local search | 844 | dense accumulation plus duplicate merge revert |
+| Final Fourier-LS metric | 262 | streaming metric pass |
 
 ## Current Remaining Bottlenecks
 
 The main remaining runtime targets are:
 
-1. Step 2 compact covariance generation, especially avoiding duplicate
-   count/generate work.
-2. Step 3 matrix-to-vector wall time, while keeping parent-owned ordered writes
+1. Step 3 matrix-to-vector wall time, while keeping parent-owned ordered writes
    and bounded RSS.
-3. Streaming metric passes, especially unnecessary row reads and repeated
+2. Streaming metric passes, especially unnecessary row reads and repeated
    partition setup.
-4. Local-search HDF5 read/decompression and normalization after dense
-   accumulator validation.
+3. Local-search HDF5 read/decompression and normalization.
+4. Further compact covariance CPU work, now that the largest double-pass cost is
+   gone.
 
-Multiprocessing is worth testing for Step 3 and metric partition work, but not
-as naive per-breakpoint local-search multiprocessing. Local search should only
-use grouped worker units if dense profiling shows enough remaining work to
-justify the extra I/O and RSS risk.
+Step 3 multiprocessing is now implemented as an opt-in bounded worker path and
+needs remote tuning. Metric partition multiprocessing is still worth testing,
+but naive per-breakpoint local-search multiprocessing remains a poor fit.
+Local search should only use grouped worker units if read-amplification
+instrumentation shows enough remaining work to justify the extra I/O and RSS
+risk.
 
 ## Design Principles That Emerged
 

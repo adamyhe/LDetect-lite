@@ -66,6 +66,9 @@ class LocalSearchPrecomputeStats:
     peak_chunk_rows: int = 0
     hdf5_reader_open_count: int = 0
     hdf5_reader_reuse_count: int = 0
+    hdf5_read_calls: int = 0
+    hdf5_segment_partition_reads: int = 0
+    hdf5_segment_loci: int = 0
     dedup_merge_seconds: float = 0.0
     dense_lookup_seconds: float = 0.0
     dense_accumulate_seconds: float = 0.0
@@ -100,7 +103,10 @@ class LocalSearchPrecomputeStats:
             f"active_rows_peak={self.active_rows_peak} "
             f"peak_chunk_rows={self.peak_chunk_rows} "
             f"hdf5_reader_open_count={self.hdf5_reader_open_count} "
-            f"hdf5_reader_reuse_count={self.hdf5_reader_reuse_count}"
+            f"hdf5_reader_reuse_count={self.hdf5_reader_reuse_count} "
+            f"hdf5_read_calls={self.hdf5_read_calls} "
+            f"hdf5_segment_partition_reads={self.hdf5_segment_partition_reads} "
+            f"hdf5_segment_loci={self.hdf5_segment_loci}"
         )
 
 
@@ -655,6 +661,7 @@ def _add_hdf5_segment_values(
         return
     if stats is not None:
         stats.segments += 1
+        stats.hdf5_segment_loci += int(segment_loci.size)
 
     if diag_pos.size == 0:
         return
@@ -664,6 +671,8 @@ def _add_hdf5_segment_values(
     seen_hi_by_lo: dict[int, np.ndarray] = {}
     if stats is not None and readers_by_partition is not None:
         stats.hdf5_reader_reuse_count += len(active_partitions)
+    if stats is not None:
+        stats.hdf5_segment_partition_reads += len(active_partitions)
     chunk_iter = _iter_hdf5_canonical_segment_rows(
         active_partitions,
         active_min_lo,
@@ -681,6 +690,7 @@ def _add_hdf5_segment_values(
         if stats is not None:
             stats.hdf5_read_seconds += time.perf_counter() - hdf5_start
             stats.rows_read += int(chunk.lo.size)
+            stats.hdf5_read_calls += 1
             stats.peak_chunk_rows = max(stats.peak_chunk_rows, int(chunk.lo.size))
 
         filter_start = time.perf_counter()

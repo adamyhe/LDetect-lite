@@ -415,6 +415,23 @@ def test_matrix_to_vector_chunked_hdf5_matches_materialized_cache(
     _assert_vectors_close(chunked_path, cache_path)
 
 
+def test_matrix_to_vector_hdf5_workers_match_single_process(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    import ldetect2._util.vector_array as vector_array
+
+    monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
+    monkeypatch.setattr(vector_array, "ProcessPoolExecutor", ThreadPoolExecutor)
+    store, _ = _make_two_partition_store(tmp_path)
+    worker_path = tmp_path / "worker.txt.gz"
+    single_path = tmp_path / "single.txt.gz"
+
+    MatrixAnalysis("testchr", store).calc_diag_array(worker_path, matrix_workers=2)
+    MatrixAnalysis("testchr", store).calc_diag_array(single_path)
+
+    _assert_vectors_close(worker_path, single_path)
+
+
 def test_matrix_to_vector_array_accepts_chromosome_covariance_cache(tmp_path):
     store, partitions = _make_two_partition_store(tmp_path)
     cached_path = tmp_path / "cached.txt.gz"

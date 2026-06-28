@@ -124,6 +124,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--matrix-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for Step 3 matrix-to-vector partition computation "
+            "(default: 1)."
+        ),
+    )
+    p.add_argument(
         "--high-precision",
         action="store_true",
         help="Use 50-digit Decimal arithmetic for local search (slower).",
@@ -283,7 +293,7 @@ def _run(args: argparse.Namespace) -> int:
     log_msg("Step 3: Converting matrix to vector")
     log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
-    analysis.calc_diag_lean(vector_path)
+    analysis.calc_diag_lean(vector_path, matrix_workers=args.matrix_workers)
     log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #

@@ -67,6 +67,9 @@ BREAKPOINT_COLS = [
     "peak_chunk_rows",
     "hdf5_reader_open_count",
     "hdf5_reader_reuse_count",
+    "hdf5_read_calls",
+    "hdf5_segment_partition_reads",
+    "hdf5_segment_loci",
 ]
 
 GROUP_COLS = [
@@ -125,6 +128,9 @@ BY_CHROM_COLS = [
     "peak_chunk_rows",
     "hdf5_reader_open_count",
     "hdf5_reader_reuse_count",
+    "hdf5_read_calls",
+    "hdf5_segment_partition_reads",
+    "hdf5_segment_loci",
     "group_count",
     "group_breakpoints",
     "group_rows",
@@ -165,6 +171,9 @@ _BREAKPOINT_EXTRA_INT_COLS = [
     "segments",
     "hdf5_reader_open_count",
     "hdf5_reader_reuse_count",
+    "hdf5_read_calls",
+    "hdf5_segment_partition_reads",
+    "hdf5_segment_loci",
 ]
 
 _MAC_TIME_RE = re.compile(r"^\s*(?P<value>[0-9.]+)\s+(?P<key>.+?)\s*$")

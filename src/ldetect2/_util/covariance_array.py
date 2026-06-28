@@ -307,6 +307,8 @@ def metric_from_files(
     diag_pos_chunks: list[np.ndarray] = []
     diag_val_chunks: list[np.ndarray] = []
     index_read_seconds = 0.0
+    loci_index_seconds = 0.0
+    diag_read_seconds = 0.0
     row_read_seconds = 0.0
     normalize_seconds = 0.0
     crossing_seconds = 0.0
@@ -322,6 +324,21 @@ def metric_from_files(
         )
         with open_covariance_reader(path, start, end) as reader:
             index_start = time.perf_counter()
+            loci = reader.read_loci()
+            lower_owned = (
+                loci >= lower_min if include_lower_min else loci > lower_min
+            )
+            loci_in_range = (
+                (loci >= snp_first)
+                & (loci <= snp_last)
+                & lower_owned
+                & (loci <= lower_max)
+            )
+            if np.any(loci_in_range):
+                loci_chunks.append(loci[loci_in_range])
+            loci_index_seconds += time.perf_counter() - index_start
+
+            diag_start = time.perf_counter()
             diag_pos, diag_val = reader.read_diagonal()
             diag_in_range = (
                 (diag_pos >= snp_first)
@@ -332,17 +349,8 @@ def metric_from_files(
             if np.any(diag_in_range):
                 diag_pos_chunks.append(diag_pos[diag_in_range])
                 diag_val_chunks.append(diag_val[diag_in_range])
+            diag_read_seconds += time.perf_counter() - diag_start
             index_read_seconds += time.perf_counter() - index_start
-            for chunk in reader.iter_owned_rows(
-                lower_min,
-                lower_max,
-                snp_first,
-                snp_last,
-                _DEFAULT_CHUNK_ROWS,
-                include_lower_min=include_lower_min,
-            ):
-                rows_read += int(chunk.lo.size)
-                loci_chunks.append(np.unique(np.concatenate((chunk.lo, chunk.hi))))
 
     if not loci_chunks:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
@@ -449,6 +457,8 @@ def metric_from_files(
         f"partitions={len(partitions)} rows_read={rows_read} pair_rows={pair_rows} "
         f"normalized_rows={normalized_rows} crossing_rows={crossing_rows} "
         f"index_read_seconds={index_read_seconds:.6f} "
+        f"loci_index_seconds={loci_index_seconds:.6f} "
+        f"diag_read_seconds={diag_read_seconds:.6f} "
         f"row_read_seconds={row_read_seconds:.6f} "
         f"normalize_seconds={normalize_seconds:.6f} "
         f"crossing_seconds={crossing_seconds:.6f}"
