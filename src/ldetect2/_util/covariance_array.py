@@ -12,13 +12,30 @@ import numpy as np
 from ldetect2._util.logging import log_debug
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
-from ldetect2.io.r2_nocache import R2NoCacheConfig, open_r2_nocache_reader
-from ldetect2.io.r2_zarr import open_r2_zarr_reader
+from ldetect2.io.r2_nocache import (
+    R2NoCacheConfig,
+    iter_prepared_r2_nocache_partition_rows,
+    prepare_r2_nocache_partition,
+)
+from ldetect2.io.r2_zarr import (
+    open_r2_zarr_owned_reader,
+    open_r2_zarr_reader,
+    validate_r2_zarr_owned_cache,
+)
 
 _DEFAULT_CHUNK_ROWS = 1_000_000
 _METRIC_WORKER_BREAKPOINTS: np.ndarray | None = None
 _METRIC_WORKER_DIAG_POS: np.ndarray | None = None
 _METRIC_WORKER_DIAG_VAL: np.ndarray | None = None
+
+try:
+    from numba import njit
+
+    _njit_fallback = njit(cache=True)
+except ImportError:
+
+    def _njit_fallback(fn):  # type: ignore[misc]
+        return fn
 
 
 @dataclass(frozen=True)
@@ -479,23 +496,35 @@ def metric_from_r2_zarr_files(
     pair_rows = 0
     crossing_rows = 0
 
-    for p_index, (start, end) in enumerate(partitions):
-        lower_min, lower_max, include_lower_min = _owned_bounds(
-            partitions, p_index, snp_first, snp_last
-        )
-        with open_r2_zarr_reader(store.root, name, start, end) as reader:
+    has_owned_cache = validate_r2_zarr_owned_cache(store.root, name)
+    if has_owned_cache:
+        with open_r2_zarr_owned_reader(store.root, name) as reader:
             index_start = time.perf_counter()
             loci = reader.read_loci()
-            lower_owned = loci >= lower_min if include_lower_min else loci > lower_min
-            loci_in_range = (
-                (loci >= snp_first)
-                & (loci <= snp_last)
-                & lower_owned
-                & (loci <= lower_max)
-            )
+            loci_in_range = (loci >= snp_first) & (loci <= snp_last)
             if np.any(loci_in_range):
                 loci_chunks.append(loci[loci_in_range])
             index_read_seconds += time.perf_counter() - index_start
+    else:
+        for p_index, (start, end) in enumerate(partitions):
+            lower_min, lower_max, include_lower_min = _owned_bounds(
+                partitions, p_index, snp_first, snp_last
+            )
+            with open_r2_zarr_reader(store.root, name, start, end) as reader:
+                index_start = time.perf_counter()
+                loci = reader.read_loci()
+                lower_owned = (
+                    loci >= lower_min if include_lower_min else loci > lower_min
+                )
+                loci_in_range = (
+                    (loci >= snp_first)
+                    & (loci <= snp_last)
+                    & lower_owned
+                    & (loci <= lower_max)
+                )
+                if np.any(loci_in_range):
+                    loci_chunks.append(loci[loci_in_range])
+                index_read_seconds += time.perf_counter() - index_start
 
     if not loci_chunks:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
@@ -511,11 +540,29 @@ def metric_from_r2_zarr_files(
             f"ignoring workers={workers}"
         )
 
+    reader_contexts = []
     for p_index, (start, end) in enumerate(partitions):
         lower_min, lower_max, include_lower_min = _owned_bounds(
             partitions, p_index, snp_first, snp_last
         )
-        with open_r2_zarr_reader(store.root, name, start, end) as reader:
+        if has_owned_cache:
+            reader_contexts.append(
+                (
+                    (lower_min, lower_max, include_lower_min, end),
+                    open_r2_zarr_owned_reader(store.root, name),
+                )
+            )
+        else:
+            reader_contexts.append(
+                (
+                    (lower_min, lower_max, include_lower_min, end),
+                    open_r2_zarr_reader(store.root, name, start, end),
+                )
+            )
+
+    for bounds, reader_context in reader_contexts:
+        with reader_context as reader:
+            lower_min, lower_max, include_lower_min, partition_end = bounds
             chunk_iter = reader.iter_owned_rows(
                 lower_min,
                 lower_max,
@@ -532,7 +579,14 @@ def metric_from_r2_zarr_files(
                     break
                 row_read_seconds += time.perf_counter() - read_start
                 rows_read += int(chunk.lo.size)
-                pair_mask = chunk.lo < chunk.hi
+                in_range = (
+                    (chunk.lo >= snp_first)
+                    & (chunk.lo <= snp_last)
+                    & (chunk.hi >= snp_first)
+                    & (chunk.hi <= snp_last)
+                    & (chunk.hi <= partition_end)
+                )
+                pair_mask = in_range & (chunk.lo < chunk.hi)
                 if not np.any(pair_mask):
                     continue
                 pair_i = chunk.lo[pair_mask]
@@ -560,6 +614,102 @@ def metric_from_r2_zarr_files(
         f"crossing_seconds={crossing_seconds:.6f}"
     )
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
+
+
+@_njit_fallback
+def _searchsorted_left_int(values: np.ndarray, target: int) -> int:
+    lo = 0
+    hi = values.shape[0]
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if values[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+@_njit_fallback
+def _r2_nocache_metric_fused_impl(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    pos_arr: np.ndarray,
+    diag_shrink: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    breakpoints: np.ndarray,
+    lower_min: int,
+    lower_max: int,
+    snp_first: int,
+    snp_last: int,
+    include_lower_min: bool,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+) -> tuple[float, int, int, int, int]:
+    n_snps = hap_mat.shape[0]
+    n_haps = hap_mat.shape[1]
+    n_total = float(n_haps)
+    total_sum = 0.0
+    n_nonzero = 0
+    rows_read = 0
+    pair_rows = 0
+    crossing_rows = 0
+
+    for i in range(n_snps):
+        pos_i = int(pos_arr[i])
+        if pos_i < snp_first or pos_i > snp_last or pos_i > lower_max:
+            continue
+        if include_lower_min:
+            if pos_i < lower_min:
+                continue
+        elif pos_i <= lower_min:
+            continue
+
+        diag_i = diag_shrink[i]
+        if diag_i <= 0.0:
+            continue
+
+        gpos1 = gpos_arr[i]
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        block_i = _searchsorted_left_int(breakpoints, pos_i)
+        for j in range(i, j_stop):
+            pos_j = int(pos_arr[j])
+            if pos_j < snp_first or pos_j > snp_last:
+                continue
+            diag_j = diag_shrink[j]
+            if diag_j <= 0.0:
+                continue
+
+            df = gpos_arr[j] - gpos1
+            ee = np.exp(-4.0 * ne * df / (2.0 * n_ind))
+            a = hap_mat[i]
+            b = hap_mat[j]
+            n11 = np.sum(a * b)
+            nx1 = hap_sums[j]
+            f11 = n11 / n_total
+            f1 = n1x / n_total
+            f2 = nx1 / n_total
+            d_naive = f11 - f1 * f2
+            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+            if np.abs(ds2) < cutoff:
+                continue
+
+            rows_read += 1
+            if i == j:
+                continue
+
+            pair_rows += 1
+            block_j = _searchsorted_left_int(breakpoints, pos_j)
+            if block_i == block_j:
+                continue
+            total_sum += ds2 * ds2 / (diag_i * diag_j)
+            n_nonzero += 1
+            crossing_rows += 1
+
+    return total_sum, n_nonzero, rows_read, pair_rows, crossing_rows
 
 
 def metric_from_r2_nocache(
@@ -595,43 +745,99 @@ def metric_from_r2_nocache(
         lower_min, lower_max, include_lower_min = _owned_bounds(
             partitions, p_index, snp_first, snp_last
         )
-        with open_r2_nocache_reader(config, start, end) as reader:
-            chunk_iter = reader.iter_owned_rows(
+        prepared = prepare_r2_nocache_partition(config, start, end)
+
+        if not prepared.has_duplicate_positions:
+            owned_loci = prepared.pos_arr[
+                (prepared.diag_shrink > 0.0)
+                & (prepared.pos_arr >= snp_first)
+                & (prepared.pos_arr <= snp_last)
+                & (prepared.pos_arr <= lower_max)
+                & (
+                    (prepared.pos_arr >= lower_min)
+                    if include_lower_min
+                    else (prepared.pos_arr > lower_min)
+                )
+            ]
+            if owned_loci.size:
+                loci_parts.append(owned_loci)
+            row_start = time.perf_counter()
+            (
+                partition_sum,
+                partition_n,
+                partition_rows,
+                partition_pairs,
+                partition_crossing,
+            ) = _r2_nocache_metric_fused_impl(
+                prepared.hap_mat,
+                prepared.gpos_arr,
+                prepared.hap_sums,
+                prepared.pos_arr,
+                prepared.diag_shrink,
+                prepared.j_stop_by_i,
+                bp,
                 lower_min,
                 lower_max,
                 snp_first,
                 snp_last,
-                _DEFAULT_CHUNK_ROWS,
-                include_lower_min=include_lower_min,
+                include_lower_min,
+                prepared.config.ne,
+                float(prepared.n_ind),
+                prepared.theta,
+                prepared.config.cutoff,
             )
-            while True:
-                read_start = time.perf_counter()
-                try:
-                    chunk = next(chunk_iter)
-                except StopIteration:
-                    break
-                row_seconds += time.perf_counter() - read_start
-                rows_read += int(chunk.lo.size)
-                if chunk.lo.size:
-                    loci_parts.append(chunk.lo)
-                pair_mask = chunk.lo < chunk.hi
-                if not np.any(pair_mask):
-                    continue
-                pair_i = chunk.lo[pair_mask]
-                pair_j = chunk.hi[pair_mask]
-                pair_r2 = chunk.r2[pair_mask]
-                pair_rows += int(pair_i.size)
+            row_seconds += time.perf_counter() - row_start
+            total_sum += partition_sum
+            n_nonzero += partition_n
+            rows_read += partition_rows
+            pair_rows += partition_pairs
+            crossing_rows += partition_crossing
+            continue
 
-                crossing_start = time.perf_counter()
-                i_blocks = np.searchsorted(bp, pair_i, side="left")
-                j_blocks = np.searchsorted(bp, pair_j, side="left")
-                crossing = i_blocks != j_blocks
-                crossing_count = int(np.count_nonzero(crossing))
-                if crossing_count:
-                    total_sum += float(np.sum(pair_r2[crossing]))
-                    n_nonzero += crossing_count
-                    crossing_rows += crossing_count
-                crossing_seconds += time.perf_counter() - crossing_start
+        chunk_iter = iter_prepared_r2_nocache_partition_rows(
+            prepared,
+            chunk_rows=_DEFAULT_CHUNK_ROWS,
+        )
+        while True:
+            read_start = time.perf_counter()
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            row_seconds += time.perf_counter() - read_start
+            lower_owned = (
+                chunk.lo >= lower_min if include_lower_min else chunk.lo > lower_min
+            )
+            owned = (
+                (chunk.lo >= snp_first)
+                & (chunk.lo <= snp_last)
+                & (chunk.hi >= snp_first)
+                & (chunk.hi <= snp_last)
+                & lower_owned
+                & (chunk.lo <= lower_max)
+            )
+            rows_read += int(np.count_nonzero(owned))
+            if not np.any(owned):
+                continue
+            loci_parts.append(chunk.lo[owned])
+            pair_mask = owned & (chunk.lo < chunk.hi)
+            if not np.any(pair_mask):
+                continue
+            pair_i = chunk.lo[pair_mask]
+            pair_j = chunk.hi[pair_mask]
+            pair_r2 = chunk.r2[pair_mask]
+            pair_rows += int(pair_i.size)
+
+            crossing_start = time.perf_counter()
+            i_blocks = np.searchsorted(bp, pair_i, side="left")
+            j_blocks = np.searchsorted(bp, pair_j, side="left")
+            crossing = i_blocks != j_blocks
+            crossing_count = int(np.count_nonzero(crossing))
+            if crossing_count:
+                total_sum += float(np.sum(pair_r2[crossing]))
+                n_nonzero += crossing_count
+                crossing_rows += crossing_count
+            crossing_seconds += time.perf_counter() - crossing_start
 
     if not loci_parts:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}

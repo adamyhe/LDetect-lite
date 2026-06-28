@@ -569,6 +569,51 @@ def test_r2_nocache_metric_matches_hdf5_metric(tmp_path: Path) -> None:
     assert nocache_metric["N_zero"] == pytest.approx(hdf5_metric["N_zero"])
 
 
+def test_r2_nocache_metric_duplicate_positions_match_hdf5(tmp_path: Path) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = tmp_path / "duplicate.vcf"
+    _write_vcf(vcf_path, _duplicate_position_vcf_stream())
+
+    root = tmp_path / "store"
+    chrom = "1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+    calc_covariance(
+        vcf_stream=_duplicate_position_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=chrom_dir / f"{chrom}.100.300.h5",
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    store = CovarianceStore(root=root)
+    breakpoints = [200]
+    hdf5_metric = Metric(chrom, store, breakpoints, 100, 300).calc_metric()
+    nocache_metric = Metric(
+        chrom,
+        store,
+        breakpoints,
+        100,
+        300,
+        pair_cache="r2-nocache",
+        r2_nocache_config=R2NoCacheConfig(
+            reference_panel=str(vcf_path),
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            chrom=chrom,
+            cutoff=1e-7,
+        ),
+    ).calc_metric()
+
+    assert nocache_metric["sum"] == pytest.approx(hdf5_metric["sum"])
+    assert nocache_metric["N_nonzero"] == hdf5_metric["N_nonzero"]
+    assert nocache_metric["N_zero"] == pytest.approx(hdf5_metric["N_zero"])
+
+
 def test_r2_nocache_local_search_matches_hdf5(tmp_path: Path) -> None:
     map_path = tmp_path / "map.gz"
     _write_map(map_path)

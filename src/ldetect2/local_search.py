@@ -40,9 +40,50 @@ from ldetect2.io.r2_nocache import (
     open_r2_nocache_reader,
     prepare_r2_nocache_partition,
 )
-from ldetect2.io.r2_zarr import R2RowChunk, open_r2_zarr_reader
+from ldetect2.io.r2_zarr import (
+    R2RowChunk,
+    open_r2_zarr_owned_reader,
+    open_r2_zarr_reader,
+    validate_r2_zarr_owned_cache,
+)
 
 _PREC = 50
+
+try:
+    from numba import njit
+
+    _HAS_NUMBA = True
+    _njit_fallback = njit(cache=True)
+except ImportError:
+    _HAS_NUMBA = False
+
+    def _njit_fallback(fn):  # type: ignore[misc]
+        return fn
+
+
+@_njit_fallback
+def _dense_accumulate_impl(
+    accumulator_loci: np.ndarray,
+    row_loci: np.ndarray,
+    weights: np.ndarray,
+    target: np.ndarray,
+) -> int:
+    matched = 0
+    n_loci = accumulator_loci.shape[0]
+    for row_idx in range(row_loci.shape[0]):
+        value = row_loci[row_idx]
+        lo = 0
+        hi = n_loci
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if accumulator_loci[mid] < value:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < n_loci and accumulator_loci[lo] == value:
+            target[lo] += weights[row_idx]
+            matched += 1
+    return matched
 
 
 @dataclass
@@ -206,6 +247,22 @@ class DenseLocalSearchAccumulator:
         self._add(self.sum_horiz, row_hi, r2)
 
     def _add(self, target: np.ndarray, loci: np.ndarray, values: np.ndarray) -> None:
+        if _HAS_NUMBA:
+            accumulate_start = time.perf_counter()
+            matched = _dense_accumulate_impl(
+                self.loci,
+                np.asarray(loci, dtype=np.int64),
+                np.asarray(values, dtype=np.float64),
+                target,
+            )
+            if self.stats is not None:
+                self.stats.dense_accumulate_seconds += (
+                    time.perf_counter() - accumulate_start
+                )
+            if matched == 0:
+                return
+            return
+
         idx, keep = self.lookup(loci)
         if idx.size == 0:
             return
@@ -258,6 +315,18 @@ def local_search_r2_zarr_partition(
     end: int,
 ) -> LocalSearchR2ZarrPartition:
     """Load only r2 Zarr index metadata for one local-search partition."""
+    if validate_r2_zarr_owned_cache(store.root, name):
+        with open_r2_zarr_owned_reader(store.root, name) as reader:
+            loci = reader.read_loci()
+            loci = loci[(loci >= start) & (loci <= end)]
+            return LocalSearchR2ZarrPartition(
+                start=start,
+                end=end,
+                name=name,
+                root=store.root,
+                source_row_count=reader.row_count,
+                loci=loci,
+            )
     with open_r2_zarr_reader(store.root, name, start, end) as reader:
         return LocalSearchR2ZarrPartition(
             start=start,
@@ -539,6 +608,40 @@ def _iter_r2_zarr_canonical_segment_rows(
 ) -> Iterator[R2RowChunk]:
     """Yield canonical normalized r2 segment rows in partition precedence order."""
     min_lo = max(active_min_lo, lo_min)
+    if partitions and validate_r2_zarr_owned_cache(
+        Path(partitions[0].root), partitions[0].name
+    ):
+        seen_hi_by_lo: dict[int, np.ndarray] = {}
+        with open_r2_zarr_owned_reader(
+            Path(partitions[0].root),
+            partitions[0].name,
+        ) as reader:
+            for partition in partitions:
+                for chunk in reader.iter_rows(min_lo, lo_max, chunk_rows):
+                    in_partition = (
+                        (chunk.lo >= partition.start)
+                        & (chunk.lo <= partition.end)
+                        & (chunk.hi >= partition.start)
+                        & (chunk.hi <= partition.end)
+                    )
+                    if not np.any(in_partition):
+                        continue
+                    row_lo = chunk.lo[in_partition]
+                    row_hi = chunk.hi[in_partition]
+                    row_r2 = chunk.r2[in_partition]
+                    first_seen = _first_seen_pair_mask(
+                        row_lo,
+                        row_hi,
+                        seen_hi_by_lo,
+                        None,
+                    )
+                    if np.any(first_seen):
+                        yield R2RowChunk(
+                            lo=row_lo[first_seen],
+                            hi=row_hi[first_seen],
+                            r2=row_r2[first_seen],
+                        )
+        return
     for partition in partitions:
         with open_r2_zarr_reader(
             Path(partition.root),

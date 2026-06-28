@@ -12,8 +12,12 @@ from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.io.r2_zarr import (
     R2RowChunk,
+    open_r2_zarr_owned_reader,
     open_r2_zarr_reader,
+    r2_zarr_path,
+    validate_r2_zarr_owned_cache,
     validate_r2_zarr_partition,
+    write_r2_zarr_owned_cache,
     write_r2_zarr_partition_append,
 )
 from ldetect2.local_search import LocalSearch, local_search_r2_zarr_partition
@@ -62,6 +66,8 @@ def _make_dual_store(
     loci: list[int],
     r2_by_pair: dict[tuple[int, int], float],
     partitions: list[tuple[int, int]],
+    *,
+    owned_cache: bool = False,
 ) -> CovarianceStore:
     root = tmp_path / "cov"
     chrom_dir = root / "chr1"
@@ -87,6 +93,19 @@ def _make_dual_store(
             shrink_ld=np.sqrt(np.array([row[2] for row in rows], dtype=np.float64)),
         )
         _write_r2_partition(root, "chr1", start, end, rows)
+    if owned_cache:
+        write_r2_zarr_owned_cache(
+            root,
+            "chr1",
+            partitions,
+            snp_first=loci[0],
+            snp_last=loci[-1],
+            ne=11418.0,
+            cutoff=1e-7,
+            chunk_rows=2,
+            dataset_chunk_rows=2,
+            delete_partitions=True,
+        )
     return CovarianceStore(root=root)
 
 
@@ -114,6 +133,34 @@ def test_r2_zarr_reader_streams_sorted_rows_and_preserves_diagonal(
     np.testing.assert_array_equal(lo, np.array([row[0] for row in rows]))
     np.testing.assert_array_equal(hi, np.array([row[1] for row in rows]))
     np.testing.assert_allclose(r2[lo == hi], np.ones(3))
+    assert reader.row_count == len(rows)
+
+
+def test_r2_zarr_v2_stores_diagonal_implicitly_and_hi_delta(tmp_path: Path) -> None:
+    root = tmp_path / "cov"
+    rows = [
+        (100, 100, 1.0),
+        (100, 300, 0.5),
+        (200, 200, 1.0),
+        (200, 300, 0.75),
+        (300, 300, 1.0),
+    ]
+    _write_r2_partition(root, "chr1", 100, 300, rows)
+
+    import zarr
+
+    group = zarr.open_group(str(r2_zarr_path(root, "chr1")), mode="r")[
+        "partitions"
+    ]["100_300"]
+    assert "hi_idx" not in group
+    assert "hi_delta" in group
+    assert "diag_idx" in group
+    assert group.attrs["version"] == 2
+    assert group.attrs["n_pairs"] == len(rows)
+    assert group.attrs["n_stored_pairs"] == 2
+    assert group.attrs["n_diagonal"] == 3
+    np.testing.assert_array_equal(group["hi_delta"][:], np.array([2, 1]))
+    np.testing.assert_allclose(group["r2"][:], np.array([0.5, 0.75]))
 
 
 def test_r2_zarr_owned_rows_filter_lower_bound(tmp_path: Path) -> None:
@@ -150,6 +197,46 @@ def test_r2_zarr_validation_rejects_missing_partition(tmp_path: Path) -> None:
     assert not validate_r2_zarr_partition(root, "chr1", 200, 400)
 
 
+def test_r2_zarr_explicit_compressor_round_trips(tmp_path: Path) -> None:
+    root = tmp_path / "cov"
+    rows = [
+        (100, 100, 1.0),
+        (100, 200, 0.25),
+        (200, 200, 1.0),
+    ]
+    positions = np.array([100, 200], dtype=np.int32)
+    write_r2_zarr_partition_append(
+        root,
+        "chr1",
+        100,
+        200,
+        positions=positions,
+        row_chunks=iter(
+            [
+                R2RowChunk(
+                    lo=np.array([row[0] for row in rows], dtype=np.int32),
+                    hi=np.array([row[1] for row in rows], dtype=np.int32),
+                    r2=np.array([row[2] for row in rows], dtype=np.float64),
+                )
+            ]
+        ),
+        ne=11418.0,
+        cutoff=1e-7,
+        compressor="lz4-bitshuffle",
+    )
+
+    assert validate_r2_zarr_partition(root, "chr1", 100, 200)
+    with open_r2_zarr_reader(root, "chr1", 100, 200) as reader:
+        chunks = list(reader.iter_rows(100, 200, chunk_rows=2))
+
+    lo = np.concatenate([chunk.lo for chunk in chunks])
+    hi = np.concatenate([chunk.hi for chunk in chunks])
+    r2 = np.concatenate([chunk.r2 for chunk in chunks])
+    np.testing.assert_array_equal(lo, np.array([row[0] for row in rows]))
+    np.testing.assert_array_equal(hi, np.array([row[1] for row in rows]))
+    np.testing.assert_allclose(r2, np.array([row[2] for row in rows]))
+
+
 def test_r2_zarr_empty_partition_validates(tmp_path: Path) -> None:
     root = tmp_path / "cov"
     write_r2_zarr_partition_append(
@@ -168,6 +255,69 @@ def test_r2_zarr_empty_partition_validates(tmp_path: Path) -> None:
         assert reader.row_count == 0
         assert reader.read_loci().size == 0
         assert list(reader.iter_rows(0, 1, chunk_rows=1)) == []
+
+
+def test_r2_zarr_owned_cache_preserves_first_pair_and_deletes_partitions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "cov"
+    _write_r2_partition(
+        root,
+        "chr1",
+        100,
+        400,
+        [
+            (100, 100, 1.0),
+            (100, 300, 0.1),
+            (300, 300, 1.0),
+            (300, 400, 0.2),
+            (400, 400, 1.0),
+        ],
+    )
+    _write_r2_partition(
+        root,
+        "chr1",
+        300,
+        600,
+        [
+            (300, 300, 1.0),
+            (300, 400, 0.9),
+            (300, 500, 0.3),
+            (400, 400, 1.0),
+            (500, 500, 1.0),
+        ],
+    )
+
+    n_pairs = write_r2_zarr_owned_cache(
+        root,
+        "chr1",
+        [(100, 400), (300, 600)],
+        snp_first=100,
+        snp_last=600,
+        ne=11418.0,
+        cutoff=1e-7,
+        chunk_rows=2,
+        dataset_chunk_rows=2,
+        delete_partitions=True,
+    )
+
+    assert n_pairs == 7
+    assert validate_r2_zarr_owned_cache(root, "chr1")
+    assert not validate_r2_zarr_partition(root, "chr1", 100, 400)
+    with open_r2_zarr_owned_reader(root, "chr1") as reader:
+        chunks = list(reader.iter_rows(100, 600, chunk_rows=2))
+
+    lo = np.concatenate([chunk.lo for chunk in chunks])
+    hi = np.concatenate([chunk.hi for chunk in chunks])
+    r2 = np.concatenate([chunk.r2 for chunk in chunks])
+    observed = {
+        (int(lo_pos), int(hi_pos)): float(value)
+        for lo_pos, hi_pos, value in zip(lo, hi, r2, strict=True)
+    }
+    assert observed[(300, 400)] == pytest.approx(0.2)
+    assert observed[(300, 500)] == pytest.approx(0.3)
+    assert observed[(100, 300)] == pytest.approx(0.1)
+    assert observed[(300, 300)] == pytest.approx(1.0)
 
 
 def test_r2_zarr_metric_matches_hdf5_with_overlapping_partitions(
@@ -192,6 +342,29 @@ def test_r2_zarr_metric_matches_hdf5_with_overlapping_partitions(
     assert zarr == pytest.approx(hdf5)
 
 
+def test_r2_zarr_owned_metric_matches_hdf5_with_deleted_partitions(
+    tmp_path: Path,
+) -> None:
+    loci = [100, 200, 300, 400, 500, 600]
+    partitions = [(100, 400), (200, 600)]
+    r2 = {
+        (100, 300): 0.5,
+        (100, 500): 0.2,
+        (200, 400): 0.25,
+        (300, 500): 0.75,
+        (400, 600): 0.125,
+    }
+    store = _make_dual_store(tmp_path, loci, r2, partitions, owned_cache=True)
+
+    hdf5 = Metric("chr1", store, [250, 450], 100, 600).calc_metric()
+    zarr = Metric(
+        "chr1", store, [250, 450], 100, 600, pair_cache="r2-zarr"
+    ).calc_metric()
+
+    assert validate_r2_zarr_owned_cache(store.root, "chr1")
+    assert zarr == pytest.approx(hdf5)
+
+
 def test_r2_zarr_local_search_matches_hdf5(tmp_path: Path) -> None:
     loci = [100, 200, 300, 400, 500, 600, 700, 800, 900]
     partitions = [(100, 400), (300, 700), (600, 900)]
@@ -202,6 +375,61 @@ def test_r2_zarr_local_search_matches_hdf5(tmp_path: Path) -> None:
         (600, 700): 0.3,
     }
     store = _make_dual_store(tmp_path, loci, r2, partitions)
+    breakpoints = [300, 600, 800]
+    hdf5_metric = Metric("chr1", store, breakpoints, 100, 900).calc_metric()
+    zarr_metric = Metric(
+        "chr1", store, breakpoints, 100, 900, pair_cache="r2-zarr"
+    ).calc_metric()
+    r2_partitions = tuple(
+        local_search_r2_zarr_partition("chr1", store, start, end)
+        for start, end in partitions
+    )
+
+    hdf5_search = LocalSearch(
+        "chr1",
+        400,
+        750,
+        1,
+        breakpoints,
+        hdf5_metric["sum"],
+        hdf5_metric["N_zero"],
+        store,
+    )
+    zarr_search = LocalSearch(
+        "chr1",
+        400,
+        750,
+        1,
+        breakpoints,
+        zarr_metric["sum"],
+        zarr_metric["N_zero"],
+        store,
+        local_search_r2_zarr_partitions=r2_partitions,
+    )
+
+    hdf5_bp, hdf5_out = hdf5_search.search()
+    zarr_bp, zarr_out = zarr_search.search()
+    assert zarr_bp == hdf5_bp
+    if hdf5_out is None:
+        assert zarr_out is None
+    else:
+        assert zarr_out is not None
+        assert zarr_out["sum"] == pytest.approx(hdf5_out["sum"])
+        assert zarr_out["N_zero"] == pytest.approx(hdf5_out["N_zero"])
+
+
+def test_r2_zarr_owned_local_search_matches_hdf5_with_deleted_partitions(
+    tmp_path: Path,
+) -> None:
+    loci = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+    partitions = [(100, 400), (300, 700), (600, 900)]
+    r2 = {
+        (300, 500): 0.2,
+        (400, 500): 0.7,
+        (500, 600): 0.5,
+        (600, 700): 0.3,
+    }
+    store = _make_dual_store(tmp_path, loci, r2, partitions, owned_cache=True)
     breakpoints = [300, 600, 800]
     hdf5_metric = Metric("chr1", store, breakpoints, 100, 900).calc_metric()
     zarr_metric = Metric(

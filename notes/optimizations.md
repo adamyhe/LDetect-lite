@@ -236,13 +236,24 @@ banded by the Wen/Stephens effective range and cutoff predicate; additional
 distance/r2 truncation would be approximate unless it exactly matches that
 predicate.
 
-Exact storage-reduction ideas that remain credible:
+The r2-Zarr cache now uses a compact version-2 layout for new writes:
 
-- make diagonal r2 rows implicit rather than stored;
-- store `hi_delta` rather than absolute `hi_idx`;
-- store a chromosome-level owned-pair r2 cache so overlapping partition rows
-  are written once;
-- use a stronger compressor/codec empirically, without changing float64 values.
+- diagonal `r2=1` rows are implicit through a positive-diagonal `diag_idx`
+  array, so logical readers still synthesize diagonal rows while storage keeps
+  only off-diagonal `r2` values;
+- off-diagonal upper endpoints are stored as `hi_delta = hi_idx - lo_idx`
+  instead of absolute `hi_idx`;
+- `ldetect2 run --pair-cache r2-zarr` consolidates partition r2 groups into a
+  chromosome-level `owned_pairs` group, then removes the partition groups. The
+  owned cache streams source partitions in deterministic order and keeps
+  first-retained-pair precedence for duplicate physical pairs. Metric reads the
+  same table through the original lower-endpoint plus partition-end ownership
+  windows; local search replays active partition extent filters against the
+  owned table before duplicate filtering;
+- stronger codecs remain empirical. `ldetect2 run --pair-cache r2-zarr` exposes
+  `--r2-zarr-compressor {default,lz4-bitshuffle,zstd-bitshuffle}`. The default
+  intentionally leaves current Zarr codec behavior unchanged; explicit codecs
+  are for size/runtime benchmarking.
 
 `r2-nocache` tests the opposite tradeoff: write almost no pair data and pay CPU
 to recompute rows for metric/local-search. It uses `cyvcf2` for indexed VCF/BCF
@@ -252,6 +263,14 @@ decoded partition inputs in memory (`hap_mat`, positions, allele sums,
 diagonal shrinkage, and genetic stop bounds). It still regenerates normalized
 `r2` rows with the same kernels, so this is an exact cache of inputs rather
 than a persisted or approximate pair cache.
+
+The no-cache metric path now has a fused Numba-backed fast path for partitions
+without duplicate physical positions. It computes pair `r2`, breakpoint
+crossing, and metric accumulation inside the LD loop, avoiding materialized row
+chunks. Duplicate-position partitions keep the canonical row-stream fallback so
+legacy first-pair precedence is preserved. Local-search dense accumulation also
+uses a Numba direct accumulator after filtering and deduplication, so it avoids
+sort/reduce allocation without changing which pairs contribute.
 
 ### 10. Failed or Reverted Optimization: Python Duplicate Merge
 

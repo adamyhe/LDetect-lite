@@ -283,9 +283,14 @@ Interpretation:
   `j_stop_by_i` bounds the genetic decay window, and the kernel also skips
   `abs(ds2) < cutoff`. Extra distance/r2 banding would be approximate unless
   it exactly reproduces that predicate.
-- Exact storage reductions still worth prototyping are implicit diagonal rows,
-  `hi_delta` instead of absolute `hi_idx`, and a global owned-pair cache that
-  stores overlap rows once rather than per partition.
+- New r2-Zarr writes use format version 2: diagonal rows are implicit via
+  `diag_idx`, off-diagonal upper endpoints are stored as `hi_delta`, and
+  `ldetect2 run --pair-cache r2-zarr` consolidates partition groups into a
+  chromosome-level `owned_pairs` cache before deleting the partition groups.
+- `ldetect2 run --pair-cache r2-zarr` now has an opt-in
+  `--r2-zarr-compressor {default,lz4-bitshuffle,zstd-bitshuffle}` knob. The
+  default is unchanged so existing `r2-zarr` runtime comparisons remain valid;
+  explicit codecs are only for cache-size/runtime experiments.
 - `r2-nocache` is the low-disk alternative. It does not write HDF5/Zarr pair
   rows. Instead, Step 2 writes direct vector fragments, then metrics and local
   search recompute normalized `r2` streams as needed. This can beat cached
@@ -305,11 +310,50 @@ Implementation notes:
 - The no-cache metric path now uses one recompute pass per partition and
   derives the metric denominator loci from the owned row stream, avoiding the
   previous separate index/discovery recompute pass.
+- The no-cache metric path now has a fused Numba-backed non-duplicate fast path
+  that computes pair `r2`, breakpoint crossing, and metric accumulation inside
+  the LD loop without materializing `R2RowChunk` arrays. Partitions with
+  duplicate physical positions intentionally fall back to the canonical row
+  stream to preserve first-physical-pair precedence.
+- Local-search dense accumulation now uses a Numba-backed direct accumulator
+  after eligibility filtering and duplicate-pair filtering have already run.
+  This keeps dedup semantics unchanged while avoiding per-chunk sort/reduce
+  allocations in the dense accumulator.
 - `r2-nocache` currently streams in one process for metric and local-search
   recompute. It ignores metric/local-search worker fan-out for now.
 - `r2-nocache` does not support Decimal/high-precision mode.
 - The benchmark workflow in `examples/r2_zarr_exactness` now includes
   `r2_nocache` alongside the three cached modes.
+
+Implemented exact r2-Zarr size reductions:
+
+1. Implicit diagonal rows. Format v2 stores only positive-diagonal locus indexes
+   in `diag_idx`; `r2=1` diagonal rows are synthesized by readers. This keeps
+   local-search locus bookkeeping compatible without writing one float64 value
+   per diagonal row.
+2. `hi_delta` coordinates. Off-diagonal rows store
+   `hi_delta = hi_idx - lo_idx`; readers reconstruct `hi` from
+   `positions[lo_idx + hi_delta]`. Validators reject overflow and require
+   canonical sorted endpoint rows.
+3. Chromosome owned cache. `write_r2_zarr_owned_cache()` streams partition
+   groups in partition order, buffers only lower endpoints that may still
+   appear in future overlapping partitions, and writes a sorted `owned_pairs`
+   group with first-retained-pair precedence. `ldetect2 run --pair-cache
+   r2-zarr` builds this group after partition workers complete and deletes the
+   partition groups to remove overlap duplication from the final cache.
+
+Exactness notes:
+
+- Metric still applies the original lower-endpoint ownership windows and the
+  source partition end bound when reading `owned_pairs`; otherwise a
+  chromosome-level table would include rows whose lower endpoint is owned by a
+  partition but whose upper endpoint was outside that partition in the HDF5
+  path.
+- Local search replays active partition extent filters against `owned_pairs`
+  before duplicate filtering. This keeps the old active-partition geometry while
+  avoiding duplicate overlap storage.
+- The v2 reader intentionally breaks v1 cache compatibility for size and
+  simplicity. Regenerate experimental r2-Zarr caches after this change.
 
 ## Latest Downloaded Remote Profile
 
