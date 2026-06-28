@@ -26,8 +26,9 @@ covariance_cache: compact
 n_snps_bw_bpoints: 10000
 subset: fourier_ls
 cov_workers: 4
-metric_workers: 1
+metric_workers: 4
 local_search_workers: 1
+ldetect2_job_threads: 4
 # Optional stable timestamp for log/profiling filenames. If omitted, Snakemake
 # uses the workflow parse time, formatted like 20260627T153000.
 #run_timestamp: 20260627T153000

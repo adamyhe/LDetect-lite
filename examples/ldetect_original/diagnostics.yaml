@@ -28,7 +28,6 @@ ldetect_ref_fallback_urls:
 #local_search_workers: 1
 cov_workers: 4
 matrix_workers: 4
-metric_workers: 4
 local_search_workers: 1
 ldetect2_job_threads: 4
 

@@ -222,10 +222,7 @@ rule run_ldetect2:
             / f"{{chrom}}.{RUN_TIMESTAMP}.ldetect2.log"
         ),
         timing=str(
-            RESULTS
-            / "logs"
-            / "{population}"
-            / f"{{chrom}}.{RUN_TIMESTAMP}.timing.log"
+            RESULTS / "logs" / "{population}" / f"{{chrom}}.{RUN_TIMESTAMP}.timing.log"
         ),
     benchmark:
         str(
@@ -250,7 +247,7 @@ rule run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        {LDETECT2} run \
+            {LDETECT2} run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -264,7 +261,7 @@ rule run_ldetect2:
             --workers {params.cov_workers} \
             --metric-workers {params.metric_workers} \
             --local-search-workers {params.local_search_workers} \
-            > {log.run} 2>&1
+            >{log.run} 2>&1
         """
 
 
@@ -283,9 +280,9 @@ rule combine_beds:
         str(RESULTS / "{population}_LD_blocks.bed"),
     shell:
         """
-        echo -e "#chr\tstart\tstop" > {output}
+        echo -e "#chr\tstart\tstop" >{output}
         for f in {input}; do
-            tail -n +2 "$f" | sed 's/^/chr/' >> {output}
+            tail -n +2 "$f" | sed 's/^/chr/' >>{output}
         done
         """
 
@@ -308,7 +305,7 @@ rule compare_blocks:
         mkdir -p {RESULTS}/compare
         {PYTHON} scripts/compare_blocks.py \
             --ours {input.ours} \
-            --ref  {input.ref} \
+            --ref {input.ref} \
             --output {output} \
             --tolerance {params.tolerance}
         """
