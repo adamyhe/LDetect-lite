@@ -34,7 +34,12 @@ from ldetect2.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
-from ldetect2.io.r2_zarr import R2RowChunk, open_r2_zarr_reader
+from ldetect2.io.r2_zarr import (
+    R2RowChunk,
+    open_r2_zarr_owned_reader,
+    open_r2_zarr_reader,
+    validate_r2_zarr_owned_cache,
+)
 
 _PREC = 50
 
@@ -240,6 +245,18 @@ def local_search_r2_zarr_partition(
     end: int,
 ) -> LocalSearchR2ZarrPartition:
     """Load only r2 Zarr index metadata for one local-search partition."""
+    if validate_r2_zarr_owned_cache(store.root, name):
+        with open_r2_zarr_owned_reader(store.root, name) as reader:
+            loci = reader.read_loci()
+            loci = loci[(loci >= start) & (loci <= end)]
+            return LocalSearchR2ZarrPartition(
+                start=start,
+                end=end,
+                name=name,
+                root=store.root,
+                source_row_count=reader.row_count,
+                loci=loci,
+            )
     with open_r2_zarr_reader(store.root, name, start, end) as reader:
         return LocalSearchR2ZarrPartition(
             start=start,
@@ -503,6 +520,40 @@ def _iter_r2_zarr_canonical_segment_rows(
 ) -> Iterator[R2RowChunk]:
     """Yield canonical normalized r2 segment rows in partition precedence order."""
     min_lo = max(active_min_lo, lo_min)
+    if partitions and validate_r2_zarr_owned_cache(
+        Path(partitions[0].root), partitions[0].name
+    ):
+        seen_hi_by_lo: dict[int, np.ndarray] = {}
+        with open_r2_zarr_owned_reader(
+            Path(partitions[0].root),
+            partitions[0].name,
+        ) as reader:
+            for partition in partitions:
+                for chunk in reader.iter_rows(min_lo, lo_max, chunk_rows):
+                    in_partition = (
+                        (chunk.lo >= partition.start)
+                        & (chunk.lo <= partition.end)
+                        & (chunk.hi >= partition.start)
+                        & (chunk.hi <= partition.end)
+                    )
+                    if not np.any(in_partition):
+                        continue
+                    row_lo = chunk.lo[in_partition]
+                    row_hi = chunk.hi[in_partition]
+                    row_r2 = chunk.r2[in_partition]
+                    first_seen = _first_seen_pair_mask(
+                        row_lo,
+                        row_hi,
+                        seen_hi_by_lo,
+                        None,
+                    )
+                    if np.any(first_seen):
+                        yield R2RowChunk(
+                            lo=row_lo[first_seen],
+                            hi=row_hi[first_seen],
+                            r2=row_r2[first_seen],
+                        )
+        return
     for partition in partitions:
         with open_r2_zarr_reader(
             Path(partition.root),

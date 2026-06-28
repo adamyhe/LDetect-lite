@@ -12,7 +12,11 @@ import numpy as np
 from ldetect2._util.logging import log_debug
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
-from ldetect2.io.r2_zarr import open_r2_zarr_reader
+from ldetect2.io.r2_zarr import (
+    open_r2_zarr_owned_reader,
+    open_r2_zarr_reader,
+    validate_r2_zarr_owned_cache,
+)
 
 _DEFAULT_CHUNK_ROWS = 1_000_000
 _METRIC_WORKER_BREAKPOINTS: np.ndarray | None = None
@@ -477,24 +481,36 @@ def metric_from_r2_zarr_files(
     rows_read = 0
     pair_rows = 0
     crossing_rows = 0
+    has_owned_cache = validate_r2_zarr_owned_cache(store.root, name)
 
-    for p_index, (start, end) in enumerate(partitions):
-        lower_min, lower_max, include_lower_min = _owned_bounds(
-            partitions, p_index, snp_first, snp_last
-        )
-        with open_r2_zarr_reader(store.root, name, start, end) as reader:
+    if has_owned_cache:
+        with open_r2_zarr_owned_reader(store.root, name) as reader:
             index_start = time.perf_counter()
             loci = reader.read_loci()
-            lower_owned = loci >= lower_min if include_lower_min else loci > lower_min
-            loci_in_range = (
-                (loci >= snp_first)
-                & (loci <= snp_last)
-                & lower_owned
-                & (loci <= lower_max)
-            )
+            loci_in_range = (loci >= snp_first) & (loci <= snp_last)
             if np.any(loci_in_range):
                 loci_chunks.append(loci[loci_in_range])
             index_read_seconds += time.perf_counter() - index_start
+    else:
+        for p_index, (start, end) in enumerate(partitions):
+            lower_min, lower_max, include_lower_min = _owned_bounds(
+                partitions, p_index, snp_first, snp_last
+            )
+            with open_r2_zarr_reader(store.root, name, start, end) as reader:
+                index_start = time.perf_counter()
+                loci = reader.read_loci()
+                lower_owned = (
+                    loci >= lower_min if include_lower_min else loci > lower_min
+                )
+                loci_in_range = (
+                    (loci >= snp_first)
+                    & (loci <= snp_last)
+                    & lower_owned
+                    & (loci <= lower_max)
+                )
+                if np.any(loci_in_range):
+                    loci_chunks.append(loci[loci_in_range])
+                index_read_seconds += time.perf_counter() - index_start
 
     if not loci_chunks:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
@@ -510,11 +526,29 @@ def metric_from_r2_zarr_files(
             f"ignoring workers={workers}"
         )
 
+    reader_contexts = []
     for p_index, (start, end) in enumerate(partitions):
         lower_min, lower_max, include_lower_min = _owned_bounds(
             partitions, p_index, snp_first, snp_last
         )
-        with open_r2_zarr_reader(store.root, name, start, end) as reader:
+        if has_owned_cache:
+            reader_contexts.append(
+                (
+                    (lower_min, lower_max, include_lower_min, end),
+                    open_r2_zarr_owned_reader(store.root, name),
+                )
+            )
+        else:
+            reader_contexts.append(
+                (
+                    (lower_min, lower_max, include_lower_min, end),
+                    open_r2_zarr_reader(store.root, name, start, end),
+                )
+            )
+
+    for bounds, reader_context in reader_contexts:
+        with reader_context as reader:
+            lower_min, lower_max, include_lower_min, partition_end = bounds
             chunk_iter = reader.iter_owned_rows(
                 lower_min,
                 lower_max,
@@ -531,7 +565,14 @@ def metric_from_r2_zarr_files(
                     break
                 row_read_seconds += time.perf_counter() - read_start
                 rows_read += int(chunk.lo.size)
-                pair_mask = chunk.lo < chunk.hi
+                in_range = (
+                    (chunk.lo >= snp_first)
+                    & (chunk.lo <= snp_last)
+                    & (chunk.hi >= snp_first)
+                    & (chunk.hi <= snp_last)
+                    & (chunk.hi <= partition_end)
+                )
+                pair_mask = in_range & (chunk.lo < chunk.hi)
                 if not np.any(pair_mask):
                     continue
                 pair_i = chunk.lo[pair_mask]
