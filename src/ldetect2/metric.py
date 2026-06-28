@@ -5,13 +5,18 @@ from __future__ import annotations
 import decimal
 from bisect import bisect_left
 
-from ldetect2._util.covariance_array import metric_from_files, metric_from_r2_zarr_files
+from ldetect2._util.covariance_array import (
+    metric_from_files,
+    metric_from_r2_nocache,
+    metric_from_r2_zarr_files,
+)
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
+from ldetect2.io.r2_nocache import R2NoCacheConfig
 
 _PREC = 50
 
@@ -44,6 +49,7 @@ class Metric:
         use_decimal: bool = False,
         workers: int = 1,
         pair_cache: str = "hdf5",
+        r2_nocache_config: R2NoCacheConfig | None = None,
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -54,6 +60,7 @@ class Metric:
         self.use_decimal = use_decimal
         self.workers = max(1, int(workers))
         self.pair_cache = pair_cache
+        self.r2_nocache_config = r2_nocache_config
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -96,6 +103,18 @@ class Metric:
             metric = metric_from_r2_zarr_files(
                 self.name,
                 self.store,
+                self.partitions,
+                self.snp_first,
+                self.snp_last,
+                self.breakpoints,
+                workers=self.workers,
+            )
+        elif self.pair_cache == "r2-nocache":
+            if self.r2_nocache_config is None:
+                raise ValueError("r2-nocache metric requires an R2NoCacheConfig")
+            log_msg("Start metric (recompute r2-nocache)")
+            metric = metric_from_r2_nocache(
+                self.r2_nocache_config,
                 self.partitions,
                 self.snp_first,
                 self.snp_last,

@@ -80,12 +80,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     )
     p.add_argument(
         "--pair-cache",
-        choices=("hdf5", "r2-zarr"),
+        choices=("hdf5", "r2-zarr", "r2-nocache"),
         default="hdf5",
         help=(
             "Pair cache used by metric/local-search. 'hdf5' preserves the "
             "current covariance cache behavior; 'r2-zarr' is experimental and "
-            "writes normalized float64 r2 rows plus direct vector fragments "
+            "writes normalized float64 r2 rows plus direct vector fragments; "
+            "'r2-nocache' is experimental and recomputes normalized r2 rows "
+            "from the reference panel for metric/local-search without writing "
+            "a pair cache "
             "(default: hdf5)."
         ),
     )
@@ -236,6 +239,22 @@ def _calc_partition(
                 center_upper_bound=center_upper_bound,
                 center_upper_inclusive=center_upper_inclusive,
             )
+    elif pair_cache == "r2-nocache":
+        if vector_output_path is None:
+            raise RuntimeError("r2-nocache requires a direct vector fragment")
+        with tabix_proc.stdout:  # type: ignore[union-attr]
+            calc_covariance_vector(
+                vcf_stream=tabix_proc.stdout,
+                genetic_map_path=genetic_map_path,
+                individuals_path=individuals_path,
+                output_path=vector_output_path,
+                ne=ne,
+                cutoff=cutoff,
+                center_lower_bound=center_lower_bound,
+                center_lower_inclusive=center_lower_inclusive,
+                center_upper_bound=center_upper_bound,
+                center_upper_inclusive=center_upper_inclusive,
+            )
     elif vector_output_path is not None:
         with tabix_proc.stdout:  # type: ignore[union-attr]
             vcf_text = tabix_proc.stdout.read()
@@ -339,13 +358,15 @@ def _run(args: argparse.Namespace) -> int:
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    if args.pair_cache == "r2-zarr" and args.high_precision:
+    if args.pair_cache in {"r2-zarr", "r2-nocache"} and args.high_precision:
         print(
-            "Error: --pair-cache r2-zarr does not support --high-precision.",
+            "Error: experimental r2 pair caches do not support --high-precision.",
             file=sys.stderr,
         )
         return 1
-    vector_mode = "direct" if args.pair_cache == "r2-zarr" else args.vector_mode
+    vector_mode = (
+        "direct" if args.pair_cache in {"r2-zarr", "r2-nocache"} else args.vector_mode
+    )
 
     chrom = args.chromosome
     cov_dir = output_dir / chrom
@@ -408,6 +429,10 @@ def _run(args: argparse.Namespace) -> int:
                 pending.append((start, end))
                 continue
             continue
+        if args.pair_cache == "r2-nocache":
+            if not vector_fragment_path.exists():
+                pending.append((start, end))
+            continue
 
         if not partition_path.exists():
             pending.append((start, end))
@@ -440,6 +465,7 @@ def _run(args: argparse.Namespace) -> int:
                 (
                     output_dir
                     if args.pair_cache == "r2-zarr"
+                    or args.pair_cache == "r2-nocache"
                     else store.partition_path(chrom, start, end)
                 ),
                 args.ne,
@@ -503,6 +529,9 @@ def _run(args: argparse.Namespace) -> int:
         n_bpoints=args.n_bpoints,
         subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
         pair_cache=args.pair_cache,
+        r2_nocache_config=(
+            _r2_nocache_config(args, chrom) if args.pair_cache == "r2-nocache" else None
+        ),
     )
     log_memory_checkpoint("step4_end")
 
@@ -557,3 +586,16 @@ def _is_valid_covariance_partition(
     path: Path, require_full: bool = True
 ) -> bool:
     return validate_covariance_hdf5(path, require_full=require_full)
+
+
+def _r2_nocache_config(args: argparse.Namespace, chrom: str):
+    from ldetect2.io.r2_nocache import R2NoCacheConfig
+
+    return R2NoCacheConfig(
+        reference_panel=args.reference_panel,
+        genetic_map_path=args.genetic_map,
+        individuals_path=args.individuals,
+        chrom=chrom,
+        ne=args.ne,
+        cutoff=args.cov_cutoff,
+    )

@@ -26,6 +26,8 @@ Several findings in this audit are now implemented experimentally in this code b
 
 - Direct vector mode is available through `ldetect2 run --vector-mode direct`. It computes partition-local correlation-sum vector fragments during covariance generation and merges them with the same ownership boundaries used by the full-chromosome covariance path.
 - `ldetect2 run --pair-cache r2-zarr` is an opt-in experimental path that writes direct vector fragments plus a normalized float64 `r²` Zarr cache for metric and local-search. The default remains the HDF5 covariance cache.
+- `ldetect2 run --pair-cache r2-nocache` is an opt-in experimental path that writes direct vector fragments but no persisted pair cache. Metric and local-search recompute normalized `r²` row streams from the reference VCF/BCF.
+- `cyvcf2>=0.31` is now used by the no-cache row stream when possible, with tabix text parsing retained as fallback.
 - Full covariance/HDF5 caches are still required for compatibility, Decimal legacy paths, and matrix-to-vector comparisons unless the experimental `r²` cache is selected.
 
 ---
@@ -36,6 +38,10 @@ Several findings in this audit are now implemented experimentally in this code b
 The script reads VCF records one line at a time from stdin via `tabix` pipe. Every line triggers Python string splitting, genotype parsing, and dosage extraction with no C-level acceleration.
 
 **Fix:** Replace with `cyvcf2` or `pysam` (C backends). Alternatively, pre-convert the reference panel to PLINK `.bed` binary format and use `bed-reader` or numpy-backed loading. Expected speedup: **5–20×**.
+
+**ldetect2 status:** `cyvcf2` is wired into the experimental `r2-nocache` row
+stream. Existing covariance/HDF5 generation still accepts tabix text streams for
+compatibility.
 
 ### Problem: O(n²) nested Python loop for shrinkage estimation
 For each SNP pair (i, j), the Wen–Stephens shrinkage penalty is computed in pure Python. Even for ~2,000 SNP partitions this is very slow.

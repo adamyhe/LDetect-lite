@@ -4,7 +4,7 @@ subpops: [CEU, TSI, FIN, GBR, IBS]
 ne: 11418
 
 # Modes compared against the matrix_hdf5 baseline.
-modes: [matrix_hdf5, direct_hdf5, r2_zarr]
+modes: [matrix_hdf5, direct_hdf5, r2_zarr, r2_nocache]
 baseline_mode: matrix_hdf5
 
 # Directories

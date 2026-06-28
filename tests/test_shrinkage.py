@@ -14,8 +14,11 @@ from ldetect2.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect2.io.partitions import CovarianceStore
+from ldetect2.io.r2_nocache import R2NoCacheConfig, open_r2_nocache_reader
 from ldetect2.io.r2_zarr import open_r2_zarr_reader, validate_r2_zarr_partition
+from ldetect2.local_search import LocalSearch, local_search_r2_nocache_partition
 from ldetect2.matrix_analysis import MatrixAnalysis
+from ldetect2.metric import Metric
 from ldetect2.shrinkage import (
     _count_pairwise_ld_by_i_impl,
     _genetic_stop_bounds_impl,
@@ -65,6 +68,14 @@ def _write_overlapping_map(path: Path) -> None:
 
 def _write_individuals(path: Path) -> None:
     path.write_text("sample_a\nsample_b\n")
+
+
+def _write_vcf(path: Path, stream: StringIO) -> None:
+    text = stream.getvalue().replace(
+        "##fileformat=VCFv4.2\n",
+        "##fileformat=VCFv4.2\n##contig=<ID=1>\n",
+    )
+    path.write_text(text)
 
 
 def _vcf_stream() -> StringIO:
@@ -511,6 +522,158 @@ def test_calc_r2_zarr_partition_duplicate_positions_match_covariance(
     assert set(zip(lo.tolist(), hi.tolist(), strict=True)) == set(expected)
     for lo_pos, hi_pos, value in zip(lo, hi, r2, strict=True):
         assert value == pytest.approx(expected[(int(lo_pos), int(hi_pos))])
+
+
+def test_r2_nocache_metric_matches_hdf5_metric(tmp_path: Path) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = tmp_path / "tiny.vcf"
+    _write_vcf(vcf_path, _vcf_stream())
+
+    root = tmp_path / "store"
+    chrom = "1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=chrom_dir / f"{chrom}.100.300.h5",
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    store = CovarianceStore(root=root)
+    breakpoints = [200]
+    hdf5_metric = Metric(chrom, store, breakpoints, 100, 300).calc_metric()
+    nocache_metric = Metric(
+        chrom,
+        store,
+        breakpoints,
+        100,
+        300,
+        pair_cache="r2-nocache",
+        r2_nocache_config=R2NoCacheConfig(
+            reference_panel=str(vcf_path),
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            chrom=chrom,
+            cutoff=1e-7,
+        ),
+    ).calc_metric()
+
+    assert nocache_metric["sum"] == pytest.approx(hdf5_metric["sum"])
+    assert nocache_metric["N_nonzero"] == hdf5_metric["N_nonzero"]
+    assert nocache_metric["N_zero"] == pytest.approx(hdf5_metric["N_zero"])
+
+
+def test_r2_nocache_local_search_matches_hdf5(tmp_path: Path) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = tmp_path / "tiny.vcf"
+    _write_vcf(vcf_path, _vcf_stream())
+
+    root = tmp_path / "store"
+    chrom = "1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=chrom_dir / f"{chrom}.100.300.h5",
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    store = CovarianceStore(root=root)
+    breakpoints = [200]
+    metric = Metric(chrom, store, breakpoints, 100, 300).calc_metric()
+    hdf5_search = LocalSearch(
+        chrom,
+        100,
+        300,
+        0,
+        breakpoints,
+        metric["sum"],
+        metric["N_zero"],
+        store,
+    )
+    hdf5_result = hdf5_search.search()
+
+    config = R2NoCacheConfig(
+        reference_panel=str(vcf_path),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        chrom=chrom,
+        cutoff=1e-7,
+    )
+    nocache_search = LocalSearch(
+        chrom,
+        100,
+        300,
+        0,
+        breakpoints,
+        metric["sum"],
+        metric["N_zero"],
+        store,
+        local_search_r2_nocache_partitions=(
+            local_search_r2_nocache_partition(config, 100, 300),
+        ),
+    )
+    nocache_result = nocache_search.search()
+
+    assert nocache_result[0] == hdf5_result[0]
+    if hdf5_result[1] is None:
+        assert nocache_result[1] is None
+    else:
+        assert nocache_result[1] is not None
+        assert nocache_result[1]["sum"] == pytest.approx(hdf5_result[1]["sum"])
+        assert nocache_result[1]["N_zero"] == pytest.approx(hdf5_result[1]["N_zero"])
+
+
+def test_r2_nocache_reader_reuses_decoded_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ldetect2.io.r2_nocache as r2_nocache
+
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    calls = 0
+
+    def fake_parse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            [100, 200, 300],
+            [
+                [0, 1, 0, 0],
+                [0, 1, 0, 1],
+                [1, 0, 0, 1],
+            ],
+        )
+
+    monkeypatch.setattr(r2_nocache, "_parse_cyvcf2_haplotypes", fake_parse)
+    config = R2NoCacheConfig(
+        reference_panel=str(tmp_path / "missing.vcf.gz"),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        chrom="1",
+        cutoff=1e-7,
+    )
+
+    with open_r2_nocache_reader(config, 100, 300) as reader:
+        assert reader.read_loci().size > 0
+        assert sum(chunk.lo.size for chunk in reader.iter_rows(100, 300, 2)) > 0
+
+    assert calls == 1
 
 
 def test_calc_covariance_vector_partition_bounds_match_matrix_to_vector(
