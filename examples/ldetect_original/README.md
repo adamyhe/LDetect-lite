@@ -161,6 +161,15 @@ snakemake -s Snakefile.diagnostics --cores 4 \
            profile_chromosomes='[10,11]'
 ```
 
+Diagnostic logs and profiling summaries include a workflow timestamp so runs
+do not overwrite each other. To make filenames stable across a rerun, pass an
+explicit timestamp:
+
+```bash
+snakemake -s Snakefile.diagnostics --cores 4 \
+  --config run_timestamp=20260627T153000
+```
+
 Run the five problematic EUR chromosomes plus chr13 as a control:
 
 ```bash
@@ -180,19 +189,23 @@ Useful outputs:
   breakpoint, and final BED comparison summaries.
 - `results/diagnostics/{POP}/case_vs_control.tsv`: compact side-by-side
   comparison of the configured case and control chromosomes.
-- `results/diagnostics/{POP}/profiling/run_summary.tsv`: wall time, CPU time,
-  max RSS, page faults, and I/O parsed from `/usr/bin/time`.
-- `results/diagnostics/{POP}/profiling/local_search_breakpoints.tsv`:
+- `results/diagnostics/{POP}/{chrom}/logs/{chrom}.{timestamp}.ldetect2.log`
+  and `{chrom}.{timestamp}.timing.log`: timestamped ldetect2 and
+  `/usr/bin/time` logs for each diagnostic chromosome.
+- `results/diagnostics/{POP}/profiling/{timestamp}/run_summary.tsv`: wall
+  time, CPU time, max RSS, page faults, and I/O parsed from `/usr/bin/time`.
+- `results/diagnostics/{POP}/profiling/{timestamp}/local_search_breakpoints.tsv`:
   per-breakpoint local-search timing, partition counts, row counts, and RSS
   parsed from debug logs.
-- `results/diagnostics/{POP}/profiling/local_search_groups.tsv`:
+- `results/diagnostics/{POP}/profiling/{timestamp}/local_search_groups.tsv`:
   per-partition-group local-search load and canonicalization timing parsed
   from debug logs.
-- `results/diagnostics/{POP}/profiling/local_search_by_chrom.tsv`: aggregated
-  local-search timing by chromosome and subset, including breakpoint totals,
-  group totals, and unaccounted elapsed time.
-- `results/diagnostics/{POP}/profiling/plots/`: PNG plots when matplotlib is
-  installed, or a `SKIPPED.txt` marker when plots are unavailable.
+- `results/diagnostics/{POP}/profiling/{timestamp}/local_search_by_chrom.tsv`:
+  aggregated local-search timing by chromosome and subset, including
+  breakpoint totals, group totals, and unaccounted elapsed time.
+- `results/diagnostics/{POP}/profiling/{timestamp}/plots/`: PNG plots when
+  matplotlib is installed, or a `SKIPPED.txt` marker when plots are
+  unavailable.
 - `results/diagnostics/reference_bed_consistency.tsv`: comparison of
   `fourier_ls-all.bed` slices against chromosome-specific `fourier_ls-chrN.bed`
   files for the configured reference populations.

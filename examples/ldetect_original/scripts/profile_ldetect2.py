@@ -378,12 +378,33 @@ def _none_to_empty(value: str | None) -> str:
     return "" if value in {None, "None"} else value
 
 
-def _chrom_log_path(log_dir: Path, chrom: str, suffix: str) -> Path:
-    """Return the chromosome-prefixed log path, falling back to legacy names."""
-    prefixed = log_dir / f"{chrom}.{suffix}"
-    if prefixed.exists():
-        return prefixed
-    return log_dir / suffix
+def _chrom_log_path(
+    log_dir: Path,
+    chrom: str,
+    suffix: str,
+    run_timestamp: str | None = None,
+) -> Path:
+    """Return timestamped, chromosome-prefixed, or legacy log path."""
+    candidates: list[Path] = []
+    if run_timestamp:
+        candidates.append(log_dir / f"{chrom}.{run_timestamp}.{suffix}")
+    candidates.extend(
+        sorted(
+            log_dir.glob(f"{chrom}.*.{suffix}"),
+            key=lambda path: (path.stat().st_mtime, path.name),
+            reverse=True,
+        )
+    )
+    candidates.extend(
+        [
+            log_dir / f"{chrom}.{suffix}",
+            log_dir / suffix,
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def profile_chromosome(
@@ -391,6 +412,7 @@ def profile_chromosome(
     population: str,
     chrom: str,
     profile_name: str,
+    run_timestamp: str | None = None,
 ) -> tuple[
     dict[str, str],
     list[dict[str, str]],
@@ -399,13 +421,15 @@ def profile_chromosome(
 ]:
     """Parse timing and ldetect2 logs for one diagnostic chromosome."""
     log_dir = diagnostic_root / str(chrom) / "logs"
-    run_row = parse_time_log(_chrom_log_path(log_dir, str(chrom), "timing.log"))
+    run_row = parse_time_log(
+        _chrom_log_path(log_dir, str(chrom), "timing.log", run_timestamp)
+    )
     run_row.update(
         {"profile_name": profile_name, "population": population, "chrom": f"chr{chrom}"}
     )
 
     set_rows, group_rows, breakpoint_rows = parse_ldetect2_log(
-        _chrom_log_path(log_dir, str(chrom), "ldetect2.log")
+        _chrom_log_path(log_dir, str(chrom), "ldetect2.log", run_timestamp)
     )
     for row in set_rows + group_rows + breakpoint_rows:
         row.update(
@@ -690,6 +714,7 @@ def main() -> None:
     parser.add_argument("--diagnostic-root", required=True, type=Path)
     parser.add_argument("--population", required=True)
     parser.add_argument("--profile-name", default="default")
+    parser.add_argument("--run-timestamp", default=None)
     parser.add_argument("--chromosomes", nargs="+", required=True)
     parser.add_argument("--run-summary", required=True, type=Path)
     parser.add_argument("--local-search-groups", required=True, type=Path)
@@ -715,6 +740,7 @@ def main() -> None:
             args.population,
             chrom,
             args.profile_name,
+            args.run_timestamp,
         )
         run_rows.append(run_row)
         set_rows.extend(chrom_set_rows)

@@ -25,6 +25,7 @@ Usage:
     uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
+from datetime import datetime
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ configfile: "config.yaml"
 
 CHROMS = config["chromosomes"]
 POPS = list(config["populations"].keys())
+RUN_TIMESTAMP = config.get("run_timestamp", datetime.now().strftime("%Y%m%dT%H%M%S"))
 RAW_DIR = Path(config["raw_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
@@ -213,10 +215,25 @@ rule run_ldetect2:
     output:
         bed=str(RESULTS / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
     log:
-        run=str(RESULTS / "logs" / "{population}" / "{chrom}.ldetect2.log"),
-        timing=str(RESULTS / "logs" / "{population}" / "{chrom}.timing.log"),
+        run=str(
+            RESULTS
+            / "logs"
+            / "{population}"
+            / f"{{chrom}}.{RUN_TIMESTAMP}.ldetect2.log"
+        ),
+        timing=str(
+            RESULTS
+            / "logs"
+            / "{population}"
+            / f"{{chrom}}.{RUN_TIMESTAMP}.timing.log"
+        ),
     benchmark:
-        str(RESULTS / "logs" / "{population}" / "{chrom}.benchmark.tsv")
+        str(
+            RESULTS
+            / "logs"
+            / "{population}"
+            / f"{{chrom}}.{RUN_TIMESTAMP}.benchmark.tsv"
+        )
     threads: config.get("ldetect2_job_threads", config["cov_workers"])
     params:
         output_dir=str(RESULTS / "{population}" / "{chrom}"),

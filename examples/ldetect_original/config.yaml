@@ -28,6 +28,9 @@ subset: fourier_ls
 cov_workers: 4
 metric_workers: 1
 local_search_workers: 1
+# Optional stable timestamp for log/profiling filenames. If omitted, Snakemake
+# uses the workflow parse time, formatted like 20260627T153000.
+#run_timestamp: 20260627T153000
 
 # Post-processing
 min_snps_per_block: 0   # original ldetect does not merge small blocks

@@ -37,6 +37,9 @@ ldetect2_job_threads: 4
 profile_summary: true
 profile_plots: true
 profile_name: default
+# Optional stable timestamp for log/profile filenames. If omitted, Snakemake
+# uses the workflow parse time, formatted like 20260627T153000.
+#run_timestamp: 20260627T153000
 # Override this to profile a subset of diagnostic chromosomes without changing
 # the diagnostics outputs, e.g. profile_chromosomes: [10, 11].
 profile_chromosomes: []

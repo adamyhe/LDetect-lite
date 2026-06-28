@@ -30,9 +30,11 @@ removing the compact covariance count-then-generate double pass: chr11 Step 2
 fell from about 22.3 minutes to about 11.8 minutes, and whole-run wall time fell
 from about 65.4 minutes to about 54.0 minutes without increasing RSS.
 
-The remaining runtime is now led by matrix-to-vector conversion, streaming
-metric passes, local-search HDF5 reads, and still-nontrivial covariance
-generation. Candidate scoring itself is not a meaningful bottleneck.
+The remaining runtime is now led by covariance generation and local-search HDF5
+precompute, with matrix-to-vector and metric passes mostly addressed by bounded
+worker paths. Candidate scoring itself is not a meaningful bottleneck. At this
+point, large additional runtime wins are unlikely without deeper rewrites of
+covariance kernels/storage layout or the local-search row-read strategy.
 
 ## Main Improvements
 
@@ -121,13 +123,12 @@ Remote validation showed the memory win clearly:
 | chr21 | ~58 s | ~372 MiB |
 | chr22 | ~76 s | ~372 MiB |
 
-Step 3 is no longer the primary RSS risk, but it remains a major wall-time
-phase on large chromosomes. The latest local implementation starts addressing
-that runtime directly: Step 3 now uses compact HDF5 locus indexes for the loci
-pass and exposes opt-in bounded partition workers via `--matrix-workers`.
-Remote profiling shows `matrix_workers=4` improves runtime without meaningful
-RSS inflation. On cached chr19-22 diagnostic runs, Step 3 fell to roughly
-14-28 seconds with Step 3 RSS around 222-282 MiB.
+Step 3 is no longer a primary RSS or wall-time risk in cached diagnostic runs.
+It now uses compact HDF5 locus indexes for the loci pass and exposes opt-in
+bounded partition workers via `--matrix-workers`. Remote profiling shows
+`matrix_workers=4` improves runtime without meaningful RSS inflation. On cached
+chr19-22 diagnostic runs, Step 3 fell to roughly 14-28 seconds with Step 3 RSS
+around 222-282 MiB.
 
 ### 6. Streaming Metric Calculation
 
@@ -142,10 +143,11 @@ HDF5 indexes and reports separate loci-index and diagonal-read timings. New
 cached chr19-22 profiles show the metadata/index part is now tiny; remaining
 metric time is row read, normalization, and crossing classification.
 
-The newest local implementation adds opt-in bounded partition-level metric
-workers via `--metric-workers`. This keeps the default single-process behavior
-but gives the next profiling run a direct way to test whether the streaming row
-passes scale like Step 3 without meaningful RSS inflation.
+The newest remote profiles validate opt-in bounded partition-level metric
+workers via `--metric-workers`. On chr19-22 with `metric_workers=4`, the two
+metric passes fell from roughly 71-128 seconds total per chromosome to roughly
+14-25 seconds total, without the RSS inflation seen from local-search worker
+fan-out.
 
 ### 7. Selective Breakpoint Subsets
 
@@ -181,10 +183,14 @@ to zero and chr11 duplicate tracking fell from 243.58 s to 134.84 s.
 With `matrix_workers=4` and `local_search_workers=1`, local search is now the
 largest cached-run phase on chr19-22. Its remaining cost is mostly HDF5
 read/decompression, duplicate filtering, and dense endpoint accumulation rather
-than candidate scoring. The latest local changes target that directly by using
-one combined dense endpoint lookup per row chunk for vertical/horizontal sums
-and coalescing adjacent local-search HDF5 segments when they share the same
-active partition set.
+than candidate scoring.
+
+A later attempt to combine vertical/horizontal dense endpoint lookup and
+coalesce adjacent HDF5 segments did not help in remote chr19-22 profiles:
+local-search wall time rose by roughly 4-9%, dense lookup plus accumulation got
+slower, and HDF5 read calls did not materially fall. That micro-optimization was
+reverted; future local-search work should focus on reducing actual HDF5 row
+read amplification or duplicate filtering cost.
 
 ### 9. Failed or Reverted Optimization: Python Duplicate Merge
 
@@ -221,9 +227,9 @@ chr11 phase split:
 | Fourier local search | 844 | dense accumulation plus duplicate merge revert |
 | Final Fourier-LS metric | 262 | streaming metric pass |
 
-Latest cached diagnostic profile with `matrix_workers=4`,
-`local_search_workers=1` skipped Step 2 because covariance partitions already
-existed, but it isolates the current Step 3/4 behavior:
+Cached diagnostic profile with `matrix_workers=4`, `local_search_workers=1`
+skipped Step 2 because covariance partitions already existed, but it isolates
+the current Step 3/4 behavior:
 
 | Chrom | Wall time | Max RSS | Step 3 | Local search |
 | --- | ---: | ---: | ---: | ---: |
@@ -236,20 +242,24 @@ existed, but it isolates the current Step 3/4 behavior:
 
 The main remaining runtime targets are:
 
-1. Streaming metric passes, now mostly row read, normalization, and
-   crossing-pair classification.
-2. Local-search HDF5 read/decompression, duplicate filtering, and dense
+1. Local-search HDF5 read/decompression, duplicate filtering, and dense
    endpoint accumulation.
-3. Step 3 validation on larger chromosomes with `matrix_workers=4`.
-4. Further compact covariance CPU work, now that the largest double-pass cost is
+2. Further compact covariance CPU work, now that the largest double-pass cost is
    gone.
+3. Larger-chromosome validation of `matrix_workers=4` and `metric_workers=4`.
 
 Step 3 multiprocessing is now the preferred scaling knob: `matrix_workers=4`
 captures nearly the same runtime as also setting `local_search_workers=4`, but
-without the local-search RSS inflation. Metric partition multiprocessing is
-now the next most plausible broad runtime win. Naive per-breakpoint local-search
+without the local-search RSS inflation. Metric partition multiprocessing is now
+validated on chr19-22 and should stay enabled for diagnostics unless larger
+chromosomes show I/O contention. Naive per-breakpoint local-search
 multiprocessing remains a poor fit; local-search optimization should focus on
-reducing repeated HDF5 reads and dense accumulation overhead.
+reducing actual HDF5 read amplification and duplicate filtering overhead.
+
+Small local-search micro-optimizations have mostly been exhausted. The next
+credible improvements are rewrite-scale: a bounded row-window cache with clear
+eviction semantics, a different duplicate tracking representation, or a more
+substantial covariance/read layout change.
 
 ## Design Principles That Emerged
 
