@@ -22,8 +22,12 @@ ldetect_ref_fallback_urls:
 
 # Diagnostic runs can fan out both through Snakemake jobs and ldetect2's
 # internal workers. Defaults here favor bounded memory over throughput.
+#cov_workers: 4
+#matrix_workers: 1
+#local_search_workers: 1
 cov_workers: 4
-local_search_workers: 1
+matrix_workers: 4
+local_search_workers: 4
 ldetect2_job_threads: 4
 
 # Profiling summaries parse the diagnostics logs and timing output. Keep these

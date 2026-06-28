@@ -52,6 +52,11 @@ PROFILE_CHROMS = [
     str(chrom) for chrom in config.get("profile_chromosomes", []) or DIAG_CHROMS
 ]
 PROFILE_ROOT = DIAG_ROOT / "profiling"
+INTERNAL_WORKERS = max(
+    int(config.get("cov_workers", 4)),
+    int(config.get("matrix_workers", 1)),
+    int(config.get("local_search_workers", 1)),
+)
 
 def pop_ne(population):
     return config["populations"][population]["ne"]
@@ -296,13 +301,14 @@ rule diagnostic_run_ldetect2:
     log:
         run=str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.ldetect2.log"),
         timing=str(DIAG_ROOT / "{chrom}" / "logs" / "{chrom}.timing.log"),
-    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    threads: config.get("ldetect2_job_threads", INTERNAL_WORKERS)
     params:
         output_dir=diag_run_dir,
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
         ne=pop_ne(DIAG_POP),
         cutoff=config["cov_cutoff"],
         cov_workers=config.get("cov_workers", 4),
+        matrix_workers=config.get("matrix_workers", 1),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -326,6 +332,7 @@ rule diagnostic_run_ldetect2:
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.cov_workers} \
+            --matrix-workers {params.matrix_workers} \
             --local-search-workers {params.local_search_workers} \
             {params.high_precision} \
             > {log.run} 2>&1
