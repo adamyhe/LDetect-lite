@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
-from ldetect2._cli.cmd_run import (
-    _breakpoint_subsets_for_run,
-    _is_valid_covariance_partition,
+import ldetect2._util.run as run_util
+import ldetect2.shrinkage as shrinkage
+from ldetect2._util.run import (
+    breakpoint_subsets_for_run,
+    calc_partition,
+    is_valid_covariance_partition,
 )
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 
@@ -29,8 +34,8 @@ def test_full_covariance_partition_validates_against_full_schema(
         j_id=np.array(["rs1"]),
     )
 
-    assert _is_valid_covariance_partition(path, require_full=True)
-    assert _is_valid_covariance_partition(path, require_full=False)
+    assert is_valid_covariance_partition(path, require_full=True)
+    assert is_valid_covariance_partition(path, require_full=False)
 
 
 def test_compact_covariance_partition_validates_against_compact_schema(
@@ -44,20 +49,78 @@ def test_compact_covariance_partition_validates_against_compact_schema(
         shrink_ld=np.array([0.1]),
     )
 
-    assert _is_valid_covariance_partition(path, require_full=False)
-    assert not _is_valid_covariance_partition(path, require_full=True)
+    assert is_valid_covariance_partition(path, require_full=False)
+    assert not is_valid_covariance_partition(path, require_full=True)
 
 
 def test_invalid_covariance_partition_missing_shrink_ld(tmp_path: Path) -> None:
     path = tmp_path / "invalid.h5"
     path.write_text("not hdf5")
 
-    assert not _is_valid_covariance_partition(path, require_full=False)
+    assert not is_valid_covariance_partition(path, require_full=False)
 
 
 def test_run_subset_requests_only_final_breakpoint_subset() -> None:
-    assert _breakpoint_subsets_for_run("fourier_ls", False) == {"fourier_ls"}
+    assert breakpoint_subsets_for_run("fourier_ls", False) == {"fourier_ls"}
 
 
 def test_run_all_breakpoint_subsets_preserves_full_output() -> None:
-    assert _breakpoint_subsets_for_run("fourier_ls", True) is None
+    assert breakpoint_subsets_for_run("fourier_ls", True) is None
+
+
+def test_direct_hdf5_partition_generation_streams_tabix_twice(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class NoReadStream(io.StringIO):
+        def read(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("direct_hdf5 must not buffer the full VCF stream")
+
+    popen_calls = []
+    wait_calls = []
+    calc_calls = []
+
+    def fake_popen(cmd, stdout, text):  # noqa: ANN001
+        stream = NoReadStream("##fileformat=VCFv4.2\n")
+        popen_calls.append((cmd, stdout, text, stream))
+
+        def wait() -> int:
+            wait_calls.append(stream)
+            return 0
+
+        return SimpleNamespace(stdout=stream, wait=wait)
+
+    def fake_calc_covariance(**kwargs) -> None:  # noqa: ANN003
+        calc_calls.append(("covariance", kwargs["vcf_stream"]))
+
+    def fake_calc_covariance_vector(**kwargs) -> None:  # noqa: ANN003
+        calc_calls.append(("vector", kwargs["vcf_stream"]))
+
+    monkeypatch.setattr(run_util.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shrinkage, "calc_covariance", fake_calc_covariance)
+    monkeypatch.setattr(
+        shrinkage,
+        "calc_covariance_vector",
+        fake_calc_covariance_vector,
+    )
+
+    calc_partition(
+        100,
+        200,
+        "chr1",
+        "panel.vcf.gz",
+        tmp_path / "map.gz",
+        tmp_path / "individuals.txt",
+        tmp_path / "chr1_100_200.h5",
+        ne=11418.0,
+        cutoff=1e-7,
+        compact_output=True,
+        pair_cache="hdf5",
+        vector_output_path=tmp_path / "vector.txt.gz",
+    )
+
+    assert len(popen_calls) == 2
+    assert len(wait_calls) == 2
+    assert [name for name, _ in calc_calls] == ["covariance", "vector"]
+    assert calc_calls[0][1] is popen_calls[0][3]
+    assert calc_calls[1][1] is popen_calls[1][3]

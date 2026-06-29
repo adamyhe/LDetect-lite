@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
-import gzip
-import io
-import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from ldetect2.io.covariance_hdf5 import validate_covariance_hdf5
+from ldetect2._util.run import (
+    breakpoint_subsets_for_run,
+    calc_partition,
+    concatenate_direct_vector_fragments,
+    count_individuals,
+    direct_vector_plan,
+    is_valid_covariance_partition,
+)
 from ldetect2.io.r2_zarr import validate_r2_zarr_partition
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
@@ -176,155 +180,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     p.set_defaults(func=_run)
 
 
-def _calc_partition(
-    start: int,
-    end: int,
-    chrom: str,
-    reference_panel: str,
-    genetic_map_path: Path,
-    individuals_path: Path,
-    output_path: Path,
-    ne: float,
-    cutoff: float,
-    compact_output: bool,
-    pair_cache: str = "hdf5",
-    vector_output_path: Path | None = None,
-    center_lower_bound: int | None = None,
-    center_lower_inclusive: bool = True,
-    center_upper_bound: int | None = None,
-    center_upper_inclusive: bool = True,
-) -> None:
-    """
-    Wraps tabix > calc_covariance so we can run as a worker process.
-    """
-    from ldetect2._util.memory import log_memory_checkpoint
-    from ldetect2.shrinkage import (
-        calc_covariance,
-        calc_covariance_vector,
-        calc_r2_zarr_partition,
-    )
-
-    region = f"{chrom}:{start}-{end}"
-    try:
-        tabix_proc = subprocess.Popen(
-            ["tabix", "-h", reference_panel, region],
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "tabix not found. Install htslib and ensure tabix is on PATH."
-        )
-
-    if pair_cache == "r2-zarr":
-        if vector_output_path is None:
-            raise RuntimeError("r2-zarr pair cache requires a direct vector fragment")
-        with tabix_proc.stdout:  # type: ignore[union-attr]
-            calc_r2_zarr_partition(
-                vcf_stream=tabix_proc.stdout,
-                genetic_map_path=genetic_map_path,
-                individuals_path=individuals_path,
-                output_root=output_path,
-                name=chrom,
-                start=start,
-                end=end,
-                ne=ne,
-                cutoff=cutoff,
-                vector_output_path=vector_output_path,
-                center_lower_bound=center_lower_bound,
-                center_lower_inclusive=center_lower_inclusive,
-                center_upper_bound=center_upper_bound,
-                center_upper_inclusive=center_upper_inclusive,
-            )
-    elif vector_output_path is not None:
-        with tabix_proc.stdout:  # type: ignore[union-attr]
-            vcf_text = tabix_proc.stdout.read()
-        calc_covariance(
-            vcf_stream=io.StringIO(vcf_text),
-            genetic_map_path=genetic_map_path,
-            individuals_path=individuals_path,
-            output_path=output_path,
-            ne=ne,
-            cutoff=cutoff,
-            compact_output=compact_output,
-        )
-        calc_covariance_vector(
-            vcf_stream=io.StringIO(vcf_text),
-            genetic_map_path=genetic_map_path,
-            individuals_path=individuals_path,
-            output_path=vector_output_path,
-            ne=ne,
-            cutoff=cutoff,
-            center_lower_bound=center_lower_bound,
-            center_lower_inclusive=center_lower_inclusive,
-            center_upper_bound=center_upper_bound,
-            center_upper_inclusive=center_upper_inclusive,
-        )
-    else:
-        with tabix_proc.stdout:  # type: ignore[union-attr]
-            calc_covariance(
-                vcf_stream=tabix_proc.stdout,
-                genetic_map_path=genetic_map_path,
-                individuals_path=individuals_path,
-                output_path=output_path,
-                ne=ne,
-                cutoff=cutoff,
-                compact_output=compact_output,
-            )
-    tabix_proc.wait()
-    log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
-
-
-def _direct_vector_plan(
-    partitions: list[tuple[int, int]],
-    snp_first: int,
-    snp_last: int,
-) -> dict[tuple[int, int], tuple[int, bool, int, bool]]:
-    """Return ownership bounds for direct vector fragments."""
-    bounds: dict[tuple[int, int], tuple[int, bool, int, bool]] = {}
-    previous_end_locus: int | None = None
-    for p_index, (start, end) in enumerate(partitions):
-        if previous_end_locus is None:
-            lower_bound = snp_first
-            lower_inclusive = True
-        else:
-            lower_bound = previous_end_locus
-            lower_inclusive = False
-
-        if p_index + 1 < len(partitions):
-            upper_bound = int((end + partitions[p_index + 1][0]) / 2)
-            upper_inclusive = True
-        else:
-            upper_bound = snp_last
-            upper_inclusive = False
-        bounds[(start, end)] = (
-            lower_bound,
-            lower_inclusive,
-            upper_bound,
-            upper_inclusive,
-        )
-        previous_end_locus = (
-            int((end + partitions[p_index + 1][0]) / 2)
-            if p_index + 1 < len(partitions)
-            else snp_last
-        )
-    return bounds
-
-
-def _concatenate_direct_vector_fragments(
-    fragments: list[Path],
-    output_path: Path,
-) -> None:
-    output_path.unlink(missing_ok=True)
-    with gzip.open(output_path, "wt") as out:
-        for fragment in fragments:
-            if not fragment.exists():
-                continue
-            with gzip.open(fragment, "rt") as inp:
-                for line in inp:
-                    out.write(line)
-
-
 def _run(args: argparse.Namespace) -> int:
     import json
 
@@ -367,7 +222,7 @@ def _run(args: argparse.Namespace) -> int:
     log_memory_checkpoint("step1_start")
     partition_chromosome(
         genetic_map_path=args.genetic_map,
-        n_individuals=_count_individuals(args.individuals),
+        n_individuals=count_individuals(args.individuals),
         output_path=partitions_path,
         ne=args.ne,
     )
@@ -387,7 +242,7 @@ def _run(args: argparse.Namespace) -> int:
     snp_first = partitions[0][0]
     snp_last = partitions[-1][1]
     direct_vector_bounds = (
-        _direct_vector_plan(partitions, snp_first, snp_last)
+        direct_vector_plan(partitions, snp_first, snp_last)
         if vector_mode == "direct"
         else {}
     )
@@ -415,7 +270,7 @@ def _run(args: argparse.Namespace) -> int:
         if vector_mode == "direct" and not vector_fragment_path.exists():
             pending.append((start, end))
             continue
-        if not _is_valid_covariance_partition(
+        if not is_valid_covariance_partition(
             partition_path, require_full=not compact_output
         ):
             invalid += 1
@@ -430,7 +285,7 @@ def _run(args: argparse.Namespace) -> int:
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(
-                _calc_partition,
+                calc_partition,
                 start,
                 end,
                 chrom,
@@ -472,7 +327,7 @@ def _run(args: argparse.Namespace) -> int:
     log_memory_checkpoint("step3_start")
     if vector_mode == "direct":
         log_msg("Step 3: Concatenating direct vector fragments")
-        _concatenate_direct_vector_fragments(
+        concatenate_direct_vector_fragments(
             [
                 direct_vector_dir / f"{chrom}.{start}.{end}.txt.gz"
                 for start, end in partitions
@@ -501,7 +356,7 @@ def _run(args: argparse.Namespace) -> int:
         metric_workers=args.metric_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
-        subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
+        subsets=breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
         pair_cache=args.pair_cache,
     )
     log_memory_checkpoint("step4_end")
@@ -530,30 +385,3 @@ def _run(args: argparse.Namespace) -> int:
     log_msg(f"Done. BED file: {bed_path}")
     log_memory_checkpoint("run_end")
     return 0
-
-
-def _count_individuals(path: Path) -> int:
-    count = 0
-    with open(path) as f:
-        for line in f:
-            if line.strip():
-                count += 1
-    return count
-
-
-def _breakpoint_subsets_for_run(
-    subset: str, all_breakpoint_subsets: bool
-) -> set[str] | None:
-    """Return the breakpoint subset request passed from ``run`` to the pipeline.
-
-    ``None`` intentionally preserves the full historical JSON output; otherwise
-    ``run`` asks the pipeline to compute only the final BED subset and its
-    dependencies.
-    """
-    return None if all_breakpoint_subsets else {subset}
-
-
-def _is_valid_covariance_partition(
-    path: Path, require_full: bool = True
-) -> bool:
-    return validate_covariance_hdf5(path, require_full=require_full)
