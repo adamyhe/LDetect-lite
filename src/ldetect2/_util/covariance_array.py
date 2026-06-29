@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2._util.logging import log_debug
+from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.io.r2_zarr import (
@@ -477,6 +477,7 @@ def metric_from_r2_zarr_files(
     loci_chunks: list[np.ndarray] = []
     index_read_seconds = 0.0
     row_read_seconds = 0.0
+    filter_seconds = 0.0
     crossing_seconds = 0.0
     rows_read = 0
     pair_rows = 0
@@ -526,37 +527,19 @@ def metric_from_r2_zarr_files(
             f"ignoring workers={workers}"
         )
 
-    reader_contexts = []
-    for p_index, (start, end) in enumerate(partitions):
-        lower_min, lower_max, include_lower_min = _owned_bounds(
-            partitions, p_index, snp_first, snp_last
+    if has_owned_cache:
+        bounds = [
+            (*_owned_bounds(partitions, p_index, snp_first, snp_last), end)
+            for p_index, (_start, end) in enumerate(partitions)
+        ]
+        lower_min_arr = np.asarray([bound[0] for bound in bounds], dtype=np.int64)
+        lower_max_arr = np.asarray([bound[1] for bound in bounds], dtype=np.int64)
+        include_lower_min_arr = np.asarray(
+            [bound[2] for bound in bounds], dtype=bool
         )
-        if has_owned_cache:
-            reader_contexts.append(
-                (
-                    (lower_min, lower_max, include_lower_min, end),
-                    open_r2_zarr_owned_reader(store.root, name),
-                )
-            )
-        else:
-            reader_contexts.append(
-                (
-                    (lower_min, lower_max, include_lower_min, end),
-                    open_r2_zarr_reader(store.root, name, start, end),
-                )
-            )
-
-    for bounds, reader_context in reader_contexts:
-        with reader_context as reader:
-            lower_min, lower_max, include_lower_min, partition_end = bounds
-            chunk_iter = reader.iter_owned_rows(
-                lower_min,
-                lower_max,
-                snp_first,
-                snp_last,
-                _DEFAULT_CHUNK_ROWS,
-                include_lower_min=include_lower_min,
-            )
+        partition_end_arr = np.asarray([bound[3] for bound in bounds], dtype=np.int64)
+        with open_r2_zarr_owned_reader(store.root, name) as reader:
+            chunk_iter = reader.iter_rows(snp_first, snp_last, _DEFAULT_CHUNK_ROWS)
             while True:
                 read_start = time.perf_counter()
                 try:
@@ -565,14 +548,33 @@ def metric_from_r2_zarr_files(
                     break
                 row_read_seconds += time.perf_counter() - read_start
                 rows_read += int(chunk.lo.size)
+
+                filter_start = time.perf_counter()
+                owner_idx = np.searchsorted(lower_max_arr, chunk.lo, side="left")
+                has_owner = owner_idx < lower_max_arr.size
+                lower_owned = np.zeros(chunk.lo.shape, dtype=bool)
+                owner_partition_end = np.zeros(chunk.lo.shape, dtype=np.int64)
+                if np.any(has_owner):
+                    valid_idx = owner_idx[has_owner]
+                    include_lower = include_lower_min_arr[valid_idx]
+                    valid_lo = chunk.lo[has_owner]
+                    lower_owned[has_owner] = np.where(
+                        include_lower,
+                        valid_lo >= lower_min_arr[valid_idx],
+                        valid_lo > lower_min_arr[valid_idx],
+                    )
+                    owner_partition_end[has_owner] = partition_end_arr[valid_idx]
                 in_range = (
                     (chunk.lo >= snp_first)
                     & (chunk.lo <= snp_last)
                     & (chunk.hi >= snp_first)
                     & (chunk.hi <= snp_last)
-                    & (chunk.hi <= partition_end)
+                    & has_owner
+                    & lower_owned
+                    & (chunk.hi <= owner_partition_end)
                 )
                 pair_mask = in_range & (chunk.lo < chunk.hi)
+                filter_seconds += time.perf_counter() - filter_start
                 if not np.any(pair_mask):
                     continue
                 pair_i = chunk.lo[pair_mask]
@@ -590,13 +592,75 @@ def metric_from_r2_zarr_files(
                     n_nonzero += crossing_count
                     crossing_rows += crossing_count
                 crossing_seconds += time.perf_counter() - crossing_start
+    else:
+        reader_contexts = []
+        for p_index, (start, end) in enumerate(partitions):
+            lower_min, lower_max, include_lower_min = _owned_bounds(
+                partitions, p_index, snp_first, snp_last
+            )
+            reader_contexts.append(
+                (
+                    (lower_min, lower_max, include_lower_min, end),
+                    open_r2_zarr_reader(store.root, name, start, end),
+                )
+            )
 
-    log_debug(
+        for bounds, reader_context in reader_contexts:
+            with reader_context as reader:
+                lower_min, lower_max, include_lower_min, partition_end = bounds
+                chunk_iter = reader.iter_owned_rows(
+                    lower_min,
+                    lower_max,
+                    snp_first,
+                    snp_last,
+                    _DEFAULT_CHUNK_ROWS,
+                    include_lower_min=include_lower_min,
+                )
+                while True:
+                    read_start = time.perf_counter()
+                    try:
+                        chunk = next(chunk_iter)
+                    except StopIteration:
+                        break
+                    row_read_seconds += time.perf_counter() - read_start
+                    rows_read += int(chunk.lo.size)
+
+                    filter_start = time.perf_counter()
+                    in_range = (
+                        (chunk.lo >= snp_first)
+                        & (chunk.lo <= snp_last)
+                        & (chunk.hi >= snp_first)
+                        & (chunk.hi <= snp_last)
+                        & (chunk.hi <= partition_end)
+                    )
+                    pair_mask = in_range & (chunk.lo < chunk.hi)
+                    filter_seconds += time.perf_counter() - filter_start
+                    if not np.any(pair_mask):
+                        continue
+                    pair_i = chunk.lo[pair_mask]
+                    pair_j = chunk.hi[pair_mask]
+                    pair_r2 = chunk.r2[pair_mask]
+                    pair_rows += int(pair_i.size)
+
+                    crossing_start = time.perf_counter()
+                    i_blocks = np.searchsorted(bp, pair_i, side="left")
+                    j_blocks = np.searchsorted(bp, pair_j, side="left")
+                    crossing = i_blocks != j_blocks
+                    crossing_count = int(np.count_nonzero(crossing))
+                    if crossing_count:
+                        total_sum += float(np.sum(pair_r2[crossing]))
+                        n_nonzero += crossing_count
+                        crossing_rows += crossing_count
+                    crossing_seconds += time.perf_counter() - crossing_start
+
+    log_msg(
         "metric_from_r2_zarr_files profile "
-        f"partitions={len(partitions)} rows_read={rows_read} "
+        f"owned_cache={has_owned_cache} partitions={len(partitions)} "
+        f"rows_read={rows_read} "
         f"pair_rows={pair_rows} crossing_rows={crossing_rows} "
         f"index_read_seconds={index_read_seconds:.6f} "
         f"row_read_seconds={row_read_seconds:.6f} "
+        f"filter_seconds={filter_seconds:.6f} "
         f"crossing_seconds={crossing_seconds:.6f}"
     )
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}

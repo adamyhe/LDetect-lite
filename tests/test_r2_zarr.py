@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import ldetect2.local_search as local_search_module
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.io.r2_zarr import (
@@ -365,6 +366,28 @@ def test_r2_zarr_owned_metric_matches_hdf5_with_deleted_partitions(
     assert zarr == pytest.approx(hdf5)
 
 
+def test_r2_zarr_owned_metric_filters_rows_by_partition_end(tmp_path: Path) -> None:
+    loci = [100, 200, 300, 400, 500, 600]
+    partitions = [(100, 400), (300, 600)]
+    r2 = {
+        (100, 300): 0.5,
+        (300, 400): 0.25,
+        # lo=300 is owned by the first partition, so this row must be excluded
+        # because hi is beyond that partition's end.
+        (300, 600): 99.0,
+        (400, 600): 0.125,
+    }
+    store = _make_dual_store(tmp_path, loci, r2, partitions, owned_cache=True)
+
+    hdf5 = Metric("chr1", store, [250, 450], 100, 600).calc_metric()
+    zarr = Metric(
+        "chr1", store, [250, 450], 100, 600, pair_cache="r2-zarr"
+    ).calc_metric()
+
+    assert zarr == pytest.approx(hdf5)
+    assert zarr["sum"] < 99.0
+
+
 def test_r2_zarr_local_search_matches_hdf5(tmp_path: Path) -> None:
     loci = [100, 200, 300, 400, 500, 600, 700, 800, 900]
     partitions = [(100, 400), (300, 700), (600, 900)]
@@ -471,3 +494,71 @@ def test_r2_zarr_owned_local_search_matches_hdf5_with_deleted_partitions(
         assert zarr_out is not None
         assert zarr_out["sum"] == pytest.approx(hdf5_out["sum"])
         assert zarr_out["N_zero"] == pytest.approx(hdf5_out["N_zero"])
+
+
+def test_r2_zarr_owned_local_search_scans_once_per_segment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loci = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+    partitions = [(100, 400), (300, 700), (600, 900)]
+    r2 = {
+        (300, 500): 0.2,
+        (400, 500): 0.7,
+        (500, 600): 0.5,
+        (600, 700): 0.3,
+    }
+    store = _make_dual_store(tmp_path, loci, r2, partitions, owned_cache=True)
+    breakpoints = [300, 600, 800]
+    zarr_metric = Metric(
+        "chr1", store, breakpoints, 100, 900, pair_cache="r2-zarr"
+    ).calc_metric()
+    r2_partitions = tuple(
+        local_search_r2_zarr_partition("chr1", store, start, end)
+        for start, end in partitions
+    )
+    original_open = local_search_module.open_r2_zarr_owned_reader
+    iter_rows_calls = 0
+
+    class CountingReader:
+        def __init__(self, *args, **kwargs) -> None:
+            self._reader = original_open(*args, **kwargs)
+
+        def __enter__(self):
+            self._reader.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self._reader.__exit__(*exc_info)
+
+        def __getattr__(self, name: str):
+            return getattr(self._reader, name)
+
+        def iter_rows(self, *args, **kwargs):
+            nonlocal iter_rows_calls
+            iter_rows_calls += 1
+            yield from self._reader.iter_rows(*args, **kwargs)
+
+    monkeypatch.setattr(
+        local_search_module,
+        "open_r2_zarr_owned_reader",
+        CountingReader,
+    )
+    zarr_search = LocalSearch(
+        "chr1",
+        400,
+        750,
+        1,
+        breakpoints,
+        zarr_metric["sum"],
+        zarr_metric["N_zero"],
+        store,
+        local_search_r2_zarr_partitions=r2_partitions,
+    )
+
+    zarr_search.search()
+
+    assert iter_rows_calls == zarr_search.precompute_stats.segments
+    assert zarr_search.precompute_stats.hdf5_segment_partition_reads == iter_rows_calls
+    assert zarr_search.loaded_row_count == r2_partitions[0].source_row_count
+    assert zarr_search.precompute_stats.active_rows_peak == 0

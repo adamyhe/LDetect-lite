@@ -7,6 +7,7 @@ import gzip
 import io
 import subprocess
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -500,6 +501,7 @@ def _run(args: argparse.Namespace) -> int:
         and (pending or not validate_r2_zarr_owned_cache(output_dir, chrom))
     ):
         log_msg("  Building chromosome-level owned r2 Zarr cache")
+        owned_cache_start = time.perf_counter()
         write_r2_zarr_owned_cache(
             output_dir,
             chrom,
@@ -510,6 +512,10 @@ def _run(args: argparse.Namespace) -> int:
             cutoff=args.cov_cutoff,
             compressor=args.r2_zarr_compressor,
             delete_partitions=True,
+        )
+        log_msg(
+            "  Built chromosome-level owned r2 Zarr cache "
+            f"elapsed_seconds={time.perf_counter() - owned_cache_start:.3f}"
         )
     log_memory_checkpoint("step2_end")
 
