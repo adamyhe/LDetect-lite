@@ -261,7 +261,7 @@ With no quadratic memory term, multi-chromosome parallelization becomes straight
 ## Prioritized implementation order
 
 1. **Eliminate matrix materialization** — accumulate vector directly during covariance computation (resolves 100GB memory pressure and unblocks parallelization)
-2. **Add minimal normalized `r²` cache** — implemented experimentally with Zarr v2 for metric/local-search without enormous HDF5 covariance files
+2. **Add normalized `r²` cache** — implemented experimentally with the aggressive Zarr partition-row cache for fast metric/local-search comparisons without HDF5 covariance reads
 3. **Vectorize covariance inner loop** with NumPy broadcasting; optionally add Numba `@njit(parallel=True)` for shrinkage application (10–100× speedup)
 4. **Replace VCF parsing** with `cyvcf2` (5–20× speedup)
 5. **Remove `decimal`** from matrix-to-vector step; use `np.trace` (50–100× speedup — moot if matrix is eliminated, but relevant if kept as fallback)

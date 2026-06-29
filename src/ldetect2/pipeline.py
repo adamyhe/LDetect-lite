@@ -559,18 +559,9 @@ def _run_local_search(
                         local_search_r2_zarr_partition(chr_name, store, start, end)
                         for start, end in partition_bounds
                     )
-                    owned_row_counts = {
-                        int(partition.source_row_count)
+                    group_row_count = sum(
+                        partition.source_row_count
                         for partition in group_r2_zarr_partitions
-                        if partition.owned_cache
-                    }
-                    group_row_count = (
-                        max(owned_row_counts)
-                        if owned_row_counts
-                        else sum(
-                            partition.source_row_count
-                            for partition in group_r2_zarr_partitions
-                        )
                     )
                 elif pair_cache == "hdf5":
                     group_r2_zarr_partitions = None

@@ -34,12 +34,7 @@ from ldetect2.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
-from ldetect2.io.r2_zarr import (
-    R2RowChunk,
-    open_r2_zarr_owned_reader,
-    open_r2_zarr_reader,
-    validate_r2_zarr_owned_cache,
-)
+from ldetect2.io.r2_zarr import R2RowChunk, open_r2_zarr_reader
 
 _PREC = 50
 
@@ -140,7 +135,6 @@ class LocalSearchR2ZarrPartition:
     root: object
     source_row_count: int
     loci: np.ndarray
-    owned_cache: bool = False
 
 
 _HDF5ReaderPool = dict[tuple[str, int, int], HDF5CovariancePartitionReader]
@@ -246,19 +240,6 @@ def local_search_r2_zarr_partition(
     end: int,
 ) -> LocalSearchR2ZarrPartition:
     """Load only r2 Zarr index metadata for one local-search partition."""
-    if validate_r2_zarr_owned_cache(store.root, name):
-        with open_r2_zarr_owned_reader(store.root, name) as reader:
-            loci = reader.read_loci()
-            loci = loci[(loci >= start) & (loci <= end)]
-            return LocalSearchR2ZarrPartition(
-                start=start,
-                end=end,
-                name=name,
-                root=store.root,
-                source_row_count=reader.row_count,
-                loci=loci,
-                owned_cache=True,
-            )
     with open_r2_zarr_reader(store.root, name, start, end) as reader:
         return LocalSearchR2ZarrPartition(
             start=start,
@@ -267,7 +248,6 @@ def local_search_r2_zarr_partition(
             root=store.root,
             source_row_count=reader.row_count,
             loci=reader.read_loci(),
-            owned_cache=False,
         )
 
 
@@ -455,8 +435,6 @@ def _active_row_count_from_r2_zarr_partitions(
     active_min_lo: int,
 ) -> int:
     """Return an approximate active row count from r2 Zarr indexes."""
-    if partitions and any(partition.owned_cache for partition in partitions):
-        return 0
     total = 0
     for partition in partitions:
         left = int(np.searchsorted(partition.loci, active_min_lo, side="left"))
@@ -525,29 +503,6 @@ def _iter_r2_zarr_canonical_segment_rows(
 ) -> Iterator[R2RowChunk]:
     """Yield canonical normalized r2 segment rows in partition precedence order."""
     min_lo = max(active_min_lo, lo_min)
-    if partitions and validate_r2_zarr_owned_cache(
-        Path(partitions[0].root), partitions[0].name
-    ):
-        with open_r2_zarr_owned_reader(
-            Path(partitions[0].root),
-            partitions[0].name,
-        ) as reader:
-            for chunk in reader.iter_rows(min_lo, lo_max, chunk_rows):
-                in_any_active_partition = np.zeros(chunk.lo.shape, dtype=bool)
-                for partition in partitions:
-                    in_any_active_partition |= (
-                        (chunk.lo >= partition.start)
-                        & (chunk.lo <= partition.end)
-                        & (chunk.hi >= partition.start)
-                        & (chunk.hi <= partition.end)
-                    )
-                if np.any(in_any_active_partition):
-                    yield R2RowChunk(
-                        lo=chunk.lo[in_any_active_partition],
-                        hi=chunk.hi[in_any_active_partition],
-                        r2=chunk.r2[in_any_active_partition],
-                    )
-        return
     for partition in partitions:
         with open_r2_zarr_reader(
             Path(partition.root),
@@ -889,12 +844,9 @@ def _add_r2_zarr_segment_values(
 
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
-    use_owned_cache = any(partition.owned_cache for partition in active_partitions)
     seen_hi_by_lo: dict[int, np.ndarray] = {}
     if stats is not None:
-        stats.hdf5_segment_partition_reads += 1 if use_owned_cache else len(
-            active_partitions
-        )
+        stats.hdf5_segment_partition_reads += len(active_partitions)
     chunk_iter = _iter_r2_zarr_canonical_segment_rows(
         active_partitions,
         active_min_lo,
@@ -930,20 +882,19 @@ def _add_r2_zarr_segment_values(
         row_hi = chunk.hi[eligible]
         row_r2 = chunk.r2[eligible]
 
-        if not use_owned_cache:
-            dedup_start = time.perf_counter()
-            first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
-            if stats is not None:
-                stats.dedup_seconds += time.perf_counter() - dedup_start
-                stats.duplicate_rows_skipped += int(
-                    row_lo.size - np.count_nonzero(first_seen)
-                )
-            if not np.any(first_seen):
-                continue
+        dedup_start = time.perf_counter()
+        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
+        if stats is not None:
+            stats.dedup_seconds += time.perf_counter() - dedup_start
+            stats.duplicate_rows_skipped += int(
+                row_lo.size - np.count_nonzero(first_seen)
+            )
+        if not np.any(first_seen):
+            continue
 
-            row_lo = row_lo[first_seen]
-            row_hi = row_hi[first_seen]
-            row_r2 = row_r2[first_seen]
+        row_lo = row_lo[first_seen]
+        row_hi = row_hi[first_seen]
+        row_r2 = row_r2[first_seen]
         if stats is not None:
             kept = int(row_lo.size)
             stats.candidate_rows += kept
@@ -1356,19 +1307,10 @@ class LocalSearch:
         self.precompute_stats = LocalSearchPrecomputeStats()
         if self.local_search_r2_zarr_partitions is not None:
             self.loaded_partition_count = len(self.local_search_r2_zarr_partitions)
-            owned_row_counts = {
-                int(partition.source_row_count)
-                for partition in self.local_search_r2_zarr_partitions
-                if partition.owned_cache
-            }
-            self.loaded_row_count = (
-                max(owned_row_counts)
-                if owned_row_counts
-                else int(
-                    sum(
-                        partition.source_row_count
-                        for partition in self.local_search_r2_zarr_partitions
-                    )
+            self.loaded_row_count = int(
+                sum(
+                    partition.source_row_count
+                    for partition in self.local_search_r2_zarr_partitions
                 )
             )
             loci, sum_vert, sum_horiz = self._precompute_array_from_r2_zarr_partitions(

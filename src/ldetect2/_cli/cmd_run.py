@@ -7,16 +7,11 @@ import gzip
 import io
 import subprocess
 import sys
-import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from ldetect2.io.covariance_hdf5 import validate_covariance_hdf5
-from ldetect2.io.r2_zarr import (
-    validate_r2_zarr_owned_cache,
-    validate_r2_zarr_partition,
-    write_r2_zarr_owned_cache,
-)
+from ldetect2.io.r2_zarr import validate_r2_zarr_partition
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
 
@@ -92,16 +87,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "current covariance cache behavior; 'r2-zarr' is experimental and "
             "writes normalized float64 r2 rows plus direct vector fragments "
             "(default: hdf5)."
-        ),
-    )
-    p.add_argument(
-        "--r2-zarr-compressor",
-        choices=("default", "lz4-bitshuffle", "zstd-bitshuffle"),
-        default="default",
-        help=(
-            "Experimental compressor for --pair-cache r2-zarr. The default "
-            "keeps Zarr's standard codec settings; explicit choices are for "
-            "cache-size benchmarking."
         ),
     )
     p.add_argument(
@@ -203,7 +188,6 @@ def _calc_partition(
     cutoff: float,
     compact_output: bool,
     pair_cache: str = "hdf5",
-    r2_zarr_compressor: str = "default",
     vector_output_path: Path | None = None,
     center_lower_bound: int | None = None,
     center_lower_inclusive: bool = True,
@@ -251,7 +235,6 @@ def _calc_partition(
                 center_lower_inclusive=center_lower_inclusive,
                 center_upper_bound=center_upper_bound,
                 center_upper_inclusive=center_upper_inclusive,
-                r2_zarr_compressor=r2_zarr_compressor,
             )
     elif vector_output_path is not None:
         with tabix_proc.stdout:  # type: ignore[union-attr]
@@ -362,13 +345,6 @@ def _run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if args.r2_zarr_compressor != "default" and args.pair_cache != "r2-zarr":
-        print(
-            "Error: --r2-zarr-compressor can only be used with "
-            "--pair-cache r2-zarr.",
-            file=sys.stderr,
-        )
-        return 1
     vector_mode = "direct" if args.pair_cache == "r2-zarr" else args.vector_mode
 
     chrom = args.chromosome
@@ -418,11 +394,6 @@ def _run(args: argparse.Namespace) -> int:
     direct_vector_dir = output_dir / "direct_vector_fragments" / chrom
     if vector_mode == "direct":
         direct_vector_dir.mkdir(parents=True, exist_ok=True)
-    r2_owned_cache_valid = (
-        validate_r2_zarr_owned_cache(output_dir, chrom)
-        if args.pair_cache == "r2-zarr"
-        else False
-    )
 
     pending = []
     invalid = 0
@@ -430,8 +401,6 @@ def _run(args: argparse.Namespace) -> int:
         partition_path = store.partition_path(chrom, start, end)
         vector_fragment_path = direct_vector_dir / f"{chrom}.{start}.{end}.txt.gz"
         if args.pair_cache == "r2-zarr":
-            if r2_owned_cache_valid and vector_fragment_path.exists():
-                continue
             if not validate_r2_zarr_partition(output_dir, chrom, start, end):
                 pending.append((start, end))
                 continue
@@ -477,7 +446,6 @@ def _run(args: argparse.Namespace) -> int:
                 args.cov_cutoff,
                 compact_output,
                 args.pair_cache,
-                args.r2_zarr_compressor,
                 (
                     direct_vector_dir / f"{chrom}.{start}.{end}.txt.gz"
                     if vector_mode == "direct"
@@ -495,28 +463,6 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             log_msg(f"  Partition {start}-{end} done")
-    if (
-        args.pair_cache == "r2-zarr"
-        and not r2_owned_cache_valid
-        and (pending or not validate_r2_zarr_owned_cache(output_dir, chrom))
-    ):
-        log_msg("  Building chromosome-level owned r2 Zarr cache")
-        owned_cache_start = time.perf_counter()
-        write_r2_zarr_owned_cache(
-            output_dir,
-            chrom,
-            partitions,
-            snp_first=snp_first,
-            snp_last=snp_last,
-            ne=args.ne,
-            cutoff=args.cov_cutoff,
-            compressor=args.r2_zarr_compressor,
-            delete_partitions=True,
-        )
-        log_msg(
-            "  Built chromosome-level owned r2 Zarr cache "
-            f"elapsed_seconds={time.perf_counter() - owned_cache_start:.3f}"
-        )
     log_memory_checkpoint("step2_end")
 
     # ------------------------------------------------------------------ #

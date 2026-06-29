@@ -1063,7 +1063,6 @@ def calc_r2_zarr_partition(
     center_lower_inclusive: bool = True,
     center_upper_bound: int | None = None,
     center_upper_inclusive: bool = True,
-    r2_zarr_compressor: str = "default",
 ) -> None:
     """Calculate normalized r2 rows and optionally a direct vector fragment."""
     from ldetect2._util.logging import log_debug
@@ -1093,7 +1092,6 @@ def calc_r2_zarr_partition(
             ne=ne,
             cutoff=cutoff,
             chunk_rows=compact_chunk_rows,
-            compressor=r2_zarr_compressor,
         )
         log_debug(
             "calc_r2_zarr empty_partition "
@@ -1208,7 +1206,6 @@ def calc_r2_zarr_partition(
         ne=ne,
         cutoff=cutoff,
         chunk_rows=compact_chunk_rows,
-        compressor=r2_zarr_compressor,
     )
     log_debug(
         "calc_r2_zarr written "
