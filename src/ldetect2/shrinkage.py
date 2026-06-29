@@ -566,59 +566,68 @@ def _r2_pair_chunks_from_covariance(
 
 def _r2_pair_chunk_from_canonical_rows(rows: CovarianceRowChunk) -> R2RowChunk:
     """Return normalized r2 rows from canonical physical covariance rows."""
-    if rows.lo.size == 0:
-        return R2RowChunk(
+    return next(
+        _r2_pair_chunks_from_canonical_rows(rows, max(int(rows.lo.size), 1)),
+        R2RowChunk(
             lo=np.array([], dtype=np.int32),
             hi=np.array([], dtype=np.int32),
             r2=np.array([], dtype=np.float64),
-        )
+        ),
+    )
+
+
+def _positive_diag_from_canonical_rows(
+    rows: CovarianceRowChunk,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted positive diagonal loci and shrinkage values."""
+    if rows.lo.size == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
 
     diag_mask = rows.lo == rows.hi
     diag_pos = rows.lo[diag_mask].astype(np.int64, copy=False)
     diag_val = np.asarray(rows.shrink_ld[diag_mask], dtype=np.float64)
+    positive = diag_val > 0.0
+    return diag_pos[positive], diag_val[positive]
+
+
+def _r2_pair_chunks_from_canonical_rows(
+    rows: CovarianceRowChunk,
+    chunk_rows: int,
+) -> Iterator[R2RowChunk]:
+    """Yield normalized r2 rows from canonical physical rows in bounded chunks."""
+    diag_pos, diag_val = _positive_diag_from_canonical_rows(rows)
     if diag_pos.size == 0:
-        return R2RowChunk(
-            lo=np.array([], dtype=np.int32),
-            hi=np.array([], dtype=np.int32),
-            r2=np.array([], dtype=np.float64),
-        )
-    diag_lo_idx = np.searchsorted(diag_pos, rows.lo)
-    diag_hi_idx = np.searchsorted(diag_pos, rows.hi)
-    has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
-    safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
-    safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
-    has_diag &= (diag_pos[safe_lo_idx] == rows.lo) & (
-        diag_pos[safe_hi_idx] == rows.hi
-    )
-    if not np.any(has_diag):
-        return R2RowChunk(
-            lo=np.array([], dtype=np.int32),
-            hi=np.array([], dtype=np.int32),
-            r2=np.array([], dtype=np.float64),
-        )
+        return
 
-    lo = rows.lo[has_diag]
-    hi = rows.hi[has_diag]
-    shrink = np.asarray(rows.shrink_ld[has_diag], dtype=np.float64)
-    diag_lo = diag_val[diag_lo_idx[has_diag]]
-    diag_hi = diag_val[diag_hi_idx[has_diag]]
-    positive = (diag_lo > 0.0) & (diag_hi > 0.0)
-    if not np.any(positive):
-        return R2RowChunk(
-            lo=np.array([], dtype=np.int32),
-            hi=np.array([], dtype=np.int32),
-            r2=np.array([], dtype=np.float64),
-        )
+    chunk_rows = max(int(chunk_rows), 1)
+    for start in range(0, rows.lo.size, chunk_rows):
+        stop = min(start + chunk_rows, rows.lo.size)
+        row_lo = rows.lo[start:stop]
+        row_hi = rows.hi[start:stop]
+        diag_lo_idx = np.searchsorted(diag_pos, row_lo)
+        diag_hi_idx = np.searchsorted(diag_pos, row_hi)
+        has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
+        if not np.any(has_diag):
+            continue
 
-    lo = lo[positive]
-    hi = hi[positive]
-    r2 = shrink[positive] * shrink[positive] / (
-        diag_lo[positive] * diag_hi[positive]
-    )
-    diag_rows = lo == hi
-    if np.any(diag_rows):
-        r2[diag_rows] = 1.0
-    return R2RowChunk(lo=lo, hi=hi, r2=r2)
+        safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
+        safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
+        has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (
+            diag_pos[safe_hi_idx] == row_hi
+        )
+        if not np.any(has_diag):
+            continue
+
+        lo = row_lo[has_diag]
+        hi = row_hi[has_diag]
+        shrink = np.asarray(rows.shrink_ld[start:stop][has_diag], dtype=np.float64)
+        diag_lo = diag_val[diag_lo_idx[has_diag]]
+        diag_hi = diag_val[diag_hi_idx[has_diag]]
+        r2 = shrink * shrink / (diag_lo * diag_hi)
+        diag_rows = lo == hi
+        if np.any(diag_rows):
+            r2[diag_rows] = 1.0
+        yield R2RowChunk(lo=lo, hi=hi, r2=r2)
 
 
 # ---------------------------------------------------------------------------
@@ -1174,10 +1183,12 @@ def calc_r2_zarr_partition(
 
     write_start = time.perf_counter()
     if duplicate_rows is not None:
-        zarr_positions = np.unique(
-            np.concatenate((duplicate_rows.lo, duplicate_rows.hi))
-        ).astype(np.int32, copy=False)
-        row_chunks = iter([_r2_pair_chunk_from_canonical_rows(duplicate_rows)])
+        diag_pos, _ = _positive_diag_from_canonical_rows(duplicate_rows)
+        zarr_positions = diag_pos.astype(np.int32, copy=False)
+        row_chunks = _r2_pair_chunks_from_canonical_rows(
+            duplicate_rows,
+            compact_chunk_rows,
+        )
     else:
         zarr_positions = pos_arr
         row_chunks = _r2_pair_chunks_from_covariance(
