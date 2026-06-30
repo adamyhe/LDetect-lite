@@ -190,6 +190,51 @@ def test_calc_covariance_retains_legacy_duplicate_physical_positions(
     assert rows.lo.tolist().count(100) > 0
 
 
+def test_calc_covariance_duplicate_compact_matches_full_rows(
+    tmp_path: Path,
+) -> None:
+    """Duplicate-compatible compact streaming should match full canonical rows."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    full_path = tmp_path / "duplicate-full.h5"
+    compact_path = tmp_path / "duplicate-compact.h5"
+    calc_covariance(
+        vcf_stream=_duplicate_position_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=full_path,
+        cutoff=1e-7,
+    )
+    calc_covariance(
+        vcf_stream=_duplicate_position_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=compact_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compact_chunk_rows=2,
+    )
+
+    with open_covariance_reader(full_path, 100, 300) as full_reader:
+        full_rows = full_reader.read_all()
+        full_diag = full_reader.read_diagonal()
+        full_loci = full_reader.read_loci()
+    with open_covariance_reader(compact_path, 100, 300) as compact_reader:
+        compact_rows = compact_reader.read_all()
+        compact_diag = compact_reader.read_diagonal()
+        compact_loci = compact_reader.read_loci()
+
+    np.testing.assert_array_equal(compact_rows.lo, full_rows.lo)
+    np.testing.assert_array_equal(compact_rows.hi, full_rows.hi)
+    np.testing.assert_allclose(compact_rows.shrink_ld, full_rows.shrink_ld)
+    np.testing.assert_array_equal(compact_diag[0], full_diag[0])
+    np.testing.assert_allclose(compact_diag[1], full_diag[1])
+    np.testing.assert_array_equal(compact_loci, full_loci)
+
+
 def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:
     map_path = tmp_path / "map.gz"
     _write_map(map_path)
