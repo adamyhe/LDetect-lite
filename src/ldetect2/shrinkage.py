@@ -373,6 +373,8 @@ def _direct_corr_sum_vector_impl(
     hap_sums: np.ndarray,
     diag_shrink: np.ndarray,
     j_stop_by_i: np.ndarray,
+    active_index_by_snp: np.ndarray,
+    n_active_loci: int,
     ne: float,
     n_ind: float,
     theta: float,
@@ -382,11 +384,14 @@ def _direct_corr_sum_vector_impl(
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     n_total = float(n_haps)
-    sums = np.zeros(n_snps, dtype=np.float64)
+    sums = np.zeros(n_active_loci, dtype=np.float64)
 
     for i in range(n_snps):
         diag_i = diag_shrink[i]
         if diag_i <= 0.0:
+            continue
+        lo_idx = active_index_by_snp[i]
+        if lo_idx < 0:
             continue
 
         gpos1 = gpos_arr[i]
@@ -396,11 +401,14 @@ def _direct_corr_sum_vector_impl(
             diag_j = diag_shrink[j]
             if diag_j <= 0.0:
                 continue
-
-            idx_delta = j - i
-            if idx_delta % 2 != 0 and i == 0:
+            hi_idx = active_index_by_snp[j]
+            if hi_idx < 0:
                 continue
-            center_idx = (i + j) // 2
+
+            idx_delta = hi_idx - lo_idx
+            if idx_delta % 2 != 0 and lo_idx == 0:
+                continue
+            center_idx = (lo_idx + hi_idx) // 2
 
             df = gpos_arr[j] - gpos1
             ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
@@ -943,6 +951,34 @@ def _diag_from_first_physical_position(
     )
 
 
+def _loci_from_row_counts(
+    pos_arr: np.ndarray,
+    row_counts: np.ndarray,
+) -> np.ndarray:
+    """Return matrix-vector loci: physical lower endpoints with covariance rows."""
+    if pos_arr.size == 0:
+        return np.array([], dtype=np.int64)
+    if not _has_duplicate_positions(pos_arr):
+        return pos_arr[row_counts > 0].astype(np.int64, copy=False)
+
+    starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(pos_arr[1:] != pos_arr[:-1]) + 1,
+        )
+    )
+    counts = np.add.reduceat(np.asarray(row_counts, dtype=np.int64), starts)
+    return pos_arr[starts[counts > 0]].astype(np.int64, copy=False)
+
+
+def _active_index_from_row_counts(row_counts: np.ndarray) -> np.ndarray:
+    """Return SNP-index to matrix-vector active-locus-index mapping."""
+    active = row_counts > 0
+    active_index = np.full(row_counts.size, -1, dtype=np.int64)
+    active_index[active] = np.arange(int(np.count_nonzero(active)), dtype=np.int64)
+    return active_index
+
+
 def _r2_vector_from_canonical_row_chunks(
     loci: np.ndarray,
     diag_pos: np.ndarray,
@@ -988,6 +1024,20 @@ def _r2_vector_from_canonical_row_chunks(
         diag_hi = diag_hi[positive]
         lo_idx = np.searchsorted(loci, row_lo)
         hi_idx = np.searchsorted(loci, row_hi)
+        has_loci = (lo_idx < loci.size) & (hi_idx < loci.size)
+        if not np.any(has_loci):
+            continue
+        safe_lo_idx = np.minimum(lo_idx, loci.size - 1)
+        safe_hi_idx = np.minimum(hi_idx, loci.size - 1)
+        has_loci &= (loci[safe_lo_idx] == row_lo) & (loci[safe_hi_idx] == row_hi)
+        if not np.any(has_loci):
+            continue
+
+        lo_idx = lo_idx[has_loci]
+        hi_idx = hi_idx[has_loci]
+        row_shrink = row_shrink[has_loci]
+        diag_lo = diag_lo[has_loci]
+        diag_hi = diag_hi[has_loci]
         idx_delta = hi_idx - lo_idx
         legacy_reachable = (idx_delta % 2 == 0) | (lo_idx > 0)
         if not np.any(legacy_reachable):
@@ -1098,11 +1148,18 @@ def calc_covariance_vector(
     log_memory_checkpoint("calc_covariance_vector_arrays_built", debug=True)
 
     vector_start = time.perf_counter()
+    row_counts = _count_pairwise_ld_by_i_impl(
+        hap_mat,
+        gpos_arr,
+        hap_sums,
+        j_stop_by_i,
+        ne,
+        float(n_ind),
+        theta,
+        cutoff,
+    )
     if has_duplicate_positions:
-        row_counts = _count_pairwise_ld_by_i_impl(
-            hap_mat, gpos_arr, hap_sums, j_stop_by_i, ne, float(n_ind), theta, cutoff
-        )
-        loci = np.unique(pos_arr).astype(np.int64, copy=False)
+        loci = _loci_from_row_counts(pos_arr, row_counts)
         diag_pos, diag_val = _diag_from_first_physical_position(pos_arr, diag_shrink)
         vector_positions, sums = _r2_vector_from_canonical_row_chunks(
             loci,
@@ -1123,13 +1180,15 @@ def calc_covariance_vector(
             ),
         )
     else:
-        vector_positions = pos_arr
+        vector_positions = _loci_from_row_counts(pos_arr, row_counts)
         sums = _direct_corr_sum_vector_impl(
             hap_mat,
             gpos_arr,
             hap_sums,
             diag_shrink,
             j_stop_by_i,
+            _active_index_from_row_counts(row_counts),
+            int(vector_positions.size),
             ne,
             float(n_ind),
             theta,
@@ -1258,7 +1317,7 @@ def calc_r2_zarr_partition(
         if duplicate_row_counts is not None:
             assert duplicate_diag_pos is not None
             assert duplicate_diag_val is not None
-            vector_positions = np.unique(pos_arr).astype(np.int64, copy=False)
+            vector_positions = _loci_from_row_counts(pos_arr, duplicate_row_counts)
             vector_positions, sums = _r2_vector_from_canonical_row_chunks(
                 vector_positions,
                 duplicate_diag_pos,
@@ -1278,13 +1337,25 @@ def calc_r2_zarr_partition(
                 ),
             )
         else:
-            vector_positions = pos_arr
+            vector_row_counts = _count_pairwise_ld_by_i_impl(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+            )
+            vector_positions = _loci_from_row_counts(pos_arr, vector_row_counts)
             sums = _direct_corr_sum_vector_impl(
                 hap_mat,
                 gpos_arr,
                 hap_sums,
                 diag_shrink,
                 j_stop_by_i,
+                _active_index_from_row_counts(vector_row_counts),
+                int(vector_positions.size),
                 ne,
                 float(n_ind),
                 theta,
