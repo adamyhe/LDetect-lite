@@ -85,10 +85,12 @@ time and RSS, especially on chr13 where max RSS reached about 8.4 GiB.
 These patches could improve no-cache, but they are unlikely to close the full
 gap to `r2_zarr` on their own:
 
-1. Add no-cache profiling counters.
-   Split metric/local-search timing into VCF decode, array prep, row generation,
-   duplicate fallback, filtering, deduplication, and accumulation. This should
-   come before deeper no-cache work.
+1. Use the new no-cache profiling counters.
+   The code now logs no-cache VCF query/decode, array prep, row generation,
+   duplicate fallback, dosage-cache placeholder, and LD/tile counters. These
+   counters should be used to establish whether future wins come from fewer
+   VCF decodes, less row recomputation, cheaper duplicate handling, or better
+   pair/tile throughput.
 2. Parallelize no-cache metric.
    `metric_from_r2_nocache()` currently ignores `workers`. Partition-level
    workers should be exact and could reduce the two metric passes substantially.
@@ -111,17 +113,115 @@ gap to `r2_zarr` on their own:
    fallback behavior is better understood, because duplicates currently limit
    the fast-path coverage.
 
+## Dosage Cache and Tiled r2 Plan
+
+The new dosage-cache and tiled-vectorization notes point in the right
+direction: cache an object that scales with SNPs and samples, not with retained
+pairs, then compute needed pairs in bounded tiles. Two corrections are
+required for exactness in this codebase:
+
+1. The cached vectors must be derived from the same phased haplotype matrix
+   used by `shrinkage.py`, not from unphased genotype dosages such as
+   `cyvcf2.gt_dosages`. Current LD math operates on `2 * n_ind` haplotypes and
+   skips missing or unphased genotypes. A genotype-dosage cache would change
+   the statistic unless the whole covariance implementation changed with it.
+2. Unit-normalized dosage or haplotype vectors alone give Pearson correlation,
+   not the normalized Wen/Stephens shrinkage `r2` that `ldetect2` uses. Exact
+   recomputation must still apply:
+   - `d_naive = f11 - f1 * f2`;
+   - the Wen/Stephens shrinkage factor `(1 - theta)^2 * exp(...)`;
+   - the cutoff test on `abs(ds2)`;
+   - the diagonal adjustment for `i == j`;
+   - normalization by the shrunk diagonal values.
+
+With those corrections, a cache of centered haplotype inputs is still useful.
+The exact fast path can precompute, per retained variant:
+
+- physical and genetic position;
+- encounter ordinal within the partition/window;
+- haplotype sum `n1x`;
+- centered float64 haplotype vector `h - mean(h)`;
+- optionally its squared norm for diagonal computation;
+- a positive-diagonal/monomorphic sentinel;
+- diagonal shrink value and `j_stop_by_i` bound.
+
+The dot product of centered vectors recovers `n11 - n1x * nx1 / n_haps`, so a
+tiled implementation can reproduce `d_naive` and then apply the existing
+shrinkage, cutoff, diagonal, and ownership rules. This is an exact input cache,
+not a persisted pair cache.
+
+Monomorphic or cutoff-zero variants must not be silently represented as zero
+vectors in the cache. Current code keeps them out of normalized r2 rows by
+requiring positive `diag_shrink` before normalization. A cached/tiled path must
+preserve that behavior by storing an explicit invalid/zero-diagonal marker and
+skipping any pair where either endpoint lacks positive diagonal shrinkage.
+This guard should be tested before enabling any normalized-vector cache,
+because zero vectors can make the code look numerically stable while quietly
+changing the effective locus list.
+
+### Duplicate-position semantics
+
+Do not key hot-path cache entries by physical position alone. Current
+duplicate handling retains duplicate-position variants through pairwise LD,
+then canonicalizes physical endpoint pairs with first-row precedence. Dropping
+all but the first variant per position during VCF iteration would not match
+the current HDF5/r2 paths.
+
+Implementation should use an encounter-ordered variant identity internally,
+for example a partition-local ordinal plus `(pos, ref, alt)` metadata for
+debugging. Physical-position deduplication should remain at the row/canonical
+boundary until a duplicate-aware tiled path is proven equivalent. A safe first
+implementation can keep the current duplicate-position fallback and enable the
+cached/tiled fast path only when physical positions are unique.
+
+### Tiled local-search accumulation
+
+The tiled plan should target local-search precompute first, because local
+search is where no-cache repeats the most row work. The algorithm shape:
+
+1. Build or fetch prepared haplotype-vector blocks for the active partitions in
+   a local-search group.
+2. For each planned local-search segment, iterate `(i_tile, j_tile)` over
+   encounter-ordered SNP indexes with `j >= i`.
+3. Use matrix multiplication on centered haplotype vectors to compute tile
+   dot products.
+4. Apply `j_stop_by_i`, physical bounds, ownership, breakpoint-window, cutoff,
+   diagonal, and duplicate filters before accumulation.
+5. Convert surviving `ds2` values to normalized `r2` using `diag_shrink` and
+   update the existing dense vertical/horizontal accumulators directly.
+
+The tile accumulator in the note describes a different block-quality metric
+based on left/right/cross means. `ldetect2` local search instead needs the same
+per-locus vertical and horizontal sums currently produced by
+`DenseLocalSearchAccumulator`. Tiles that straddle a segment or breakpoint
+boundary should be split by masks and accumulated into those dense arrays, not
+into mean-left/mean-right/mean-cross buckets.
+
+### Suggested implementation order
+
+1. Re-profile current no-cache runs with the new `nocache_*` counters.
+2. Add a small prepared-input LRU across local-search groups, still using the
+   existing row generator. This isolates VCF decode and array-prep savings.
+3. Add a unique-position-only tiled local-search fast path behind an internal
+   flag, with current row generation as fallback for duplicate positions.
+4. Validate local-search precompute arrays against the existing r2-nocache and
+   HDF5 paths on synthetic unique-position and overlapping-partition fixtures.
+5. Only after correctness is stable, consider a duplicate-aware tiled path that
+   preserves first-retained physical pair precedence at the same boundary as
+   `canonical_local_search_rows`.
+
 ## Recommendation
 
 Do not prioritize no-cache as the primary fast path. Keep it experimental and
 low-disk. If we invest further, use this order:
 
-1. instrumentation;
+1. instrumentation-driven profiling;
 2. no-cache metric workers;
-3. prepared-partition LRU;
-4. duplicate-aware fast path;
-5. optional bounded row/window cache;
-6. fused local-search kernel.
+3. prepared-input LRU;
+4. unique-position tiled local-search fast path;
+5. duplicate-aware tiled/canonical fast path;
+6. optional bounded row/window cache if row recomputation remains dominant;
+7. no-cache metric workers or tiled metric reuse, depending on the profiles.
 
 The main performance track should move back to `r2-zarr`, where cached
 normalized pairs already deliver the best runtime in the downloaded profiles.

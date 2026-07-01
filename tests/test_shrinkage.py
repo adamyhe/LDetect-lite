@@ -614,6 +614,33 @@ def test_r2_nocache_metric_duplicate_positions_match_hdf5(tmp_path: Path) -> Non
     assert nocache_metric["N_zero"] == pytest.approx(hdf5_metric["N_zero"])
 
 
+def test_r2_nocache_reader_skips_population_monomorphic_variant(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = tmp_path / "tiny.vcf"
+    _write_vcf(vcf_path, _vcf_stream())
+
+    config = R2NoCacheConfig(
+        reference_panel=str(vcf_path),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        chrom="1",
+        cutoff=1e-7,
+    )
+    with open_r2_nocache_reader(config, 100, 300) as reader:
+        loci = reader.read_loci()
+        chunks = list(reader.iter_rows(100, 300, 2))
+
+    assert 100 not in loci
+    assert chunks
+    assert all(not np.any(chunk.lo == 100) for chunk in chunks)
+    assert all(not np.any(chunk.hi == 100) for chunk in chunks)
+
+
 def test_r2_nocache_local_search_matches_hdf5(tmp_path: Path) -> None:
     map_path = tmp_path / "map.gz"
     _write_map(map_path)
