@@ -14,6 +14,7 @@ from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.io.r2_nocache import (
     R2NoCacheConfig,
+    R2NoCacheProfile,
     iter_prepared_r2_nocache_partition_rows,
     prepare_r2_nocache_partition,
 )
@@ -731,6 +732,7 @@ def metric_from_r2_nocache(
     rows_read = 0
     pair_rows = 0
     crossing_rows = 0
+    nocache_profile = R2NoCacheProfile()
 
     if workers > 1 and len(partitions) > 1:
         log_debug(
@@ -786,12 +788,23 @@ def metric_from_r2_nocache(
                 prepared.theta,
                 prepared.config.cutoff,
             )
-            row_seconds += time.perf_counter() - row_start
+            row_elapsed = time.perf_counter() - row_start
+            row_seconds += row_elapsed
+            prepared.profile.row_generation_seconds += row_elapsed
+            prepared.profile.ld_compute_seconds += row_elapsed
+            prepared.profile.tile_count += 1
+            prepared.profile.max_tile_snps = max(
+                prepared.profile.max_tile_snps,
+                int(prepared.pos_arr.size),
+            )
+            prepared.profile.pair_candidates += partition_rows
+            prepared.profile.pairs_after_cutoff += partition_pairs
             total_sum += partition_sum
             n_nonzero += partition_n
             rows_read += partition_rows
             pair_rows += partition_pairs
             crossing_rows += partition_crossing
+            nocache_profile.absorb(prepared.profile)
             continue
 
         chunk_iter = iter_prepared_r2_nocache_partition_rows(
@@ -838,6 +851,7 @@ def metric_from_r2_nocache(
                 n_nonzero += crossing_count
                 crossing_rows += crossing_count
             crossing_seconds += time.perf_counter() - crossing_start
+        nocache_profile.absorb(prepared.profile)
 
     if not loci_parts:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}
@@ -849,7 +863,8 @@ def metric_from_r2_nocache(
         f"partitions={len(partitions)} rows_read={rows_read} "
         f"pair_rows={pair_rows} crossing_rows={crossing_rows} "
         f"row_seconds={row_seconds:.6f} "
-        f"crossing_seconds={crossing_seconds:.6f}"
+        f"crossing_seconds={crossing_seconds:.6f} "
+        f"{nocache_profile.log_fields()}"
     )
     return {"sum": total_sum, "N_nonzero": n_nonzero, "N_zero": n_zero}
 

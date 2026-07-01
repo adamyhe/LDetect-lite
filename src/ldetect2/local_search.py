@@ -8,7 +8,7 @@ import time
 from bisect import bisect_left
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +37,7 @@ from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 from ldetect2.io.r2_nocache import (
     R2NoCacheConfig,
     R2NoCachePreparedPartition,
+    R2NoCacheProfile,
     open_r2_nocache_reader,
     prepare_r2_nocache_partition,
 )
@@ -121,6 +122,11 @@ class LocalSearchPrecomputeStats:
     dedup_merge_seconds: float = 0.0
     dense_lookup_seconds: float = 0.0
     dense_accumulate_seconds: float = 0.0
+    nocache_profile: R2NoCacheProfile = field(default_factory=R2NoCacheProfile)
+
+    def absorb_nocache_profile(self, profile: R2NoCacheProfile) -> None:
+        """Add no-cache diagnostics to this precompute profile."""
+        self.nocache_profile.absorb(profile)
 
     def log_fields(self) -> str:
         """Return stable key/value fields for debug profiling logs."""
@@ -155,7 +161,8 @@ class LocalSearchPrecomputeStats:
             f"hdf5_reader_reuse_count={self.hdf5_reader_reuse_count} "
             f"hdf5_read_calls={self.hdf5_read_calls} "
             f"hdf5_segment_partition_reads={self.hdf5_segment_partition_reads} "
-            f"hdf5_segment_loci={self.hdf5_segment_loci}"
+            f"hdf5_segment_loci={self.hdf5_segment_loci} "
+            f"{self.nocache_profile.log_fields()}"
         )
 
 
@@ -2162,6 +2169,10 @@ class LocalSearch:
         local_partitions: tuple[LocalSearchR2NoCachePartition, ...],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Precompute local-search arrays from recomputed normalized r2 chunks."""
+        profile_before = {
+            id(partition.prepared): partition.prepared.profile.copy()
+            for partition in local_partitions
+        }
         active_partitions: list[LocalSearchR2NoCachePartition] = []
         active_min_lo = -2**63
         active_loci = np.array([], dtype=np.int64)
@@ -2304,6 +2315,15 @@ class LocalSearch:
             )
             self.precompute_stats.accumulator_seconds += (
                 time.perf_counter() - accumulator_start
+            )
+        seen_profiles: set[int] = set()
+        for partition in local_partitions:
+            profile_id = id(partition.prepared)
+            if profile_id in seen_profiles:
+                continue
+            seen_profiles.add(profile_id)
+            self.precompute_stats.absorb_nocache_profile(
+                partition.prepared.profile.delta(profile_before[profile_id])
             )
         self.start_locus = start_locus
         self.start_locus_index = start_locus_index

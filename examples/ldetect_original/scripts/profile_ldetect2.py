@@ -25,6 +25,38 @@ RUN_COLS = [
     "exit_status",
 ]
 
+NOCACHE_FLOAT_COLS = [
+    "nocache_vcf_fetch_seconds",
+    "nocache_vcf_decode_seconds",
+    "nocache_array_prep_seconds",
+    "nocache_row_generation_seconds",
+    "nocache_duplicate_fallback_seconds",
+    "nocache_ld_compute_seconds",
+]
+
+NOCACHE_INT_COLS = [
+    "nocache_vcf_query_count",
+    "nocache_vcf_query_bp",
+    "nocache_vcf_records_seen",
+    "nocache_vcf_records_retained",
+    "nocache_vcf_records_skipped",
+    "nocache_cyvcf2_query_count",
+    "nocache_tabix_query_count",
+    "nocache_cyvcf2_fallback_count",
+    "nocache_duplicate_fallback_partitions",
+    "nocache_dosage_cache_hits",
+    "nocache_dosage_cache_misses",
+    "nocache_dosage_cache_evictions",
+    "nocache_tile_count",
+    "nocache_pair_candidates",
+    "nocache_pairs_after_cutoff",
+]
+
+NOCACHE_MAX_INT_COLS = [
+    "nocache_dosage_cache_bytes",
+    "nocache_max_tile_snps",
+]
+
 BREAKPOINT_COLS = [
     "profile_name",
     "population",
@@ -70,6 +102,9 @@ BREAKPOINT_COLS = [
     "hdf5_read_calls",
     "hdf5_segment_partition_reads",
     "hdf5_segment_loci",
+    *NOCACHE_FLOAT_COLS,
+    *NOCACHE_INT_COLS,
+    *NOCACHE_MAX_INT_COLS,
 ]
 
 GROUP_COLS = [
@@ -131,6 +166,9 @@ BY_CHROM_COLS = [
     "hdf5_read_calls",
     "hdf5_segment_partition_reads",
     "hdf5_segment_loci",
+    *NOCACHE_FLOAT_COLS,
+    *NOCACHE_INT_COLS,
+    *NOCACHE_MAX_INT_COLS,
     "group_count",
     "group_breakpoints",
     "group_rows",
@@ -157,6 +195,7 @@ _BREAKPOINT_EXTRA_FLOAT_COLS = [
     "dense_lookup_seconds",
     "dense_accumulate_seconds",
     "accumulator_seconds",
+    *NOCACHE_FLOAT_COLS,
 ]
 
 _BREAKPOINT_EXTRA_INT_COLS = [
@@ -174,6 +213,13 @@ _BREAKPOINT_EXTRA_INT_COLS = [
     "hdf5_read_calls",
     "hdf5_segment_partition_reads",
     "hdf5_segment_loci",
+    *NOCACHE_INT_COLS,
+]
+
+_BREAKPOINT_MAX_INT_COLS = [
+    "active_rows_peak",
+    "peak_chunk_rows",
+    *NOCACHE_MAX_INT_COLS,
 ]
 
 _MAC_TIME_RE = re.compile(r"^\s*(?P<value>[0-9.]+)\s+(?P<key>.+?)\s*$")
@@ -492,8 +538,8 @@ def aggregate_by_chrom(
             out_row[field] = _sum_field(rows, field)
         for field in _BREAKPOINT_EXTRA_INT_COLS:
             out_row[field] = _sum_int_field(rows, field)
-        out_row["active_rows_peak"] = _max_int_field(rows, "active_rows_peak")
-        out_row["peak_chunk_rows"] = _max_int_field(rows, "peak_chunk_rows")
+        for field in _BREAKPOINT_MAX_INT_COLS:
+            out_row[field] = _max_int_field(rows, field)
         out_row["group_count"] = str(len(groups)) if groups else ""
         out_row["group_breakpoints"] = _sum_int_field(groups, "breakpoints")
         out_row["group_rows"] = _sum_int_field(groups, "rows")
