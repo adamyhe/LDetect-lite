@@ -1032,6 +1032,75 @@ def _active_index_from_row_counts(row_counts: np.ndarray) -> np.ndarray:
     return active_index
 
 
+def _r2_vector_from_ld_arrays(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    pos_arr: np.ndarray,
+    row_counts: np.ndarray,
+    diag_shrink: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    chunk_rows: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Accumulate vector values through canonical covariance-row semantics."""
+    if _has_duplicate_positions(pos_arr):
+        loci, diag_pos, diag_val = _loci_and_diag_from_canonical_row_chunks(
+            _compact_pair_chunks_by_physical_lo(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                row_counts,
+                ne,
+                n_ind,
+                theta,
+                cutoff,
+                chunk_rows,
+            )
+        )
+        row_chunks = _compact_pair_chunks_by_physical_lo(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            row_counts,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            chunk_rows,
+        )
+    else:
+        loci = _loci_from_row_counts(pos_arr, row_counts)
+        diag_pos = pos_arr.astype(np.int64, copy=False)
+        diag_val = np.asarray(diag_shrink, dtype=np.float64)
+        row_chunks = _compact_pair_chunks(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            row_counts,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            chunk_rows,
+        )
+    return _r2_vector_from_canonical_row_chunks(
+        loci,
+        diag_pos,
+        diag_val,
+        row_chunks,
+    )
+
+
 def _r2_vector_from_canonical_row_chunks(
     loci: np.ndarray,
     diag_pos: np.ndarray,
@@ -1211,55 +1280,20 @@ def calc_covariance_vector(
         theta,
         cutoff,
     )
-    if has_duplicate_positions:
-        loci, diag_pos, diag_val = _loci_and_diag_from_canonical_row_chunks(
-            _compact_pair_chunks_by_physical_lo(
-                hap_mat,
-                gpos_arr,
-                hap_sums,
-                j_stop_by_i,
-                pos_arr,
-                row_counts,
-                ne,
-                float(n_ind),
-                theta,
-                cutoff,
-                COVARIANCE_WRITE_CHUNK_ROWS,
-            )
-        )
-        vector_positions, sums = _r2_vector_from_canonical_row_chunks(
-            loci,
-            diag_pos,
-            diag_val,
-            _compact_pair_chunks_by_physical_lo(
-                hap_mat,
-                gpos_arr,
-                hap_sums,
-                j_stop_by_i,
-                pos_arr,
-                row_counts,
-                ne,
-                float(n_ind),
-                theta,
-                cutoff,
-                COVARIANCE_WRITE_CHUNK_ROWS,
-            ),
-        )
-    else:
-        vector_positions = _loci_from_row_counts(pos_arr, row_counts)
-        sums = _direct_corr_sum_vector_impl(
-            hap_mat,
-            gpos_arr,
-            hap_sums,
-            diag_shrink,
-            j_stop_by_i,
-            _active_index_from_row_counts(row_counts),
-            int(vector_positions.size),
-            ne,
-            float(n_ind),
-            theta,
-            cutoff,
-        )
+    vector_positions, sums = _r2_vector_from_ld_arrays(
+        hap_mat,
+        gpos_arr,
+        hap_sums,
+        j_stop_by_i,
+        pos_arr,
+        row_counts,
+        diag_shrink,
+        ne,
+        float(n_ind),
+        theta,
+        cutoff,
+        COVARIANCE_WRITE_CHUNK_ROWS,
+    )
     log_debug(
         "calc_covariance_vector sums_calculated "
         f"nonzero={int(np.count_nonzero(sums))} "
@@ -1362,7 +1396,6 @@ def calc_r2_zarr_partition(
     duplicate_row_counts: np.ndarray | None = None
     duplicate_diag_pos: np.ndarray | None = None
     duplicate_diag_val: np.ndarray | None = None
-    duplicate_vector_loci: np.ndarray | None = None
     if has_duplicate_positions:
         duplicate_row_counts = _count_pairwise_ld_by_i_impl(
             hap_mat,
@@ -1396,30 +1429,7 @@ def calc_r2_zarr_partition(
 
     if vector_output_path is not None:
         vector_start = time.perf_counter()
-        if duplicate_row_counts is not None:
-            assert duplicate_diag_pos is not None
-            assert duplicate_diag_val is not None
-            assert duplicate_vector_loci is not None
-            vector_positions = duplicate_vector_loci
-            vector_positions, sums = _r2_vector_from_canonical_row_chunks(
-                vector_positions,
-                duplicate_diag_pos,
-                duplicate_diag_val,
-                _compact_pair_chunks_by_physical_lo(
-                    hap_mat,
-                    gpos_arr,
-                    hap_sums,
-                    j_stop_by_i,
-                    pos_arr,
-                    duplicate_row_counts,
-                    ne,
-                    float(n_ind),
-                    theta,
-                    cutoff,
-                    compact_chunk_rows,
-                ),
-            )
-        else:
+        if duplicate_row_counts is None:
             vector_row_counts = _count_pairwise_ld_by_i_impl(
                 hap_mat,
                 gpos_arr,
@@ -1430,20 +1440,22 @@ def calc_r2_zarr_partition(
                 theta,
                 cutoff,
             )
-            vector_positions = _loci_from_row_counts(pos_arr, vector_row_counts)
-            sums = _direct_corr_sum_vector_impl(
-                hap_mat,
-                gpos_arr,
-                hap_sums,
-                diag_shrink,
-                j_stop_by_i,
-                _active_index_from_row_counts(vector_row_counts),
-                int(vector_positions.size),
-                ne,
-                float(n_ind),
-                theta,
-                cutoff,
-            )
+        else:
+            vector_row_counts = duplicate_row_counts
+        vector_positions, sums = _r2_vector_from_ld_arrays(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            vector_row_counts,
+            diag_shrink,
+            ne,
+            float(n_ind),
+            theta,
+            cutoff,
+            compact_chunk_rows,
+        )
         _write_direct_vector(
             vector_output_path,
             vector_positions,
