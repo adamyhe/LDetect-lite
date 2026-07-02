@@ -14,9 +14,10 @@ from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.io.r2_nocache import (
     R2NoCacheConfig,
+    R2NoCachePreparedCache,
     R2NoCacheProfile,
+    get_prepared_r2_nocache_partition,
     iter_prepared_r2_nocache_partition_rows,
-    prepare_r2_nocache_partition,
 )
 from ldetect2.io.r2_zarr import (
     open_r2_zarr_owned_reader,
@@ -720,6 +721,7 @@ def metric_from_r2_nocache(
     snp_last: int,
     breakpoints: list[int],
     workers: int = 1,
+    prepared_cache: R2NoCachePreparedCache | None = None,
 ) -> dict:
     """Compute the LD block metric by recomputing normalized r2 rows."""
     bp = np.asarray(breakpoints, dtype=np.int64)
@@ -747,7 +749,23 @@ def metric_from_r2_nocache(
         lower_min, lower_max, include_lower_min = _owned_bounds(
             partitions, p_index, snp_first, snp_last
         )
-        prepared = prepare_r2_nocache_partition(config, start, end)
+        cache_before = prepared_cache.profile.copy() if prepared_cache else None
+        prepared = get_prepared_r2_nocache_partition(
+            config,
+            start,
+            end,
+            prepared_cache=prepared_cache,
+        )
+        if prepared_cache is not None and cache_before is not None:
+            cache_delta = prepared_cache.profile.delta(cache_before)
+            nocache_profile.absorb(cache_delta)
+        else:
+            cache_delta = R2NoCacheProfile()
+        prepared_before = (
+            prepared.profile.copy()
+            if prepared_cache is not None and cache_delta.dosage_cache_hits > 0
+            else R2NoCacheProfile()
+        )
 
         if not prepared.has_duplicate_positions:
             owned_loci = prepared.pos_arr[
@@ -804,7 +822,7 @@ def metric_from_r2_nocache(
             rows_read += partition_rows
             pair_rows += partition_pairs
             crossing_rows += partition_crossing
-            nocache_profile.absorb(prepared.profile)
+            nocache_profile.absorb(prepared.profile.delta(prepared_before))
             continue
 
         chunk_iter = iter_prepared_r2_nocache_partition_rows(
@@ -851,7 +869,7 @@ def metric_from_r2_nocache(
                 n_nonzero += crossing_count
                 crossing_rows += crossing_count
             crossing_seconds += time.perf_counter() - crossing_start
-        nocache_profile.absorb(prepared.profile)
+        nocache_profile.absorb(prepared.profile.delta(prepared_before))
 
     if not loci_parts:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}

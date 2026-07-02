@@ -22,7 +22,7 @@ from ldetect2._util.memory import log_memory_checkpoint, max_rss_mib
 from ldetect2.filters import apply_filter, apply_filter_get_minima, get_minima_loc
 from ldetect2.find_minima import custom_binary_search_with_trackback
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
-from ldetect2.io.r2_nocache import R2NoCacheConfig
+from ldetect2.io.r2_nocache import R2NoCacheConfig, R2NoCachePreparedCache
 from ldetect2.local_search import (
     LocalSearch,
     local_search_hdf5_partition,
@@ -143,6 +143,13 @@ def find_breakpoints(
     metric_cov = None if use_decimal else covariance_cache
     if metric_cov is not None:
         log_msg("Using cached covariance arrays for metrics")
+    r2_nocache_prepared_cache = (
+        R2NoCachePreparedCache(r2_nocache_config.prepared_cache_mib)
+        if pair_cache == "r2-nocache"
+        and r2_nocache_config is not None
+        and r2_nocache_config.prepared_cache_mib > 0
+        else None
+    )
 
     fourier_metric = None
     if needs_fourier_metric:
@@ -159,6 +166,7 @@ def find_breakpoints(
             metric_workers,
             pair_cache,
             r2_nocache_config,
+            r2_nocache_prepared_cache,
         )
         _log_metric(fourier_metric)
         log_memory_checkpoint("fourier_metric_end")
@@ -182,6 +190,7 @@ def find_breakpoints(
             metric_workers,
             pair_cache,
             r2_nocache_config,
+            r2_nocache_prepared_cache,
         )
         _log_metric(uniform_metric)
         log_memory_checkpoint("uniform_metric_end")
@@ -208,6 +217,7 @@ def find_breakpoints(
             subset_name="fourier_ls",
             pair_cache=pair_cache,
             r2_nocache_config=r2_nocache_config,
+            r2_nocache_prepared_cache=r2_nocache_prepared_cache,
         )
         log_memory_checkpoint("fourier_local_search_end")
     # 7. Local search on uniform
@@ -230,6 +240,7 @@ def find_breakpoints(
             subset_name="uniform_ls",
             pair_cache=pair_cache,
             r2_nocache_config=r2_nocache_config,
+            r2_nocache_prepared_cache=r2_nocache_prepared_cache,
         )
         log_memory_checkpoint("uniform_local_search_end")
     fourier_ls_metric = None
@@ -246,6 +257,7 @@ def find_breakpoints(
             metric_workers,
             pair_cache,
             r2_nocache_config,
+            r2_nocache_prepared_cache,
         )
         log_memory_checkpoint("fourier_ls_metric_end")
     uniform_ls_metric = None
@@ -262,6 +274,7 @@ def find_breakpoints(
             metric_workers,
             pair_cache,
             r2_nocache_config,
+            r2_nocache_prepared_cache,
         )
         log_memory_checkpoint("uniform_ls_metric_end")
 
@@ -362,6 +375,7 @@ def _apply_metric(
     metric_workers: int = 1,
     pair_cache: str = "hdf5",
     r2_nocache_config: R2NoCacheConfig | None = None,
+    r2_nocache_prepared_cache: R2NoCachePreparedCache | None = None,
 ) -> dict:
     if covariance_arrays is not None and not use_decimal and pair_cache == "hdf5":
         return metric_from_arrays(covariance_arrays, loci)
@@ -375,6 +389,7 @@ def _apply_metric(
         workers=metric_workers,
         pair_cache=pair_cache,
         r2_nocache_config=r2_nocache_config,
+        r2_nocache_prepared_cache=r2_nocache_prepared_cache,
     )
     return m.calc_metric()
 
@@ -484,6 +499,7 @@ def _run_local_search(
     subset_name: str = "local_search",
     pair_cache: str = "hdf5",
     r2_nocache_config: R2NoCacheConfig | None = None,
+    r2_nocache_prepared_cache: R2NoCachePreparedCache | None = None,
 ) -> dict:
     """Refine all breakpoints for one subset and log aggregate elapsed time.
 
@@ -585,7 +601,10 @@ def _run_local_search(
                     group_r2_zarr_partitions = None
                     group_r2_nocache_partitions = tuple(
                         local_search_r2_nocache_partition(
-                            r2_nocache_config, start, end
+                            r2_nocache_config,
+                            start,
+                            end,
+                            prepared_cache=r2_nocache_prepared_cache,
                         )
                         for start, end in partition_bounds
                     )
@@ -662,6 +681,7 @@ def _run_local_search(
                 subset_name=subset_name,
                 pair_cache=pair_cache,
                 r2_nocache_config=r2_nocache_config,
+                r2_nocache_prepared_cache=r2_nocache_prepared_cache,
             )
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {

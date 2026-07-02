@@ -14,7 +14,11 @@ from ldetect2.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect2.io.partitions import CovarianceStore
-from ldetect2.io.r2_nocache import R2NoCacheConfig, open_r2_nocache_reader
+from ldetect2.io.r2_nocache import (
+    R2NoCacheConfig,
+    R2NoCachePreparedCache,
+    open_r2_nocache_reader,
+)
 from ldetect2.io.r2_zarr import open_r2_zarr_reader, validate_r2_zarr_partition
 from ldetect2.local_search import LocalSearch, local_search_r2_nocache_partition
 from ldetect2.matrix_analysis import MatrixAnalysis
@@ -849,7 +853,15 @@ def test_r2_nocache_reader_skips_population_monomorphic_variant(
     assert all(not np.any(chunk.hi == 100) for chunk in chunks)
 
 
-def test_r2_nocache_local_search_matches_hdf5(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("tile_size", "use_tiled"),
+    [(1, True), (2, True), (999, True), (128, False)],
+)
+def test_r2_nocache_local_search_matches_hdf5(
+    tmp_path: Path,
+    tile_size: int,
+    use_tiled: bool,
+) -> None:
     map_path = tmp_path / "map.gz"
     _write_map(map_path)
     individuals_path = tmp_path / "inds.txt"
@@ -891,6 +903,8 @@ def test_r2_nocache_local_search_matches_hdf5(tmp_path: Path) -> None:
         individuals_path=individuals_path,
         chrom=chrom,
         cutoff=1e-7,
+        tile_size=tile_size,
+        use_tiled_local_search=use_tiled,
     )
     nocache_search = LocalSearch(
         chrom,
@@ -954,6 +968,109 @@ def test_r2_nocache_reader_reuses_decoded_partition(
         assert sum(chunk.lo.size for chunk in reader.iter_rows(100, 300, 2)) > 0
 
     assert calls == 1
+
+
+def test_r2_nocache_prepared_cache_reuses_decoded_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ldetect2.io.r2_nocache as r2_nocache
+
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    calls = 0
+
+    def fake_parse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return (
+            [100, 200, 300],
+            [
+                [0, 1, 0, 0],
+                [0, 1, 0, 1],
+                [1, 0, 0, 1],
+            ],
+        )
+
+    monkeypatch.setattr(r2_nocache, "_parse_cyvcf2_haplotypes", fake_parse)
+    config = R2NoCacheConfig(
+        reference_panel=str(tmp_path / "missing.vcf.gz"),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        chrom="1",
+        cutoff=1e-7,
+    )
+    cache = R2NoCachePreparedCache(max_mib=512)
+
+    for _ in range(2):
+        with open_r2_nocache_reader(
+            config,
+            100,
+            300,
+            prepared_cache=cache,
+        ) as reader:
+            assert reader.read_loci().size > 0
+
+    assert calls == 1
+    assert cache.profile.dosage_cache_misses == 1
+    assert cache.profile.dosage_cache_hits == 1
+    assert cache.profile.dosage_cache_bytes > 0
+
+
+def test_r2_nocache_prepared_cache_evicts_under_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ldetect2.io.r2_nocache as r2_nocache
+
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    calls = 0
+
+    def fake_parse(reference_panel, chrom, start, end, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if int(start) == 100:
+            return (
+                [100, 200],
+                [
+                    [0, 1, 0, 0],
+                    [0, 1, 0, 1],
+                ],
+            )
+        return (
+            [200, 300],
+            [
+                [0, 1, 0, 1],
+                [1, 0, 0, 1],
+            ],
+        )
+
+    monkeypatch.setattr(r2_nocache, "_parse_cyvcf2_haplotypes", fake_parse)
+    config = R2NoCacheConfig(
+        reference_panel=str(tmp_path / "missing.vcf.gz"),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        chrom="1",
+        cutoff=1e-7,
+    )
+    cache = R2NoCachePreparedCache(max_mib=512)
+
+    with open_r2_nocache_reader(config, 100, 200, prepared_cache=cache) as reader:
+        assert reader.read_loci().size > 0
+    cache.max_bytes = cache.current_bytes
+    with open_r2_nocache_reader(config, 200, 300, prepared_cache=cache) as reader:
+        assert reader.read_loci().size > 0
+    with open_r2_nocache_reader(config, 100, 200, prepared_cache=cache) as reader:
+        assert reader.read_loci().size > 0
+
+    assert calls == 3
+    assert cache.profile.dosage_cache_evictions >= 2
+    assert cache.profile.dosage_cache_bytes <= cache.max_bytes
 
 
 def test_calc_covariance_vector_partition_bounds_match_matrix_to_vector(

@@ -10,12 +10,28 @@ import numpy as np
 
 import ldetect2._util.run as run_util
 import ldetect2.shrinkage as shrinkage
+from ldetect2._cli.cmd_run import _r2_nocache_config, _run
 from ldetect2._util.run import (
     breakpoint_subsets_for_run,
     calc_partition,
     is_valid_covariance_partition,
 )
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
+
+
+def _minimal_run_args(tmp_path: Path, **overrides):
+    args = SimpleNamespace(
+        output_dir=tmp_path / "out",
+        pair_cache="hdf5",
+        high_precision=False,
+        r2_zarr_compressor="default",
+        r2_nocache_cache_mib=512,
+        r2_nocache_tile_size=128,
+        r2_nocache_disable_tiled_local_search=False,
+    )
+    for name, value in overrides.items():
+        setattr(args, name, value)
+    return args
 
 
 def test_full_covariance_partition_validates_against_full_schema(
@@ -66,6 +82,46 @@ def test_run_subset_requests_only_final_breakpoint_subset() -> None:
 
 def test_run_all_breakpoint_subsets_preserves_full_output() -> None:
     assert breakpoint_subsets_for_run("fourier_ls", True) is None
+
+
+def test_r2_nocache_config_accepts_new_flags(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        reference_panel="panel.vcf.gz",
+        genetic_map=tmp_path / "map.gz",
+        individuals=tmp_path / "individuals.txt",
+        ne=123.0,
+        cov_cutoff=1e-6,
+        r2_nocache_cache_mib=1024,
+        r2_nocache_tile_size=32,
+        r2_nocache_disable_tiled_local_search=True,
+    )
+
+    config = _r2_nocache_config(args, "chr1")
+
+    assert config.prepared_cache_mib == 1024
+    assert config.tile_size == 32
+    assert not config.use_tiled_local_search
+
+
+def test_r2_nocache_flags_rejected_for_other_pair_caches(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    args = _minimal_run_args(tmp_path, r2_nocache_cache_mib=1024)
+
+    assert _run(args) == 1
+    assert "--r2-nocache-* options" in capsys.readouterr().err
+
+
+def test_r2_nocache_tile_size_must_be_positive(tmp_path: Path, capsys) -> None:
+    args = _minimal_run_args(
+        tmp_path,
+        pair_cache="r2-nocache",
+        r2_nocache_tile_size=0,
+    )
+
+    assert _run(args) == 1
+    assert "--r2-nocache-tile-size" in capsys.readouterr().err
 
 
 def test_direct_hdf5_partition_generation_streams_tabix_twice(

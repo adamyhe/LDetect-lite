@@ -36,10 +36,11 @@ from ldetect2.io.covariance_hdf5 import (
 from ldetect2.io.partitions import CovarianceStore, get_final_partitions
 from ldetect2.io.r2_nocache import (
     R2NoCacheConfig,
+    R2NoCachePreparedCache,
     R2NoCachePreparedPartition,
     R2NoCacheProfile,
+    get_prepared_r2_nocache_partition,
     open_r2_nocache_reader,
-    prepare_r2_nocache_partition,
 )
 from ldetect2.io.r2_zarr import (
     R2RowChunk,
@@ -201,6 +202,7 @@ class LocalSearchR2NoCachePartition:
     prepared: R2NoCachePreparedPartition
     source_row_count: int
     loci: np.ndarray
+    cache_profile: R2NoCacheProfile = field(default_factory=R2NoCacheProfile)
 
 
 _HDF5ReaderPool = dict[tuple[str, int, int], HDF5CovariancePartitionReader]
@@ -349,9 +351,22 @@ def local_search_r2_nocache_partition(
     config: R2NoCacheConfig,
     start: int,
     end: int,
+    *,
+    prepared_cache: R2NoCachePreparedCache | None = None,
 ) -> LocalSearchR2NoCachePartition:
     """Load only recomputed r2 index metadata for one local-search partition."""
-    prepared = prepare_r2_nocache_partition(config, start, end)
+    cache_before = prepared_cache.profile.copy() if prepared_cache else None
+    prepared = get_prepared_r2_nocache_partition(
+        config,
+        start,
+        end,
+        prepared_cache=prepared_cache,
+    )
+    cache_delta = (
+        prepared_cache.profile.delta(cache_before)
+        if prepared_cache is not None and cache_before is not None
+        else R2NoCacheProfile()
+    )
     with open_r2_nocache_reader(config, start, end, prepared=prepared) as reader:
         return LocalSearchR2NoCachePartition(
             start=start,
@@ -360,6 +375,7 @@ def local_search_r2_nocache_partition(
             prepared=prepared,
             source_row_count=reader.row_count,
             loci=reader.read_loci(),
+            cache_profile=cache_delta,
         )
 
 
@@ -1094,6 +1110,19 @@ def _add_r2_nocache_segment_values(
 
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
+    if _add_r2_nocache_tiled_segment_values(
+        segment_loci,
+        active_partitions,
+        active_min_lo,
+        snp_first,
+        snp_last,
+        snp_top,
+        include_snp_first,
+        accumulator,
+        stats=stats,
+    ):
+        return
+
     seen_hi_by_lo: dict[int, np.ndarray] = {}
     if stats is not None:
         stats.hdf5_segment_partition_reads += len(active_partitions)
@@ -1214,6 +1243,197 @@ def _add_r2_row_chunk_values(
     accumulator.add_horizontal(row_hi, r2)
     if stats is not None:
         stats.horizontal_seconds += time.perf_counter() - horizontal_start
+
+
+def _centered_hap_tile(
+    prepared: R2NoCachePreparedPartition,
+    indexes: np.ndarray,
+) -> np.ndarray:
+    n_haps = float(prepared.hap_mat.shape[1])
+    centered = prepared.hap_mat[indexes].astype(np.float64, copy=True)
+    centered -= (prepared.hap_sums[indexes] / n_haps)[:, None]
+    return centered
+
+
+def _add_r2_nocache_tiled_segment_values(
+    segment_loci: np.ndarray,
+    active_partitions: list[LocalSearchR2NoCachePartition],
+    active_min_lo: int,
+    snp_first: int,
+    snp_last: int,
+    snp_top: int,
+    include_snp_first: bool,
+    accumulator: DenseLocalSearchAccumulator,
+    *,
+    stats: LocalSearchPrecomputeStats | None = None,
+) -> bool:
+    """Compute unique-position no-cache r2 tiles directly into accumulators."""
+    if not active_partitions:
+        return True
+    config = active_partitions[0].config
+    if not config.use_tiled_local_search:
+        log_debug("r2-nocache local-search path=row_stream tiled_disabled=true")
+        return False
+    if any(partition.prepared.has_duplicate_positions for partition in active_partitions):
+        log_debug("r2-nocache local-search path=row_stream duplicate_fallback=true")
+        return False
+
+    tile_size = max(1, int(config.tile_size))
+    lo_min = max(int(active_min_lo), int(segment_loci[0]))
+    lo_max = int(segment_loci[-1])
+    seen_hi_by_lo: dict[int, np.ndarray] = {}
+    if stats is not None:
+        stats.hdf5_segment_partition_reads += len(active_partitions)
+
+    used_tiles = 0
+    for partition in active_partitions:
+        prepared = partition.prepared
+        pos = prepared.pos_arr
+        if pos.size == 0:
+            continue
+        i_left = int(np.searchsorted(pos, lo_min, side="left"))
+        i_right = int(np.searchsorted(pos, lo_max, side="right"))
+        if i_left >= i_right:
+            continue
+
+        n_haps = float(prepared.hap_mat.shape[1])
+        n_ind = float(prepared.n_ind)
+        diag = prepared.diag_shrink
+        for i0 in range(i_left, i_right, tile_size):
+            i1 = min(i0 + tile_size, i_right)
+            i_idx = np.arange(i0, i1, dtype=np.int64)
+            pos_i = pos[i_idx]
+            i_ok = (diag[i_idx] > 0.0) & (pos_i <= snp_last)
+            if include_snp_first:
+                i_ok &= pos_i >= snp_first
+            else:
+                i_ok &= pos_i > snp_first
+            if not np.any(i_ok):
+                continue
+            i_idx = i_idx[i_ok]
+            pos_i = pos[i_idx]
+            diag_i = diag[i_idx]
+            centered_i = _centered_hap_tile(prepared, i_idx)
+
+            for j0 in range(i0, pos.size, tile_size):
+                j1 = min(j0 + tile_size, pos.size)
+                j_idx = np.arange(j0, j1, dtype=np.int64)
+                pos_j = pos[j_idx]
+                j_ok = (diag[j_idx] > 0.0) & (pos_j <= snp_top)
+                if not np.any(j_ok):
+                    continue
+                j_idx = j_idx[j_ok]
+                pos_j = pos[j_idx]
+                diag_j = diag[j_idx]
+
+                compute_start = time.perf_counter()
+                centered_j = _centered_hap_tile(prepared, j_idx)
+                dot = centered_i @ centered_j.T
+                d_naive = dot / n_haps
+
+                upper = j_idx[None, :] >= i_idx[:, None]
+                within_stop = j_idx[None, :] < prepared.j_stop_by_i[i_idx][:, None]
+                candidate = upper & within_stop
+                candidate_count = int(np.count_nonzero(candidate))
+                if candidate_count == 0:
+                    elapsed = time.perf_counter() - compute_start
+                    prepared.profile.ld_compute_seconds += elapsed
+                    prepared.profile.row_generation_seconds += elapsed
+                    prepared.profile.tile_count += 1
+                    prepared.profile.max_tile_snps = max(
+                        prepared.profile.max_tile_snps,
+                        int(max(i_idx.size, j_idx.size)),
+                    )
+                    used_tiles += 1
+                    continue
+
+                df = prepared.gpos_arr[j_idx][None, :] - prepared.gpos_arr[i_idx][
+                    :, None
+                ]
+                ee = np.exp(-4.0 * prepared.config.ne * df / (2.0 * n_ind))
+                ds2 = (1.0 - prepared.theta) ** 2 * d_naive * ee
+                above_cutoff = np.abs(ds2) >= prepared.config.cutoff
+                selected = candidate & above_cutoff
+                if np.any(selected):
+                    diagonal = i_idx[:, None] == j_idx[None, :]
+                    if np.any(diagonal & selected):
+                        adjustment = (prepared.theta / 2.0) * (
+                            1.0 - prepared.theta / 2.0
+                        )
+                        ds2 = ds2.copy()
+                        ds2[diagonal & selected] += adjustment
+
+                elapsed = time.perf_counter() - compute_start
+                prepared.profile.ld_compute_seconds += elapsed
+                prepared.profile.row_generation_seconds += elapsed
+                prepared.profile.tile_count += 1
+                prepared.profile.max_tile_snps = max(
+                    prepared.profile.max_tile_snps,
+                    int(max(i_idx.size, j_idx.size)),
+                )
+                prepared.profile.pair_candidates += candidate_count
+                prepared.profile.pairs_after_cutoff += int(
+                    np.count_nonzero(selected & (i_idx[:, None] != j_idx[None, :]))
+                )
+                used_tiles += 1
+                if stats is not None:
+                    stats.rows_read += candidate_count
+                    stats.peak_chunk_rows = max(stats.peak_chunk_rows, candidate_count)
+                    stats.hdf5_read_calls += 1
+
+                if not np.any(selected):
+                    continue
+
+                sel_i, sel_j = np.nonzero(selected)
+                row_lo = pos_i[sel_i]
+                row_hi = pos_j[sel_j]
+                row_r2 = (
+                    ds2[selected]
+                    * ds2[selected]
+                    / (diag_i[sel_i] * diag_j[sel_j])
+                )
+                diag_rows = row_lo == row_hi
+                if np.any(diag_rows):
+                    row_r2[diag_rows] = 1.0
+
+                if stats is not None:
+                    stats.rows_after_filter += int(row_lo.size)
+
+                dedup_start = time.perf_counter()
+                first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
+                if stats is not None:
+                    stats.dedup_seconds += time.perf_counter() - dedup_start
+                    stats.duplicate_rows_skipped += int(
+                        row_lo.size - np.count_nonzero(first_seen)
+                    )
+                if not np.any(first_seen):
+                    continue
+
+                row_lo = row_lo[first_seen]
+                row_hi = row_hi[first_seen]
+                row_r2 = row_r2[first_seen]
+                if stats is not None:
+                    kept = int(row_lo.size)
+                    stats.candidate_rows += kept
+                    stats.eligible_rows += kept
+                    stats.rows_after_dedup += kept
+                    stats.normalized_rows += kept
+                    stats.chunks += 1
+
+                _add_r2_row_chunk_values(
+                    row_lo,
+                    row_hi,
+                    row_r2,
+                    accumulator,
+                    stats=stats,
+                )
+
+    log_debug(
+        "r2-nocache local-search path=tiled_unique "
+        f"partitions={len(active_partitions)} segment_loci={int(segment_loci.size)} "
+        f"tiles={used_tiles}"
+    )
+    return True
 
 
 def _add_row_chunk_values(
@@ -2317,6 +2537,7 @@ class LocalSearch:
                 time.perf_counter() - accumulator_start
             )
         for partition in local_partitions:
+            self.precompute_stats.absorb_nocache_profile(partition.cache_profile)
             before = profile_before[id(partition.prepared)]
             self.precompute_stats.absorb_nocache_profile(
                 partition.prepared.profile.delta(before)

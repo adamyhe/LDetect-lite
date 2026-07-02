@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import time
+from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,9 @@ class R2NoCacheConfig:
     chrom: str
     ne: float = 11418.0
     cutoff: float = 1e-7
+    prepared_cache_mib: int = 512
+    tile_size: int = 128
+    use_tiled_local_search: bool = True
 
 
 @dataclass
@@ -102,6 +106,121 @@ class R2NoCachePreparedPartition:
     profile: R2NoCacheProfile = field(default_factory=R2NoCacheProfile)
 
 
+def _prepared_partition_nbytes(prepared: R2NoCachePreparedPartition) -> int:
+    arrays = (
+        prepared.hap_mat,
+        prepared.gpos_arr,
+        prepared.hap_sums,
+        prepared.pos_arr,
+        prepared.j_stop_by_i,
+        prepared.diag_shrink,
+    )
+    return int(sum(int(arr.nbytes) for arr in arrays))
+
+
+class R2NoCachePreparedCache:
+    """Bounded in-process LRU for prepared no-cache partition inputs."""
+
+    def __init__(self, max_mib: int = 512) -> None:
+        self.max_bytes = max(0, int(max_mib)) * 1024 * 1024
+        self.current_bytes = 0
+        self.profile = R2NoCacheProfile()
+        self._items: OrderedDict[
+            tuple,
+            tuple[R2NoCachePreparedPartition, int],
+        ] = OrderedDict()
+
+    @staticmethod
+    def key(
+        config: R2NoCacheConfig,
+        start: int,
+        end: int,
+        *,
+        use_cyvcf2: bool = True,
+    ) -> tuple:
+        return (
+            str(config.chrom),
+            int(start),
+            int(end),
+            str(config.reference_panel),
+            str(config.genetic_map_path),
+            str(config.individuals_path),
+            float(config.ne),
+            float(config.cutoff),
+            bool(use_cyvcf2),
+        )
+
+    def get(
+        self,
+        config: R2NoCacheConfig,
+        start: int,
+        end: int,
+        *,
+        use_cyvcf2: bool = True,
+    ) -> R2NoCachePreparedPartition:
+        if self.max_bytes <= 0:
+            return prepare_r2_nocache_partition(
+                config,
+                start,
+                end,
+                use_cyvcf2=use_cyvcf2,
+            )
+
+        key = self.key(config, start, end, use_cyvcf2=use_cyvcf2)
+        cached = self._items.get(key)
+        if cached is not None:
+            prepared, nbytes = cached
+            self._items.move_to_end(key)
+            self.profile.dosage_cache_hits += 1
+            self.profile.dosage_cache_bytes = self.current_bytes
+            return prepared
+
+        self.profile.dosage_cache_misses += 1
+        prepared = prepare_r2_nocache_partition(
+            config,
+            start,
+            end,
+            use_cyvcf2=use_cyvcf2,
+        )
+        nbytes = _prepared_partition_nbytes(prepared)
+        if nbytes <= self.max_bytes:
+            self._items[key] = (prepared, nbytes)
+            self.current_bytes += nbytes
+            self._evict_to_cap()
+        self.profile.dosage_cache_bytes = self.current_bytes
+        return prepared
+
+    def _evict_to_cap(self) -> None:
+        while self.current_bytes > self.max_bytes and self._items:
+            _, (_, nbytes) = self._items.popitem(last=False)
+            self.current_bytes -= nbytes
+            self.profile.dosage_cache_evictions += 1
+
+
+def get_prepared_r2_nocache_partition(
+    config: R2NoCacheConfig,
+    start: int,
+    end: int,
+    *,
+    use_cyvcf2: bool = True,
+    prepared_cache: R2NoCachePreparedCache | None = None,
+) -> R2NoCachePreparedPartition:
+    """Return prepared no-cache inputs, optionally through a bounded LRU."""
+    if prepared_cache is not None:
+        return prepared_cache.get(
+            config,
+            start,
+            end,
+            use_cyvcf2=use_cyvcf2,
+        )
+    return prepare_r2_nocache_partition(
+        config,
+        start,
+        end,
+        use_cyvcf2=use_cyvcf2,
+    )
+
+
 class R2NoCachePartitionReader:
     """Reader-shaped wrapper that recomputes normalized r2 rows on demand."""
 
@@ -113,12 +232,14 @@ class R2NoCachePartitionReader:
         *,
         use_cyvcf2: bool = True,
         prepared: R2NoCachePreparedPartition | None = None,
+        prepared_cache: R2NoCachePreparedCache | None = None,
     ) -> None:
         self.config = config
         self.start = int(start)
         self.end = int(end)
         self.use_cyvcf2 = use_cyvcf2
         self._prepared = prepared
+        self._prepared_cache = prepared_cache
         self._loci: np.ndarray | None = None
         self._row_count: int | None = None
 
@@ -202,11 +323,12 @@ class R2NoCachePartitionReader:
 
     def _iter_all_rows(self, chunk_rows: int) -> Iterator[R2RowChunk]:
         if self._prepared is None:
-            self._prepared = prepare_r2_nocache_partition(
+            self._prepared = get_prepared_r2_nocache_partition(
                 self.config,
                 self.start,
                 self.end,
                 use_cyvcf2=self.use_cyvcf2,
+                prepared_cache=self._prepared_cache,
             )
         return iter_prepared_r2_nocache_partition_rows(
             self._prepared,
@@ -221,6 +343,7 @@ def open_r2_nocache_reader(
     *,
     use_cyvcf2: bool = True,
     prepared: R2NoCachePreparedPartition | None = None,
+    prepared_cache: R2NoCachePreparedCache | None = None,
 ) -> R2NoCachePartitionReader:
     """Return an on-demand normalized r2 reader for one partition."""
     return R2NoCachePartitionReader(
@@ -229,6 +352,7 @@ def open_r2_nocache_reader(
         end,
         use_cyvcf2=use_cyvcf2,
         prepared=prepared,
+        prepared_cache=prepared_cache,
     )
 
 
@@ -239,13 +363,15 @@ def iter_r2_nocache_partition_rows(
     *,
     chunk_rows: int = 1_000_000,
     use_cyvcf2: bool = True,
+    prepared_cache: R2NoCachePreparedCache | None = None,
 ) -> Iterator[R2RowChunk]:
     """Recompute normalized r2 rows for one partition and yield row chunks."""
-    prepared = prepare_r2_nocache_partition(
+    prepared = get_prepared_r2_nocache_partition(
         config,
         start,
         end,
         use_cyvcf2=use_cyvcf2,
+        prepared_cache=prepared_cache,
     )
     yield from iter_prepared_r2_nocache_partition_rows(
         prepared,

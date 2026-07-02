@@ -16,7 +16,7 @@ from ldetect2.io.covariance import (
     read_partition_into_matrix_lean,
 )
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
-from ldetect2.io.r2_nocache import R2NoCacheConfig
+from ldetect2.io.r2_nocache import R2NoCacheConfig, R2NoCachePreparedCache
 
 _PREC = 50
 
@@ -50,6 +50,7 @@ class Metric:
         workers: int = 1,
         pair_cache: str = "hdf5",
         r2_nocache_config: R2NoCacheConfig | None = None,
+        r2_nocache_prepared_cache: R2NoCachePreparedCache | None = None,
     ) -> None:
         if use_decimal:
             decimal.getcontext().prec = _PREC
@@ -61,6 +62,7 @@ class Metric:
         self.workers = max(1, int(workers))
         self.pair_cache = pair_cache
         self.r2_nocache_config = r2_nocache_config
+        self.r2_nocache_prepared_cache = r2_nocache_prepared_cache
 
         self.matrix: dict = {}
         self.locus_list: list[int] = []
@@ -120,6 +122,7 @@ class Metric:
                 self.snp_last,
                 self.breakpoints,
                 workers=self.workers,
+                prepared_cache=self.r2_nocache_prepared_cache,
             )
         elif self.pair_cache == "hdf5":
             log_msg("Start metric (streaming array)")

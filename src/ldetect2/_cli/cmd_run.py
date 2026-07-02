@@ -107,6 +107,31 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--r2-nocache-cache-mib",
+        type=int,
+        default=512,
+        metavar="N",
+        help=(
+            "Prepared haplotype-input LRU size for --pair-cache r2-nocache, "
+            "in MiB. Use 0 to disable (default: 512)."
+        ),
+    )
+    p.add_argument(
+        "--r2-nocache-tile-size",
+        type=int,
+        default=128,
+        metavar="N",
+        help=(
+            "SNP tile size for the r2-nocache tiled local-search path "
+            "(default: 128)."
+        ),
+    )
+    p.add_argument(
+        "--r2-nocache-disable-tiled-local-search",
+        action="store_true",
+        help="Disable the unique-position tiled local-search path for r2-nocache.",
+    )
+    p.add_argument(
         "--n-snps-bw-bpoints",
         type=int,
         default=10_000,
@@ -217,6 +242,24 @@ def _run(args: argparse.Namespace) -> int:
         print(
             "Error: --r2-zarr-compressor can only be used with "
             "--pair-cache r2-zarr.",
+            file=sys.stderr,
+        )
+        return 1
+    if args.r2_nocache_cache_mib < 0:
+        print("Error: --r2-nocache-cache-mib must be >= 0.", file=sys.stderr)
+        return 1
+    if args.r2_nocache_tile_size <= 0:
+        print("Error: --r2-nocache-tile-size must be > 0.", file=sys.stderr)
+        return 1
+    r2_nocache_flags_used = (
+        args.r2_nocache_cache_mib != 512
+        or args.r2_nocache_tile_size != 128
+        or args.r2_nocache_disable_tiled_local_search
+    )
+    if r2_nocache_flags_used and args.pair_cache != "r2-nocache":
+        print(
+            "Error: --r2-nocache-* options can only be used with "
+            "--pair-cache r2-nocache.",
             file=sys.stderr,
         )
         return 1
@@ -427,4 +470,7 @@ def _r2_nocache_config(args: argparse.Namespace, chrom: str):
         chrom=chrom,
         ne=args.ne,
         cutoff=args.cov_cutoff,
+        prepared_cache_mib=args.r2_nocache_cache_mib,
+        tile_size=args.r2_nocache_tile_size,
+        use_tiled_local_search=not args.r2_nocache_disable_tiled_local_search,
     )
