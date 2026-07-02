@@ -62,6 +62,10 @@ def benchmark_path(mode, population, chrom):
     return RESULTS / "benchmarks" / mode / population / f"{chrom}.benchmark.tsv"
 
 
+def partitions_path(mode, population, chrom):
+    return run_dir(mode, population, chrom) / f"{chrom}_partitions.txt"
+
+
 def log_path(mode, population, chrom):
     return RESULTS / "logs" / mode / population / f"{chrom}.ldetect2.log"
 
@@ -93,6 +97,11 @@ rule all:
         ),
         expand(
             str(RESULTS / "runtime" / "{population}.{chrom}.runtime.tsv"),
+            population=[POP],
+            chrom=CHROMS,
+        ),
+        expand(
+            str(RESULTS / "compare" / "{population}.{chrom}.vector_diffs.tsv"),
             population=[POP],
             chrom=CHROMS,
         ),
@@ -209,6 +218,14 @@ rule run_ldetect2_mode:
             / "{chrom}"
             / "{chrom}-ld-blocks.bed"
         ),
+        partitions=str(
+            RESULTS
+            / "runs"
+            / "{mode}"
+            / "{population}"
+            / "{chrom}"
+            / "{chrom}_partitions.txt"
+        ),
     log:
         str(RESULTS / "logs" / "{mode}" / "{population}" / "{chrom}.ldetect2.log"),
     benchmark:
@@ -266,13 +283,16 @@ rule compare_modes:
         breakpoints=mode_inputs("breakpoints"),
         beds=mode_inputs("bed"),
         benchmarks=mode_inputs("benchmark"),
+        partitions=lambda wc: str(partitions_path(BASELINE_MODE, wc.population, wc.chrom)),
     output:
         exactness=str(RESULTS / "compare" / "{population}.{chrom}.exactness.tsv"),
         runtime=str(RESULTS / "runtime" / "{population}.{chrom}.runtime.tsv"),
+        vector_diffs=str(RESULTS / "compare" / "{population}.{chrom}.vector_diffs.tsv"),
     params:
         modes=" ".join(MODES),
         baseline=BASELINE_MODE,
         subset=config["subset"],
+        top_vector_diffs=config.get("top_vector_diffs", 1000),
     shell:
         """
         {PYTHON} scripts/compare_run_modes.py \
@@ -284,5 +304,8 @@ rule compare_modes:
             --beds {input.beds} \
             --benchmarks {input.benchmarks} \
             --exactness-output {output.exactness} \
-            --runtime-output {output.runtime}
+            --runtime-output {output.runtime} \
+            --vector-diff-output {output.vector_diffs} \
+            --partitions {input.partitions} \
+            --top-vector-diffs {params.top_vector_diffs}
         """

@@ -6,6 +6,7 @@ import argparse
 import csv
 import gzip
 import json
+import math
 from pathlib import Path
 
 
@@ -93,6 +94,112 @@ def parse_benchmark(path: Path) -> dict[str, str]:
     return rows[0] if rows else {}
 
 
+def read_partitions(path: Path | None) -> list[tuple[int, int]]:
+    if path is None or not path.exists():
+        return []
+    partitions: list[tuple[int, int]] = []
+    with path.open() as f:
+        for raw in f:
+            fields = raw.split()
+            if len(fields) >= 2:
+                partitions.append((int(fields[0]), int(fields[1])))
+    return partitions
+
+
+def nearest_partition_boundary(
+    position: int,
+    partitions: list[tuple[int, int]],
+) -> tuple[str, str, str, str, str]:
+    if not partitions:
+        return "", "", "", "", ""
+
+    best_boundary = 0
+    best_distance: int | None = None
+    best_role = ""
+    best_partition = partitions[0]
+    for start, end in partitions:
+        for boundary, role in ((start, "start"), (end, "end")):
+            distance = abs(position - boundary)
+            if best_distance is None or distance < best_distance:
+                best_boundary = boundary
+                best_distance = distance
+                best_role = role
+                best_partition = (start, end)
+    return (
+        str(best_partition[0]),
+        str(best_partition[1]),
+        str(best_boundary),
+        str(best_distance if best_distance is not None else ""),
+        best_role,
+    )
+
+
+def vector_diff_rows(
+    *,
+    comparison: str,
+    baseline: dict[int, float],
+    mode: dict[int, float],
+    partitions: list[tuple[int, int]],
+    limit: int,
+) -> list[dict[str, str]]:
+    rows: list[tuple[float, int, dict[str, str]]] = []
+    for position in set(baseline) | set(mode):
+        baseline_present = position in baseline
+        mode_present = position in mode
+        baseline_value = baseline.get(position)
+        mode_value = mode.get(position)
+        if baseline_present and mode_present:
+            abs_diff = abs(float(baseline_value) - float(mode_value))
+            sort_abs_diff = abs_diff
+            rel_diff = abs_diff / max(abs(float(baseline_value)), 1e-30)
+            baseline_text = f"{float(baseline_value):.17g}"
+            mode_text = f"{float(mode_value):.17g}"
+            abs_text = f"{abs_diff:.17g}"
+            rel_text = f"{rel_diff:.17g}"
+        else:
+            sort_abs_diff = math.inf
+            baseline_text = "" if baseline_value is None else f"{baseline_value:.17g}"
+            mode_text = "" if mode_value is None else f"{mode_value:.17g}"
+            abs_text = ""
+            rel_text = ""
+
+        (
+            partition_start,
+            partition_end,
+            nearest_boundary,
+            distance_to_boundary,
+            boundary_role,
+        ) = nearest_partition_boundary(position, partitions)
+        rows.append(
+            (
+                sort_abs_diff,
+                position,
+                {
+                    "comparison": comparison,
+                    "rank": "",
+                    "position": str(position),
+                    "baseline_present": str(baseline_present),
+                    "mode_present": str(mode_present),
+                    "baseline_value": baseline_text,
+                    "mode_value": mode_text,
+                    "abs_diff": abs_text,
+                    "rel_diff": rel_text,
+                    "nearest_partition_start": partition_start,
+                    "nearest_partition_end": partition_end,
+                    "nearest_boundary": nearest_boundary,
+                    "distance_to_boundary": distance_to_boundary,
+                    "boundary_role": boundary_role,
+                },
+            )
+        )
+
+    rows.sort(key=lambda item: (-item[0], item[1]))
+    out = [row for _, _, row in rows[:limit]]
+    for rank, row in enumerate(out, start=1):
+        row["rank"] = str(rank)
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--modes", nargs="+", required=True)
@@ -104,6 +211,9 @@ def main() -> None:
     parser.add_argument("--benchmarks", nargs="+", required=True, type=Path)
     parser.add_argument("--exactness-output", required=True, type=Path)
     parser.add_argument("--runtime-output", required=True, type=Path)
+    parser.add_argument("--vector-diff-output", required=True, type=Path)
+    parser.add_argument("--partitions", type=Path, default=None)
+    parser.add_argument("--top-vector-diffs", type=int, default=1000)
     args = parser.parse_args()
 
     n_modes = len(args.modes)
@@ -126,6 +236,7 @@ def main() -> None:
         for mode, path in zip(args.modes, args.breakpoints)
     }
     bed_by_mode = {mode: read_bed(path) for mode, path in zip(args.modes, args.beds)}
+    partitions = read_partitions(args.partitions)
 
     baseline = args.baseline
     exact_rows: list[dict[str, str]] = []
@@ -213,6 +324,42 @@ def main() -> None:
                 "max_rel_diff": "0",
             }
         )
+
+    vector_diff_fields = [
+        "comparison",
+        "rank",
+        "position",
+        "baseline_present",
+        "mode_present",
+        "baseline_value",
+        "mode_value",
+        "abs_diff",
+        "rel_diff",
+        "nearest_partition_start",
+        "nearest_partition_end",
+        "nearest_boundary",
+        "distance_to_boundary",
+        "boundary_role",
+    ]
+    vector_diff_rows_out: list[dict[str, str]] = []
+    for mode in args.modes:
+        if mode == baseline:
+            continue
+        vector_diff_rows_out.extend(
+            vector_diff_rows(
+                comparison=f"{mode}_vs_{baseline}",
+                baseline=vector_by_mode[baseline],
+                mode=vector_by_mode[mode],
+                partitions=partitions,
+                limit=max(0, int(args.top_vector_diffs)),
+            )
+        )
+
+    args.vector_diff_output.parent.mkdir(parents=True, exist_ok=True)
+    with args.vector_diff_output.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=vector_diff_fields, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(vector_diff_rows_out)
 
     args.exactness_output.parent.mkdir(parents=True, exist_ok=True)
     with args.exactness_output.open("w", newline="") as f:

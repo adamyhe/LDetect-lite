@@ -26,9 +26,13 @@ uv run snakemake --cores 4
 Useful outputs:
 
 - `results/compare/{POP}.{chrom}.exactness.tsv`
+- `results/compare/{POP}.{chrom}.vector_diffs.tsv`
 - `results/runtime/{POP}.{chrom}.runtime.tsv`
 - `results/runs/{mode}/{POP}/{chrom}/`
 - `results/benchmarks/{mode}/{POP}/{chrom}.benchmark.tsv`
+
+`vector_diffs.tsv` reports the top vector-value differences for each mode
+against the baseline, including the nearest partition boundary for each locus.
 
 For a quicker or broader run, override config values:
 
