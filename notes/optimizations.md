@@ -1,6 +1,6 @@
 # Performance Optimizations
 
-This document summarises the performance improvements applied to `ldetect2` since the initial implementation.
+This document summarises the performance improvements applied to `ldetect2` since the initial implementation. This is meant to be a human-readable summary of the major implemented optimizations. Agent-facing notes, future implementation plans, and historical notes should go in other docs.
 
 ---
 

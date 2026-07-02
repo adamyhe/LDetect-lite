@@ -1,5 +1,7 @@
 # ldetect2 Implementation Plan
 
+This is mostly a historical document.
+
 ## Context
 
 Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldetect2/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:
@@ -299,20 +301,20 @@ Replaces the `.pickle` output from `find-minima`. Structure:
 
 ## Reference Files
 
-| New file | Ported from |
-|----------|-------------|
-| `_util/binary_search.py` | `baselib/binary_search.py` |
-| `_util/logging.py` | `flat_file.print_log_msg` |
-| `io/partitions.py` | `baselib/flat_file.py` (partition funcs) + `flat_file_consts.py` |
-| `io/covariance.py`, `io/covariance_hdf5.py` | `baselib/flat_file.py` (matrix funcs) plus new HDF5 storage |
-| `io/bed.py` | `examples/P03_extract_bpoints.py` (output logic) |
-| `filters.py` | `baselib/filters.py` |
-| `matrix_analysis.py` | `pipeline_elements/E03_matrix_to_vector.py` |
-| `find_minima.py` | `pipeline_elements/E05_find_minima.py` |
-| `metric.py` | `pipeline_elements/E07_metric.py` |
-| `local_search.py` | `pipeline_elements/E08_local_search.py` |
-| `shrinkage.py` | `examples/P00_00_partition_chromosome.py` + `P00_01_calc_covariance.py` |
-| `interpolate_maps.py` | joepickrell `scripts/interpolate_maps.py` |
+| New file                                    | Ported from                                                             |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| `_util/binary_search.py`                    | `baselib/binary_search.py`                                              |
+| `_util/logging.py`                          | `flat_file.print_log_msg`                                               |
+| `io/partitions.py`                          | `baselib/flat_file.py` (partition funcs) + `flat_file_consts.py`        |
+| `io/covariance.py`, `io/covariance_hdf5.py` | `baselib/flat_file.py` (matrix funcs) plus new HDF5 storage             |
+| `io/bed.py`                                 | `examples/P03_extract_bpoints.py` (output logic)                        |
+| `filters.py`                                | `baselib/filters.py`                                                    |
+| `matrix_analysis.py`                        | `pipeline_elements/E03_matrix_to_vector.py`                             |
+| `find_minima.py`                            | `pipeline_elements/E05_find_minima.py`                                  |
+| `metric.py`                                 | `pipeline_elements/E07_metric.py`                                       |
+| `local_search.py`                           | `pipeline_elements/E08_local_search.py`                                 |
+| `shrinkage.py`                              | `examples/P00_00_partition_chromosome.py` + `P00_01_calc_covariance.py` |
+| `interpolate_maps.py`                       | joepickrell `scripts/interpolate_maps.py`                               |
 
 ---
 
