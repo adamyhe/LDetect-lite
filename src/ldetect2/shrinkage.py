@@ -951,6 +951,59 @@ def _diag_from_first_physical_position(
     )
 
 
+def _loci_and_diag_from_canonical_row_chunks(
+    row_chunks: Iterator[CovarianceRowChunk],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return matrix-vector loci and diagonals from canonical physical rows."""
+    loci_parts: list[np.ndarray] = []
+    diag_pos_parts: list[np.ndarray] = []
+    diag_val_parts: list[np.ndarray] = []
+    prev_locus: int | None = None
+
+    for rows in row_chunks:
+        if rows.lo.size == 0:
+            continue
+
+        lo = np.asarray(rows.lo, dtype=np.int64)
+        if lo.size:
+            starts = np.concatenate(
+                (
+                    np.array([0], dtype=np.int64),
+                    np.flatnonzero(lo[1:] != lo[:-1]) + 1,
+                )
+            )
+            loci = lo[starts]
+            if prev_locus is not None and loci.size and int(loci[0]) == prev_locus:
+                loci = loci[1:]
+            if loci.size:
+                loci_parts.append(loci)
+                prev_locus = int(loci[-1])
+
+        diag_mask = rows.lo == rows.hi
+        if np.any(diag_mask):
+            diag_pos_parts.append(rows.lo[diag_mask].astype(np.int64, copy=False))
+            diag_val_parts.append(
+                np.asarray(rows.shrink_ld[diag_mask], dtype=np.float64)
+            )
+
+    loci = (
+        np.concatenate(loci_parts).astype(np.int64, copy=False)
+        if loci_parts
+        else np.array([], dtype=np.int64)
+    )
+    diag_pos = (
+        np.concatenate(diag_pos_parts).astype(np.int64, copy=False)
+        if diag_pos_parts
+        else np.array([], dtype=np.int64)
+    )
+    diag_val = (
+        np.concatenate(diag_val_parts).astype(np.float64, copy=False)
+        if diag_val_parts
+        else np.array([], dtype=np.float64)
+    )
+    return loci, diag_pos, diag_val
+
+
 def _loci_from_row_counts(
     pos_arr: np.ndarray,
     row_counts: np.ndarray,
@@ -1159,8 +1212,21 @@ def calc_covariance_vector(
         cutoff,
     )
     if has_duplicate_positions:
-        loci = _loci_from_row_counts(pos_arr, row_counts)
-        diag_pos, diag_val = _diag_from_first_physical_position(pos_arr, diag_shrink)
+        loci, diag_pos, diag_val = _loci_and_diag_from_canonical_row_chunks(
+            _compact_pair_chunks_by_physical_lo(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                row_counts,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+                COVARIANCE_WRITE_CHUNK_ROWS,
+            )
+        )
         vector_positions, sums = _r2_vector_from_canonical_row_chunks(
             loci,
             diag_pos,
@@ -1296,6 +1362,7 @@ def calc_r2_zarr_partition(
     duplicate_row_counts: np.ndarray | None = None
     duplicate_diag_pos: np.ndarray | None = None
     duplicate_diag_val: np.ndarray | None = None
+    duplicate_vector_loci: np.ndarray | None = None
     if has_duplicate_positions:
         duplicate_row_counts = _count_pairwise_ld_by_i_impl(
             hap_mat,
@@ -1307,9 +1374,24 @@ def calc_r2_zarr_partition(
             theta,
             cutoff,
         )
-        duplicate_diag_pos, duplicate_diag_val = _diag_from_first_physical_position(
-            pos_arr,
-            diag_shrink,
+        (
+            duplicate_vector_loci,
+            duplicate_diag_pos,
+            duplicate_diag_val,
+        ) = _loci_and_diag_from_canonical_row_chunks(
+            _compact_pair_chunks_by_physical_lo(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                duplicate_row_counts,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+                compact_chunk_rows,
+            )
         )
 
     if vector_output_path is not None:
@@ -1317,7 +1399,8 @@ def calc_r2_zarr_partition(
         if duplicate_row_counts is not None:
             assert duplicate_diag_pos is not None
             assert duplicate_diag_val is not None
-            vector_positions = _loci_from_row_counts(pos_arr, duplicate_row_counts)
+            assert duplicate_vector_loci is not None
+            vector_positions = duplicate_vector_loci
             vector_positions, sums = _r2_vector_from_canonical_row_chunks(
                 vector_positions,
                 duplicate_diag_pos,

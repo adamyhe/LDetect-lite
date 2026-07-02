@@ -110,6 +110,23 @@ def _duplicate_position_vcf_stream() -> StringIO:
     )
 
 
+def _duplicate_position_inactive_first_vcf_stream() -> StringIO:
+    return StringIO(
+        "\n".join(
+            [
+                "##fileformat=VCFv4.2",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+                "\tsample_a\tsample_b",
+                "1\t100\trs_inactive_a\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|0",
+                "1\t100\trs_active_b\tC\tT\t.\tPASS\t.\tGT\t0|1\t0|0",
+                "1\t200\trs_c\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|1",
+                "1\t300\trs_d\tA\tG\t.\tPASS\t.\tGT\t1|1\t0|1",
+                "",
+            ]
+        )
+    )
+
+
 def _inactive_middle_vcf_stream() -> StringIO:
     return StringIO(
         "\n".join(
@@ -560,6 +577,47 @@ def test_calc_covariance_vector_duplicate_positions_match_matrix_to_vector(
         assert value == pytest.approx(matrix[pos])
 
 
+def test_calc_covariance_vector_duplicate_positions_use_canonical_diagonal(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "store"
+    chrom = "chr1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+
+    covariance_path = chrom_dir / f"{chrom}.100.300.h5"
+    direct_path = tmp_path / "direct-vector.txt.gz"
+    matrix_path = tmp_path / "matrix-vector.txt.gz"
+    calc_covariance(
+        vcf_stream=_duplicate_position_inactive_first_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=covariance_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance_vector(
+        vcf_stream=_duplicate_position_inactive_first_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=direct_path,
+        cutoff=1e-7,
+    )
+    MatrixAnalysis(chrom, CovarianceStore(root=root)).calc_diag_lean(matrix_path)
+
+    direct = _read_vector(direct_path)
+    matrix = _read_vector(matrix_path)
+    assert direct.keys() == matrix.keys()
+    for pos, value in direct.items():
+        assert value == pytest.approx(matrix[pos])
+
+
 def test_calc_r2_zarr_partition_matches_covariance_normalization(
     tmp_path: Path,
 ) -> None:
@@ -719,6 +777,79 @@ def test_calc_r2_zarr_partition_duplicate_positions_match_covariance(
     assert set(zip(lo.tolist(), hi.tolist(), strict=True)) == set(expected)
     for lo_pos, hi_pos, value in zip(lo, hi, r2, strict=True):
         assert value == pytest.approx(expected[(int(lo_pos), int(hi_pos))])
+
+
+def test_calc_r2_zarr_partition_duplicate_positions_use_canonical_diagonal(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    hdf5_path = tmp_path / "cov.h5"
+    root = tmp_path / "store"
+    chrom = "chr1"
+    vector_path = tmp_path / "r2-zarr-vector.txt.gz"
+    calc_covariance(
+        vcf_stream=_duplicate_position_inactive_first_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=hdf5_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_r2_zarr_partition(
+        vcf_stream=_duplicate_position_inactive_first_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_root=root,
+        name=chrom,
+        start=100,
+        end=300,
+        cutoff=1e-7,
+        compact_chunk_rows=2,
+        vector_output_path=vector_path,
+    )
+
+    assert validate_r2_zarr_partition(root, chrom, 100, 300)
+    with open_covariance_reader(hdf5_path, 100, 300) as hdf5_reader:
+        hdf5_rows = hdf5_reader.read_all()
+        diag_pos, diag_val = hdf5_reader.read_diagonal()
+    with open_r2_zarr_reader(root, chrom, 100, 300) as r2_reader:
+        r2_loci = r2_reader.read_loci()
+        r2_chunks = list(r2_reader.iter_rows(100, 300, chunk_rows=2))
+
+    np.testing.assert_array_equal(r2_loci, np.unique(hdf5_rows.lo))
+    lo = np.concatenate([chunk.lo for chunk in r2_chunks])
+    hi = np.concatenate([chunk.hi for chunk in r2_chunks])
+    r2 = np.concatenate([chunk.r2 for chunk in r2_chunks])
+    expected: dict[tuple[int, int], float] = {}
+    for lo_pos, hi_pos, shrink in zip(
+        hdf5_rows.lo, hdf5_rows.hi, hdf5_rows.shrink_ld, strict=True
+    ):
+        lo_diag = diag_val[np.searchsorted(diag_pos, lo_pos)]
+        hi_diag = diag_val[np.searchsorted(diag_pos, hi_pos)]
+        expected[(int(lo_pos), int(hi_pos))] = (
+            1.0 if lo_pos == hi_pos else float(shrink * shrink / (lo_diag * hi_diag))
+        )
+
+    assert set(zip(lo.tolist(), hi.tolist(), strict=True)) == set(expected)
+    for lo_pos, hi_pos, value in zip(lo, hi, r2, strict=True):
+        assert value == pytest.approx(expected[(int(lo_pos), int(hi_pos))])
+
+    matrix_path = tmp_path / "matrix-vector.txt.gz"
+    store_root = tmp_path / "matrix_store"
+    chrom_dir = store_root / chrom
+    chrom_dir.mkdir(parents=True)
+    (store_root / f"{chrom}_partitions.txt").write_text("100 300\n")
+    (chrom_dir / f"{chrom}.100.300.h5").write_bytes(hdf5_path.read_bytes())
+    MatrixAnalysis(chrom, CovarianceStore(root=store_root)).calc_diag_lean(matrix_path)
+    direct = _read_vector(vector_path)
+    matrix = _read_vector(matrix_path)
+    assert direct.keys() == matrix.keys()
+    for pos, value in direct.items():
+        assert value == pytest.approx(matrix[pos])
 
 
 def test_calc_covariance_vector_partition_bounds_match_matrix_to_vector(
