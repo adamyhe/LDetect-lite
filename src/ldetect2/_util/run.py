@@ -117,9 +117,9 @@ def direct_vector_plan(
     partitions: list[tuple[int, int]],
     snp_first: int,
     snp_last: int,
-) -> dict[tuple[int, int], tuple[int, bool, int, bool]]:
+) -> dict[tuple[int, int], tuple[int, bool, int | None, bool]]:
     """Return ownership bounds for direct vector fragments."""
-    bounds: dict[tuple[int, int], tuple[int, bool, int, bool]] = {}
+    bounds: dict[tuple[int, int], tuple[int, bool, int | None, bool]] = {}
     previous_end_locus: int | None = None
     for p_index, (start, end) in enumerate(partitions):
         if previous_end_locus is None:
@@ -133,7 +133,7 @@ def direct_vector_plan(
             upper_bound = int((end + partitions[p_index + 1][0]) / 2)
             upper_inclusive = True
         else:
-            upper_bound = snp_last
+            upper_bound = None
             upper_inclusive = False
         bounds[(start, end)] = (
             lower_bound,

@@ -126,6 +126,22 @@ def _inactive_middle_vcf_stream() -> StringIO:
     )
 
 
+def _inactive_tail_vcf_stream() -> StringIO:
+    return StringIO(
+        "\n".join(
+            [
+                "##fileformat=VCFv4.2",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+                "\tsample_a\tsample_b",
+                "1\t100\trs_active_a\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|0",
+                "1\t200\trs_active_b\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|1",
+                "1\t300\trs_mono_tail\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|0",
+                "",
+            ]
+        )
+    )
+
+
 def _overlapping_vcf_stream(start: int = 100, end: int = 500) -> StringIO:
     records = [
         (100, "rs_a", "0|1", "0|0"),
@@ -445,6 +461,49 @@ def test_calc_covariance_vector_uses_matrix_loci_for_centers(tmp_path: Path) -> 
     )
     calc_covariance_vector(
         vcf_stream=_inactive_middle_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=direct_path,
+        cutoff=1e-7,
+    )
+    MatrixAnalysis(chrom, CovarianceStore(root=root)).calc_diag_lean(matrix_path)
+
+    direct = _read_vector(direct_path)
+    matrix = _read_vector(matrix_path)
+    assert 200 not in direct
+    assert direct.keys() == matrix.keys()
+    for pos, value in direct.items():
+        assert value == pytest.approx(matrix[pos])
+
+
+def test_calc_covariance_vector_excludes_final_active_locus_by_default(
+    tmp_path: Path,
+) -> None:
+    """Final fragments should match matrix flushing when snp_last is inactive."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "store"
+    chrom = "chr1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+
+    covariance_path = chrom_dir / f"{chrom}.100.300.h5"
+    direct_path = tmp_path / "direct-vector.txt.gz"
+    matrix_path = tmp_path / "matrix-vector.txt.gz"
+    calc_covariance(
+        vcf_stream=_inactive_tail_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=covariance_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance_vector(
+        vcf_stream=_inactive_tail_vcf_stream(),
         genetic_map_path=map_path,
         individuals_path=individuals_path,
         output_path=direct_path,
