@@ -1,288 +1,154 @@
-# ldetect2 Performance Optimization Summary
+# ldetect2 Optimization Summary
 
-This document is the human-readable optimization summary for `ldetect2`. It is
-intended for reports, write-ups, and project context. Detailed agent handoff
-notes, active implementation plans, and profiling runbooks live in
-`notes/optimizations-handoff.md`.
+This is the current human-readable optimization summary. Agent-facing runbook
+details and next-step profiling instructions live in
+`notes/optimizations-handoff.md`. The original audit is preserved as historical
+context in `notes/ldetect_optimization_findings.md`.
 
-## Executive Summary
+## Current Recommendation
 
-The optimization work moved `ldetect2` from a mostly materialized,
-whole-chromosome workflow to a bounded, chunked HDF5 workflow. The major change
-was not a single micro-optimization; it was replacing repeated full covariance
-materialization with streaming readers, compact indexed storage, and
-stage-specific bounded accumulators.
-
-The current production path targets:
+For production-style runs, the best validated path is:
 
 ```text
-ldetect2 run --subset fourier_ls --covariance-cache compact
+ldetect2 run --subset fourier_ls --covariance-cache compact --pair-cache r2-zarr
 ```
 
-On the downloaded EUR chr10/chr11/chr13/chr21/chr22 profiles, whole-run RSS is
-now below 1 GiB. Earlier chr10/chr11 runs could exceed tens of GiB because Step
-2, Step 3, metrics, and local search each had ways to materialize large
-covariance arrays.
+`r2_zarr` is still experimental and opt-in, but it has been the fastest path in
+the recent real-data comparisons while keeping final breakpoint/BED outputs
+equivalent to the compact-HDF5 baseline. The default HDF5 path remains the
+compatibility baseline because it stores raw shrinkage covariance rows and
+supports all legacy/debug readers.
 
-The newest profiles include both dense local-search accumulation and the
-single-pass compact covariance writer. The largest recent runtime win came from
-removing the compact covariance count-then-generate double pass: chr11 Step 2
-fell from about 22.3 minutes to about 11.8 minutes, and whole-run wall time fell
-from about 65.4 minutes to about 54.0 minutes without increasing RSS.
+## What Changed
 
-The remaining runtime is now led by covariance generation and local-search HDF5
-precompute, with matrix-to-vector and metric passes mostly addressed by bounded
-worker paths. Candidate scoring itself is not a meaningful bottleneck. At this
-point, large additional runtime wins are unlikely without deeper rewrites of
-covariance kernels/storage layout or the local-search row-read strategy.
+### Compact HDF5 Baseline
 
-## Main Improvements
+The main baseline moved from materialized text/matrix intermediates to compact,
+indexed HDF5 partitions. Compact HDF5 stores canonical `(lo, hi)` rows plus
+`shrink_ld`, with indexes for diagonals and lower-endpoint row ranges. This
+lets matrix-to-vector, metrics, and local search stream bounded row chunks
+instead of loading chromosome-scale covariance arrays.
 
-### 1. Faster Pairwise LD Kernel
+Key properties:
 
-The Wen/Stephens pairwise LD kernel was moved into a Numba-compiled path. The
-hot inner loop now operates on typed NumPy arrays and avoids Python per-pair
-overhead. In small benchmarks this was roughly 50x faster than the pure Python
-implementation.
+- partition/chunk-bounded RSS;
+- restartable intermediate files;
+- shared reader semantics for matrix-to-vector, metric, and local search;
+- compatibility with raw covariance/shrinkage debugging.
 
-The current kernels also precompute per-SNP allele counts and genetic cutoff
-bounds so the compact/full kernels do less repeated inner-loop work. These
-refinements are part of the remotely profiled single-pass compact covariance
-path.
+### Direct Vector Mode
 
-### 2. Parallel Covariance Generation
+`--vector-mode direct` computes the matrix-to-vector signal during covariance
+generation without materializing a covariance matrix. It keeps the fast fused
+pairwise accumulation path and writes per-partition vector fragments.
 
-Covariance partitions are independent, so `ldetect2 run --workers N` computes
-them with a process pool. This is still the main coarse-grained parallelism in
-the pipeline and scales naturally until limited by available cores, I/O, and
-memory.
+Important exactness notes:
 
-The current compact path keeps worker memory bounded by writing HDF5 rows in
-chunks instead of materializing full retained pair arrays for an entire
-partition.
+- center positions are based on active matrix loci, not raw VCF SNP indexes;
+- final partition support matches matrix flushing when trailing SNPs are
+  inactive;
+- duplicate-position behavior is still an exactness-sensitive area and should
+  be tested with real vector-difference diagnostics.
 
-### 3. Compact HDF5 Covariance Storage
+Recent comparisons show matching vector key sets after the boundary fixes.
+Residual chr9/chr14 vector-value differences remain under investigation; final
+`fourier_ls` breakpoints and BED outputs were exact in the latest downloaded
+compare files. The benchmark workflow now emits `vector_diffs.tsv` to identify
+the exact loci driving those residual vector differences.
 
-The production intermediate format is now compact HDF5 rather than gzipped text
-or historical `.npz` files. Compact HDF5 stores canonical `(lo, hi)` positions
-and `shrink_ld` values, with indexes for diagonal lookup and row-range reads.
+### r2-Zarr Pair Cache
 
-This format gives all downstream stages a shared chunked reader:
+`--pair-cache r2-zarr` writes normalized float64 `r²` rows to a Zarr v2 cache
+and uses that cache for metric/local-search. This avoids retaining raw
+covariance metadata when downstream stages only need normalized pair values.
 
-- Step 3 matrix-to-vector reads partition chunks;
-- streaming metric calculation reads bounded row batches;
-- local search reads only relevant segment ranges;
-- HDF5 row indexes make repeated partition access cheaper and more predictable.
+Current layout:
 
-The storage layout separates write batching from dataset chunking. Production
-compact writes use bounded row-generation batches, while HDF5 datasets use
-65,536-row storage chunks. That layout recovered much of a previous
-local-search read/decompression regression without increasing RSS.
+```text
+<dataset>/<chrom>.r2.zarr/
+  partitions/<start>_<end>/
+    positions
+    lo_values
+    lo_offsets
+    hi_delta
+    r2
+    diag_idx
+```
 
-### 4. Bounded Step 2 Covariance Writes
+The current space-saving format stores diagonal rows implicitly through the
+positive-diagonal index and stores upper endpoints as `hi_delta = hi_idx -
+lo_idx`. A chromosome-level owned-pair cache removes overlap duplication while
+preserving first-pair precedence. The earlier fully explicit row layout was
+larger and is no longer the target schema.
 
-The compact covariance writer removed the old Step 2 memory spike from full
-partition pair materialization. Instead of allocating all retained pair indexes
-and mapped positions, the compact path writes sorted rows in bounded chunks.
+Why Zarr here:
 
-Remote chr11 validation before the single-pass writer:
+- it fits the normalized pair-cache use case;
+- it avoids treating HDF5 as a blanket replacement target;
+- it has been faster than matrix/direct HDF5 in recent exactness benchmark
+  runs;
+- it is opt-in while the HDF5 baseline remains the compatibility path.
 
-| Metric | Value |
-| --- | ---: |
-| Whole-run max RSS | 0.837 GiB |
-| Compact HDF5 partitions | 378 |
-| Retained compact rows | ~8.81B |
-| Largest retained partition | ~677.9M rows |
-| Compact pair counting, summed across workers | ~1877 s |
-| Compact generation/HDF5 writing, summed across workers | ~2593 s |
+### Nocache Mode
 
-The newest remote profiles validate the single-pass appendable compact HDF5
-writer. Every downloaded compact partition used `single_pass=true`, no fallback
-was used, and the compact pair-count profile disappeared:
+The r2-nocache path proved useful as a size/RSS experiment, but it is not
+competitive with r2-zarr for runtime. It avoids large pair-cache output, but it
+recomputes enough pair information that whole-run time can be much higher.
 
-| Chrom | Compact partitions | Wall time after change | Max RSS after change |
+Current posture:
+
+- keep nocache as experimental/research code if needed;
+- do not treat it as the primary performance path;
+- prefer r2-zarr when runtime matters and HDF5 compatibility is not required.
+
+### VCF/BCF I/O
+
+cyvcf2 support was added to accelerate VCF/BCF decoding in paths that can use
+file-backed input. `tabix` streaming remains available for compatibility with
+the existing end-to-end partition workflow.
+
+## Recent Real-Data Status
+
+The latest downloaded exactness summaries show:
+
+- chr20/21/22 vector key support now matches across matrix, direct HDF5, and
+  r2-zarr;
+- chr15 key support and final outputs match;
+- chr9 and chr14 still have vector-value max differences in direct/r2_zarr vs
+  matrix, but downstream `fourier_ls` breakpoints and BED outputs were exact in
+  the downloaded summaries;
+- r2-zarr was fastest in the updated chr20-22 runtime files.
+
+Example updated runtimes:
+
+| Chrom | matrix_hdf5 | direct_hdf5 | r2_zarr |
 | --- | ---: | ---: | ---: |
-| chr10 | 376 | 1505.05 s | 0.598 GiB |
-| chr11 | 378 | 3236.81 s | 0.811 GiB |
-| chr13 | 274 | 997.88 s | 0.493 GiB |
-| chr21 | 103 | 267.31 s | 0.410 GiB |
-| chr22 | 98 | 308.48 s | 0.412 GiB |
+| chr20 | 465.45 s | 493.18 s | 384.73 s |
+| chr21 | 281.09 s | 300.71 s | 222.81 s |
+| chr22 | 331.06 s | 333.12 s | 199.65 s |
 
-### 5. Bounded Step 3 Matrix-To-Vector
+## Optimization Lessons
 
-Step 3 used to normalize and accumulate large covariance arrays in ways that
-could dominate memory. The current HDF5 path streams row chunks, computes `r²`
-in bounded batches, and accumulates center-locus sums without retaining
-full-partition normalized arrays.
+- Preserve the compact HDF5 path as the correctness and compatibility baseline.
+- Keep r2-zarr experimental but prioritized for runtime comparisons.
+- Do not replace the fused direct-vector kernel with row-stream accumulation
+  unless profiling shows the optimization no longer matters.
+- Avoid r2-nocache as the main runtime path; its cache-size win is outweighed
+  by recomputation cost.
+- Add diagnostics before changing exactness-sensitive kernels. Summary max
+  differences are not enough; use `vector_diffs.tsv` to locate the actual loci.
+- Treat duplicate-position handling and partition-boundary ownership as
+  correctness-critical.
 
-Remote validation showed the memory win clearly:
+## Historical or Rejected Paths
 
-| Chrom | Step 3 seconds | Step 3 max RSS |
-| --- | ---: | ---: |
-| chr11 | ~1025 s | ~465 MiB |
-| chr21 | ~58 s | ~372 MiB |
-| chr22 | ~76 s | ~372 MiB |
-
-Step 3 is no longer a primary RSS or wall-time risk in cached diagnostic runs.
-It now uses compact HDF5 locus indexes for the loci pass and exposes opt-in
-bounded partition workers via `--matrix-workers`. Remote profiling shows
-`matrix_workers=4` improves runtime without meaningful RSS inflation. On cached
-chr19-22 diagnostic runs, Step 3 fell to roughly 14-28 seconds with Step 3 RSS
-around 222-282 MiB.
-
-### 6. Streaming Metric Calculation
-
-The normal float metric path now streams from covariance files instead of
-loading a chromosome-wide covariance cache. This avoids stacking large metric
-arrays with Step 3 or local-search memory.
-
-The tradeoff is runtime: chr11 currently spends roughly 260 seconds on the
-Fourier metric and another 264 seconds on the final Fourier-LS metric. The
-current metric path avoids row streaming during loci discovery by using compact
-HDF5 indexes and reports separate loci-index and diagonal-read timings. New
-cached chr19-22 profiles show the metadata/index part is now tiny; remaining
-metric time is row read, normalization, and crossing classification.
-
-The newest remote profiles validate opt-in bounded partition-level metric
-workers via `--metric-workers`. On chr19-22 with `metric_workers=4`, the two
-metric passes fell from roughly 71-128 seconds total per chromosome to roughly
-14-25 seconds total, without the RSS inflation seen from local-search worker
-fan-out.
-
-### 7. Selective Breakpoint Subsets
-
-The default `ldetect2 run --subset fourier_ls` computes only the raw Fourier
-breakpoints and the Fourier local-search result needed for final BED output.
-Uniform local search is skipped unless explicitly requested with
-`--all-breakpoint-subsets`.
-
-This avoids doing expensive local-search work for breakpoint sets that the
-normal production command will not use.
-
-### 8. Local-Search Streaming and Dense Accumulation
-
-Local search was refactored from repeated full active-row materialization toward
-streaming HDF5 segment rows into bounded accumulators. The HDF5 path preserves
-partition-order, first-retained-pair semantics at a row-stream boundary.
-
-Validated wins include:
-
-- sorted range slicing instead of full-row masks;
-- partition-level diagonal metadata;
-- HDF5 reader reuse within each breakpoint precompute;
-- grouped horizontal reductions, which cut chr11 horizontal aggregation from
-  77.46 s to 16.44 s in the previous remote profile.
-
-The newest remote profiles include the dense accumulator and the duplicate
-merge revert. The dense path is a modest net win, not a dramatic one: chr11
-local search moved from 904.80 s in the previous sweep to 844.41 s, while dense
-lookup plus dense accumulation now accounts for about 63.6 s. The bigger
-cleanup was reverting the Python duplicate merge; `dedup_merge_seconds` is back
-to zero and chr11 duplicate tracking fell from 243.58 s to 134.84 s.
-
-With `matrix_workers=4` and `local_search_workers=1`, local search is now the
-largest cached-run phase on chr19-22. Its remaining cost is mostly HDF5
-read/decompression, duplicate filtering, and dense endpoint accumulation rather
-than candidate scoring.
-
-A later attempt to combine vertical/horizontal dense endpoint lookup and
-coalesce adjacent HDF5 segments did not help in remote chr19-22 profiles:
-local-search wall time rose by roughly 4-9%, dense lookup plus accumulation got
-slower, and HDF5 read calls did not materially fall. That micro-optimization was
-reverted; future local-search work should focus on reducing actual HDF5 row
-read amplification or duplicate filtering cost.
-
-### 9. Failed or Reverted Optimization: Python Duplicate Merge
-
-One attempted local-search duplicate optimization moved set-union work from
-NumPy into a Python sorted merge loop. Remote profiling showed this was a clear
-regression: chr11 dedup time rose from 134.21 s to 243.58 s, with nearly all
-of the new time in `dedup_merge_seconds`.
-
-That path has been reverted and remotely validated. The code is back to
-NumPy's `np.isin(..., assume_unique=True)` plus `np.union1d()` behavior for
-duplicate tracking.
-
-## Remote Profiling Highlights
-
-Latest downloaded profile, including dense accumulation and single-pass compact
-covariance:
-
-| Chrom | Wall time | Max RSS | Local search |
-| --- | ---: | ---: | ---: |
-| chr10 | 1505.05 s | 0.598 GiB | 327.89 s |
-| chr11 | 3236.81 s | 0.811 GiB | 844.41 s |
-| chr13 | 997.88 s | 0.493 GiB | 200.44 s |
-| chr21 | 267.31 s | 0.410 GiB | 48.63 s |
-| chr22 | 308.48 s | 0.412 GiB | 60.06 s |
-
-chr11 phase split:
-
-| Phase | Seconds | Notes |
-| --- | ---: | --- |
-| Step 2 covariance | 707 | single-pass compact HDF5, `workers=4` |
-| Step 3 matrix-to-vector | 1032 | bounded RSS, now larger than Step 2 |
-| Filter/minima before metric | 126 | lower priority |
-| Fourier metric | 261 | streaming metric pass |
-| Fourier local search | 844 | dense accumulation plus duplicate merge revert |
-| Final Fourier-LS metric | 262 | streaming metric pass |
-
-Cached diagnostic profile with `matrix_workers=4`, `local_search_workers=1`
-skipped Step 2 because covariance partitions already existed, but it isolates
-the current Step 3/4 behavior:
-
-| Chrom | Wall time | Max RSS | Step 3 | Local search |
-| --- | ---: | ---: | ---: | ---: |
-| chr19 | 279.32 s | 0.507 GiB | 28.48 s | 121.37 s |
-| chr20 | 239.38 s | 0.458 GiB | 24.47 s | 90.96 s |
-| chr21 | 132.20 s | 0.400 GiB | 14.27 s | 44.39 s |
-| chr22 | 154.43 s | 0.424 GiB | 17.84 s | 58.09 s |
-
-## Current Remaining Bottlenecks
-
-The main remaining runtime targets are:
-
-1. Local-search HDF5 read/decompression, duplicate filtering, and dense
-   endpoint accumulation.
-2. Further compact covariance CPU work, now that the largest double-pass cost is
-   gone.
-3. Larger-chromosome validation of `matrix_workers=4` and `metric_workers=4`.
-
-Step 3 multiprocessing is now the preferred scaling knob: `matrix_workers=4`
-captures nearly the same runtime as also setting `local_search_workers=4`, but
-without the local-search RSS inflation. Metric partition multiprocessing is now
-validated on chr19-22 and should stay enabled for diagnostics unless larger
-chromosomes show I/O contention. Naive per-breakpoint local-search
-multiprocessing remains a poor fit; local-search optimization should focus on
-reducing actual HDF5 read amplification and duplicate filtering overhead.
-
-Small local-search micro-optimizations have mostly been exhausted. The next
-credible improvements are rewrite-scale: a bounded row-window cache with clear
-eviction semantics, a different duplicate tracking representation, or a more
-substantial covariance/read layout change.
-
-## Design Principles That Emerged
-
-- Prefer chunked HDF5 readers over chromosome-wide covariance caches.
-- Keep optimized paths bounded by partition, chunk, or breakpoint window.
-- Preserve restartable intermediate files even when in-memory shortcuts are
-  tempting.
-- Add instrumentation before optimizing a phase whose wall time is not yet
-  explained.
-- Treat duplicate-position compatibility as a stream-boundary/storage concern,
-  not something every aggregation kernel should solve independently.
-- Keep high-memory optimizations explicit or opt-in.
-
-## Historical Notes
-
-Several earlier optimizations were useful stepping stones but are no longer the
-main story:
-
-- `.npz` covariance partitions replaced gzipped text parsing, but have been
-  superseded by HDF5.
-- Local-search process parallelism exists, but `local_search_workers=4` caused
-  significant RSS inflation in remote profiling; keep the bounded
-  single-process HDF5 grouped path for whole-chromosome production runs.
-- Full chromosome covariance caches can speed small/debug workflows, but should
-  not become default because they recreate the memory pressure this work was
-  meant to remove.
+- Full covariance matrix materialization is no longer acceptable for large
+  chromosomes.
+- Full HDF5 covariance caches remain useful for compatibility/debugging but are
+  not the preferred speed path.
+- Earlier r2-zarr schemas with explicit diagonal rows and duplicated overlap
+  rows were replaced by the smaller implicit-diagonal/owned-pair design.
+- r2-nocache is not expected to catch r2-zarr runtime without a much deeper
+  in-memory/window-cache redesign.
+- Speculative local-search micro-optimizations should not be reintroduced
+  without fresh profiling evidence.

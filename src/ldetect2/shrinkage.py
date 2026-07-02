@@ -7,7 +7,7 @@ import gzip
 import math
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import IO
 
@@ -1038,8 +1038,8 @@ def _r2_vector_from_ld_arrays(
     hap_sums: np.ndarray,
     j_stop_by_i: np.ndarray,
     pos_arr: np.ndarray,
-    row_counts: np.ndarray,
-    diag_shrink: np.ndarray,
+    row_counts: np.ndarray | None,
+    diag_shrink: np.ndarray | None,
     ne: float,
     n_ind: float,
     theta: float,
@@ -1048,8 +1048,11 @@ def _r2_vector_from_ld_arrays(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Accumulate vector values through canonical covariance-row semantics."""
     if _has_duplicate_positions(pos_arr):
-        loci, diag_pos, diag_val = _loci_and_diag_from_canonical_row_chunks(
-            _compact_pair_chunks_by_physical_lo(
+        if row_counts is None:
+            raise ValueError("duplicate-position vector accumulation requires counts")
+
+        def row_chunk_factory() -> Iterator[CovarianceRowChunk]:
+            return _compact_pair_chunks_by_physical_lo(
                 hap_mat,
                 gpos_arr,
                 hap_sums,
@@ -1062,42 +1065,68 @@ def _r2_vector_from_ld_arrays(
                 cutoff,
                 chunk_rows,
             )
-        )
-        row_chunks = _compact_pair_chunks_by_physical_lo(
-            hap_mat,
-            gpos_arr,
-            hap_sums,
-            j_stop_by_i,
-            pos_arr,
-            row_counts,
-            ne,
-            n_ind,
-            theta,
-            cutoff,
-            chunk_rows,
-        )
-    else:
-        loci = _loci_from_row_counts(pos_arr, row_counts)
-        diag_pos = pos_arr.astype(np.int64, copy=False)
-        diag_val = np.asarray(diag_shrink, dtype=np.float64)
-        row_chunks = _compact_pair_chunks(
-            hap_mat,
-            gpos_arr,
-            hap_sums,
-            j_stop_by_i,
-            pos_arr,
-            row_counts,
-            ne,
-            n_ind,
-            theta,
-            cutoff,
-            chunk_rows,
-        )
+
+        return _r2_vector_from_canonical_row_chunk_factory(row_chunk_factory)
+
+    if pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1]):
+
+        def row_chunk_factory() -> Iterator[CovarianceRowChunk]:
+            return _compact_pair_chunks_single_pass(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                ne,
+                n_ind,
+                theta,
+                cutoff,
+                chunk_rows,
+            )
+
+        return _r2_vector_from_canonical_row_chunk_factory(row_chunk_factory)
+
+    if row_counts is None:
+        raise ValueError("counted vector accumulation requires row counts")
+    if diag_shrink is None:
+        raise ValueError("counted vector accumulation requires diagonal values")
+
+    row_chunks = _compact_pair_chunks(
+        hap_mat,
+        gpos_arr,
+        hap_sums,
+        j_stop_by_i,
+        pos_arr,
+        row_counts,
+        ne,
+        n_ind,
+        theta,
+        cutoff,
+        chunk_rows,
+    )
+    loci = _loci_from_row_counts(pos_arr, row_counts)
+    diag_pos = pos_arr.astype(np.int64, copy=False)
+    diag_val = np.asarray(diag_shrink, dtype=np.float64)
     return _r2_vector_from_canonical_row_chunks(
         loci,
         diag_pos,
         diag_val,
         row_chunks,
+    )
+
+
+def _r2_vector_from_canonical_row_chunk_factory(
+    row_chunk_factory: Callable[[], Iterator[CovarianceRowChunk]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Accumulate vector values from a replayable canonical covariance stream."""
+    loci, diag_pos, diag_val = _loci_and_diag_from_canonical_row_chunks(
+        row_chunk_factory()
+    )
+    return _r2_vector_from_canonical_row_chunks(
+        loci,
+        diag_pos,
+        diag_val,
+        row_chunk_factory(),
     )
 
 
@@ -1270,15 +1299,22 @@ def calc_covariance_vector(
     log_memory_checkpoint("calc_covariance_vector_arrays_built", debug=True)
 
     vector_start = time.perf_counter()
-    row_counts = _count_pairwise_ld_by_i_impl(
-        hap_mat,
-        gpos_arr,
-        hap_sums,
-        j_stop_by_i,
-        ne,
-        float(n_ind),
-        theta,
-        cutoff,
+    sorted_unique_positions = bool(
+        pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
+    )
+    row_counts = (
+        None
+        if sorted_unique_positions
+        else _count_pairwise_ld_by_i_impl(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            ne,
+            float(n_ind),
+            theta,
+            cutoff,
+        )
     )
     vector_positions, sums = _r2_vector_from_ld_arrays(
         hap_mat,
@@ -1429,19 +1465,23 @@ def calc_r2_zarr_partition(
 
     if vector_output_path is not None:
         vector_start = time.perf_counter()
-        if duplicate_row_counts is None:
-            vector_row_counts = _count_pairwise_ld_by_i_impl(
-                hap_mat,
-                gpos_arr,
-                hap_sums,
-                j_stop_by_i,
-                ne,
-                float(n_ind),
-                theta,
-                cutoff,
-            )
-        else:
+        if duplicate_row_counts is not None:
             vector_row_counts = duplicate_row_counts
+        else:
+            vector_row_counts = (
+                None
+                if pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
+                else _count_pairwise_ld_by_i_impl(
+                    hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                )
+            )
         vector_positions, sums = _r2_vector_from_ld_arrays(
             hap_mat,
             gpos_arr,

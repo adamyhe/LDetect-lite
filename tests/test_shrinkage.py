@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import ldetect2.shrinkage as shrinkage
 from ldetect2.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     open_covariance_reader,
@@ -450,6 +451,35 @@ def test_calc_covariance_vector_matches_matrix_to_vector(tmp_path: Path) -> None
     assert direct.keys() == matrix.keys()
     for pos, value in direct.items():
         assert value == pytest.approx(matrix[pos])
+
+
+def test_calc_covariance_vector_sorted_unique_uses_single_pass_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    direct_path = tmp_path / "direct-vector.txt.gz"
+
+    def fail_counted_stream(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("sorted-unique direct vector should use single-pass rows")
+
+    def fail_pair_count(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("sorted-unique direct vector should not pre-count pairs")
+
+    monkeypatch.setattr(shrinkage, "_compact_pair_chunks", fail_counted_stream)
+    monkeypatch.setattr(shrinkage, "_count_pairwise_ld_by_i_impl", fail_pair_count)
+    calc_covariance_vector(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=direct_path,
+        cutoff=1e-7,
+    )
+
+    assert _read_vector(direct_path)
 
 
 def test_calc_covariance_vector_uses_matrix_loci_for_centers(tmp_path: Path) -> None:

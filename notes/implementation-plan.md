@@ -1,5 +1,20 @@
 # ldetect2 Implementation Plan
 
+Status note, 2026-07-01: this file is the original package/refactor plan, not
+the active optimization runbook. It is retained for architectural context. For
+current performance/cache status, use `notes/optimizations.md` and
+`notes/optimizations-handoff.md`.
+
+Important differences from the original plan:
+
+- covariance partitions now use compact HDF5 by default, not gzipped TSV;
+- `ldetect2 run` includes cache/vector controls such as
+  `--covariance-cache`, `--vector-mode`, and `--pair-cache`;
+- `--pair-cache r2-zarr` is the current experimental fast path for
+  normalized r2 metric/local-search caches;
+- direct vector mode is implemented, but exactness diagnostics for chr9/chr14
+  vector-value residuals are still active.
+
 ## Context
 
 Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldetect2/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:
