@@ -97,10 +97,8 @@ def find_breakpoints(
     """
     if pair_cache != "hdf5" and use_decimal:
         raise ValueError(
-            "Experimental r2 pair caches do not support Decimal mode"
+            "Experimental r2-zarr pair cache does not support Decimal mode"
         )
-    if pair_cache == "r2-nocache" and r2_nocache_config is None:
-        raise ValueError("r2-nocache requires an R2NoCacheConfig")
 
     requested_subsets, explicit_subsets = _normalise_subsets(subsets)
     needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
@@ -640,9 +638,7 @@ def _run_local_search(
                         covariance_cache=group_cache,
                         local_search_hdf5_partitions=group_hdf5_partitions,
                         local_search_r2_zarr_partitions=group_r2_zarr_partitions,
-                        local_search_r2_nocache_partitions=(
-                            group_r2_nocache_partitions
-                        ),
+                        local_search_r2_nocache_partitions=group_r2_nocache_partitions,
                         subset_name=subset_name,
                     )
                     if idx == 0:
@@ -650,7 +646,7 @@ def _run_local_search(
     else:
         if pair_cache != "hdf5":
             log_msg(
-                "Using experimental r2-zarr local search in a single process; "
+                "Using experimental r2 pair-cache local search in a single process; "
                 "ignoring local-search worker parallelism"
             )
             return _run_local_search(

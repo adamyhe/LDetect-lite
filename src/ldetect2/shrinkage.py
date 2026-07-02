@@ -373,6 +373,8 @@ def _direct_corr_sum_vector_impl(
     hap_sums: np.ndarray,
     diag_shrink: np.ndarray,
     j_stop_by_i: np.ndarray,
+    active_index_by_snp: np.ndarray,
+    n_active_loci: int,
     ne: float,
     n_ind: float,
     theta: float,
@@ -382,11 +384,14 @@ def _direct_corr_sum_vector_impl(
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     n_total = float(n_haps)
-    sums = np.zeros(n_snps, dtype=np.float64)
+    sums = np.zeros(n_active_loci, dtype=np.float64)
 
     for i in range(n_snps):
         diag_i = diag_shrink[i]
         if diag_i <= 0.0:
+            continue
+        lo_idx = active_index_by_snp[i]
+        if lo_idx < 0:
             continue
 
         gpos1 = gpos_arr[i]
@@ -396,11 +401,14 @@ def _direct_corr_sum_vector_impl(
             diag_j = diag_shrink[j]
             if diag_j <= 0.0:
                 continue
-
-            idx_delta = j - i
-            if idx_delta % 2 != 0 and i == 0:
+            hi_idx = active_index_by_snp[j]
+            if hi_idx < 0:
                 continue
-            center_idx = (i + j) // 2
+
+            idx_delta = hi_idx - lo_idx
+            if idx_delta % 2 != 0 and lo_idx == 0:
+                continue
+            center_idx = (lo_idx + hi_idx) // 2
 
             df = gpos_arr[j] - gpos1
             ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
@@ -525,6 +533,78 @@ def _compact_pair_chunks_single_pass(
         i_start = i_stop
 
 
+def _concat_covariance_row_chunks(
+    parts: list[CovarianceRowChunk],
+) -> CovarianceRowChunk:
+    if not parts:
+        return CovarianceRowChunk(
+            lo=np.array([], dtype=np.int32),
+            hi=np.array([], dtype=np.int32),
+            shrink_ld=np.array([], dtype=np.float64),
+        )
+    if len(parts) == 1:
+        return parts[0]
+    return CovarianceRowChunk(
+        lo=np.concatenate([part.lo for part in parts]),
+        hi=np.concatenate([part.hi for part in parts]),
+        shrink_ld=np.concatenate([part.shrink_ld for part in parts]),
+    )
+
+
+def _compact_pair_chunks_by_physical_lo(
+    hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    pos_arr: np.ndarray,
+    row_counts: np.ndarray,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    chunk_rows: int,
+) -> Iterator[CovarianceRowChunk]:
+    """Yield duplicate-compatible compact rows grouped by physical lower locus."""
+    target_rows = max(int(chunk_rows), 1)
+    parts: list[CovarianceRowChunk] = []
+    buffered = 0
+    i_start = 0
+    n_snps = pos_arr.size
+    while i_start < n_snps:
+        i_stop = i_start + 1
+        while i_stop < n_snps and pos_arr[i_stop] == pos_arr[i_start]:
+            i_stop += 1
+
+        n_pairs = int(row_counts[i_start:i_stop].sum())
+        if n_pairs:
+            ii, jj, shrink_ld = _pairwise_ld_compact_range_impl(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                ne,
+                n_ind,
+                theta,
+                cutoff,
+                i_start,
+                i_stop,
+                n_pairs,
+            )
+            rows = _canonical_pair_rows_from_arrays(pos_arr, ii, jj, shrink_ld)
+            if rows.lo.size:
+                parts.append(rows)
+                buffered += int(rows.lo.size)
+
+        if buffered >= target_rows:
+            yield _concat_covariance_row_chunks(parts)
+            parts = []
+            buffered = 0
+        i_start = i_stop
+
+    if parts:
+        yield _concat_covariance_row_chunks(parts)
+
+
 def _r2_pair_chunks_from_covariance(
     row_chunks: Iterator[CovarianceRowChunk],
     positions: np.ndarray,
@@ -566,59 +646,94 @@ def _r2_pair_chunks_from_covariance(
 
 def _r2_pair_chunk_from_canonical_rows(rows: CovarianceRowChunk) -> R2RowChunk:
     """Return normalized r2 rows from canonical physical covariance rows."""
-    if rows.lo.size == 0:
-        return R2RowChunk(
+    diag_pos, diag_val = _positive_diag_from_canonical_rows(rows)
+    return next(
+        _r2_pair_chunks_from_canonical_stream(
+            iter((rows,)),
+            diag_pos,
+            diag_val,
+        ),
+        R2RowChunk(
             lo=np.array([], dtype=np.int32),
             hi=np.array([], dtype=np.int32),
             r2=np.array([], dtype=np.float64),
-        )
+        ),
+    )
+
+
+def _positive_diag_from_canonical_rows(
+    rows: CovarianceRowChunk,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return sorted positive diagonal loci and shrinkage values."""
+    if rows.lo.size == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
 
     diag_mask = rows.lo == rows.hi
     diag_pos = rows.lo[diag_mask].astype(np.int64, copy=False)
     diag_val = np.asarray(rows.shrink_ld[diag_mask], dtype=np.float64)
+    positive = diag_val > 0.0
+    return diag_pos[positive], diag_val[positive]
+
+
+def _r2_pair_chunks_from_canonical_rows(
+    rows: CovarianceRowChunk,
+    chunk_rows: int,
+) -> Iterator[R2RowChunk]:
+    """Yield normalized r2 rows from canonical physical rows in bounded chunks."""
+    diag_pos, diag_val = _positive_diag_from_canonical_rows(rows)
+    chunk_rows = max(int(chunk_rows), 1)
+    row_chunks = (
+        CovarianceRowChunk(
+            lo=rows.lo[start : start + chunk_rows],
+            hi=rows.hi[start : start + chunk_rows],
+            shrink_ld=rows.shrink_ld[start : start + chunk_rows],
+        )
+        for start in range(0, rows.lo.size, chunk_rows)
+    )
+    yield from _r2_pair_chunks_from_canonical_stream(row_chunks, diag_pos, diag_val)
+
+
+def _r2_pair_chunks_from_canonical_stream(
+    row_chunks: Iterator[CovarianceRowChunk],
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
+) -> Iterator[R2RowChunk]:
+    """Yield normalized r2 rows from canonical physical row chunks."""
     if diag_pos.size == 0:
-        return R2RowChunk(
-            lo=np.array([], dtype=np.int32),
-            hi=np.array([], dtype=np.int32),
-            r2=np.array([], dtype=np.float64),
-        )
-    diag_lo_idx = np.searchsorted(diag_pos, rows.lo)
-    diag_hi_idx = np.searchsorted(diag_pos, rows.hi)
-    has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
-    safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
-    safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
-    has_diag &= (diag_pos[safe_lo_idx] == rows.lo) & (
-        diag_pos[safe_hi_idx] == rows.hi
-    )
-    if not np.any(has_diag):
-        return R2RowChunk(
-            lo=np.array([], dtype=np.int32),
-            hi=np.array([], dtype=np.int32),
-            r2=np.array([], dtype=np.float64),
-        )
+        return
 
-    lo = rows.lo[has_diag]
-    hi = rows.hi[has_diag]
-    shrink = np.asarray(rows.shrink_ld[has_diag], dtype=np.float64)
-    diag_lo = diag_val[diag_lo_idx[has_diag]]
-    diag_hi = diag_val[diag_hi_idx[has_diag]]
-    positive = (diag_lo > 0.0) & (diag_hi > 0.0)
-    if not np.any(positive):
-        return R2RowChunk(
-            lo=np.array([], dtype=np.int32),
-            hi=np.array([], dtype=np.int32),
-            r2=np.array([], dtype=np.float64),
-        )
+    diag_pos = np.asarray(diag_pos, dtype=np.int64)
+    diag_val = np.asarray(diag_val, dtype=np.float64)
+    for chunk in row_chunks:
+        row_lo = np.asarray(chunk.lo)
+        row_hi = np.asarray(chunk.hi)
+        if row_lo.size == 0:
+            continue
 
-    lo = lo[positive]
-    hi = hi[positive]
-    r2 = shrink[positive] * shrink[positive] / (
-        diag_lo[positive] * diag_hi[positive]
-    )
-    diag_rows = lo == hi
-    if np.any(diag_rows):
-        r2[diag_rows] = 1.0
-    return R2RowChunk(lo=lo, hi=hi, r2=r2)
+        diag_lo_idx = np.searchsorted(diag_pos, row_lo)
+        diag_hi_idx = np.searchsorted(diag_pos, row_hi)
+        has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
+        if not np.any(has_diag):
+            continue
+
+        safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
+        safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
+        has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (
+            diag_pos[safe_hi_idx] == row_hi
+        )
+        if not np.any(has_diag):
+            continue
+
+        lo = row_lo[has_diag]
+        hi = row_hi[has_diag]
+        shrink = np.asarray(chunk.shrink_ld[has_diag], dtype=np.float64)
+        diag_lo = diag_val[diag_lo_idx[has_diag]]
+        diag_hi = diag_val[diag_hi_idx[has_diag]]
+        r2 = shrink * shrink / (diag_lo * diag_hi)
+        diag_rows = lo == hi
+        if np.any(diag_rows):
+            r2[diag_rows] = 1.0
+        yield R2RowChunk(lo=lo, hi=hi, r2=r2)
 
 
 # ---------------------------------------------------------------------------
@@ -817,86 +932,125 @@ def _canonical_pair_rows_from_arrays(
     return CovarianceRowChunk(lo=lo, hi=hi, shrink_ld=shrink)
 
 
-def _r2_vector_from_canonical_rows(
-    rows: CovarianceRowChunk,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Accumulate the matrix-to-vector signal from canonical physical rows."""
-    if rows.lo.size == 0:
-        return np.array([], dtype=np.int32), np.array([], dtype=np.float64)
-
-    loci = np.unique(np.concatenate((rows.lo, rows.hi))).astype(np.int64, copy=False)
-    diag_mask = rows.lo == rows.hi
-    diag_pos = rows.lo[diag_mask].astype(np.int64, copy=False)
-    diag_val = np.asarray(rows.shrink_ld[diag_mask], dtype=np.float64)
-    sums = np.zeros(loci.size, dtype=np.float64)
-    if diag_pos.size == 0:
-        return loci.astype(np.int32, copy=False), sums
-
-    diag_lo_idx = np.searchsorted(diag_pos, rows.lo)
-    diag_hi_idx = np.searchsorted(diag_pos, rows.hi)
-    has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
-    safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
-    safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
-    has_diag &= (diag_pos[safe_lo_idx] == rows.lo) & (
-        diag_pos[safe_hi_idx] == rows.hi
-    )
-    if not np.any(has_diag):
-        return loci.astype(np.int32, copy=False), sums
-
-    row_lo = rows.lo[has_diag]
-    row_hi = rows.hi[has_diag]
-    row_shrink = np.asarray(rows.shrink_ld[has_diag], dtype=np.float64)
-    diag_lo = diag_val[diag_lo_idx[has_diag]]
-    diag_hi = diag_val[diag_hi_idx[has_diag]]
-    positive = (diag_lo > 0.0) & (diag_hi > 0.0)
-    if not np.any(positive):
-        return loci.astype(np.int32, copy=False), sums
-
-    row_lo = row_lo[positive]
-    row_hi = row_hi[positive]
-    row_shrink = row_shrink[positive]
-    diag_lo = diag_lo[positive]
-    diag_hi = diag_hi[positive]
-    lo_idx = np.searchsorted(loci, row_lo)
-    hi_idx = np.searchsorted(loci, row_hi)
-    idx_delta = hi_idx - lo_idx
-    legacy_reachable = (idx_delta % 2 == 0) | (lo_idx > 0)
-    if not np.any(legacy_reachable):
-        return loci.astype(np.int32, copy=False), sums
-
-    center_idx = (lo_idx[legacy_reachable] + hi_idx[legacy_reachable]) // 2
-    r2 = (
-        row_shrink[legacy_reachable]
-        * row_shrink[legacy_reachable]
-        / (diag_lo[legacy_reachable] * diag_hi[legacy_reachable])
-    )
-    sums += np.bincount(center_idx, weights=r2, minlength=loci.size)
-    return loci.astype(np.int32, copy=False), sums
-
-
-def _duplicate_compatible_pair_rows(
-    hap_mat: np.ndarray,
-    gpos_arr: np.ndarray,
-    hap_sums: np.ndarray,
-    j_stop_by_i: np.ndarray,
+def _diag_from_first_physical_position(
     pos_arr: np.ndarray,
-    ne: float,
-    n_ind: float,
-    theta: float,
-    cutoff: float,
-) -> CovarianceRowChunk:
-    """Materialize and canonicalize rows for duplicate-position partitions."""
-    ii, jj, _, ds2_arr = _pairwise_ld_impl(
-        hap_mat,
-        gpos_arr,
-        hap_sums,
-        j_stop_by_i,
-        ne,
-        n_ind,
-        theta,
-        cutoff,
+    diag_shrink: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return first-row-precedence diagonal values for sorted physical positions."""
+    if pos_arr.size == 0:
+        return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
+    starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(pos_arr[1:] != pos_arr[:-1]) + 1,
+        )
     )
-    return _canonical_pair_rows_from_arrays(pos_arr, ii, jj, ds2_arr)
+    return (
+        pos_arr[starts].astype(np.int64, copy=False),
+        np.asarray(diag_shrink[starts], dtype=np.float64),
+    )
+
+
+def _loci_from_row_counts(
+    pos_arr: np.ndarray,
+    row_counts: np.ndarray,
+) -> np.ndarray:
+    """Return matrix-vector loci: physical lower endpoints with covariance rows."""
+    if pos_arr.size == 0:
+        return np.array([], dtype=np.int64)
+    if not _has_duplicate_positions(pos_arr):
+        return pos_arr[row_counts > 0].astype(np.int64, copy=False)
+
+    starts = np.concatenate(
+        (
+            np.array([0], dtype=np.int64),
+            np.flatnonzero(pos_arr[1:] != pos_arr[:-1]) + 1,
+        )
+    )
+    counts = np.add.reduceat(np.asarray(row_counts, dtype=np.int64), starts)
+    return pos_arr[starts[counts > 0]].astype(np.int64, copy=False)
+
+
+def _active_index_from_row_counts(row_counts: np.ndarray) -> np.ndarray:
+    """Return SNP-index to matrix-vector active-locus-index mapping."""
+    active = row_counts > 0
+    active_index = np.full(row_counts.size, -1, dtype=np.int64)
+    active_index[active] = np.arange(int(np.count_nonzero(active)), dtype=np.int64)
+    return active_index
+
+
+def _r2_vector_from_canonical_row_chunks(
+    loci: np.ndarray,
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
+    row_chunks: Iterator[CovarianceRowChunk],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Accumulate the matrix-to-vector signal from canonical physical chunks."""
+    loci = loci.astype(np.int64, copy=False)
+    sums = np.zeros(loci.size, dtype=np.float64)
+    if loci.size == 0 or diag_pos.size == 0:
+        return loci.astype(np.int32, copy=False), sums
+
+    for rows in row_chunks:
+        if rows.lo.size == 0:
+            continue
+        diag_lo_idx = np.searchsorted(diag_pos, rows.lo)
+        diag_hi_idx = np.searchsorted(diag_pos, rows.hi)
+        has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
+        if not np.any(has_diag):
+            continue
+
+        safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
+        safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
+        has_diag &= (diag_pos[safe_lo_idx] == rows.lo) & (
+            diag_pos[safe_hi_idx] == rows.hi
+        )
+        if not np.any(has_diag):
+            continue
+
+        row_lo = rows.lo[has_diag]
+        row_hi = rows.hi[has_diag]
+        row_shrink = np.asarray(rows.shrink_ld[has_diag], dtype=np.float64)
+        diag_lo = diag_val[diag_lo_idx[has_diag]]
+        diag_hi = diag_val[diag_hi_idx[has_diag]]
+        positive = (diag_lo > 0.0) & (diag_hi > 0.0)
+        if not np.any(positive):
+            continue
+
+        row_lo = row_lo[positive]
+        row_hi = row_hi[positive]
+        row_shrink = row_shrink[positive]
+        diag_lo = diag_lo[positive]
+        diag_hi = diag_hi[positive]
+        lo_idx = np.searchsorted(loci, row_lo)
+        hi_idx = np.searchsorted(loci, row_hi)
+        has_loci = (lo_idx < loci.size) & (hi_idx < loci.size)
+        if not np.any(has_loci):
+            continue
+        safe_lo_idx = np.minimum(lo_idx, loci.size - 1)
+        safe_hi_idx = np.minimum(hi_idx, loci.size - 1)
+        has_loci &= (loci[safe_lo_idx] == row_lo) & (loci[safe_hi_idx] == row_hi)
+        if not np.any(has_loci):
+            continue
+
+        lo_idx = lo_idx[has_loci]
+        hi_idx = hi_idx[has_loci]
+        row_shrink = row_shrink[has_loci]
+        diag_lo = diag_lo[has_loci]
+        diag_hi = diag_hi[has_loci]
+        idx_delta = hi_idx - lo_idx
+        legacy_reachable = (idx_delta % 2 == 0) | (lo_idx > 0)
+        if not np.any(legacy_reachable):
+            continue
+
+        center_idx = (lo_idx[legacy_reachable] + hi_idx[legacy_reachable]) // 2
+        r2 = (
+            row_shrink[legacy_reachable]
+            * row_shrink[legacy_reachable]
+            / (diag_lo[legacy_reachable] * diag_hi[legacy_reachable])
+        )
+        sums += np.bincount(center_idx, weights=r2, minlength=loci.size)
+    return loci.astype(np.int32, copy=False), sums
 
 
 def _write_direct_vector(
@@ -994,27 +1148,47 @@ def calc_covariance_vector(
     log_memory_checkpoint("calc_covariance_vector_arrays_built", debug=True)
 
     vector_start = time.perf_counter()
+    row_counts = _count_pairwise_ld_by_i_impl(
+        hap_mat,
+        gpos_arr,
+        hap_sums,
+        j_stop_by_i,
+        ne,
+        float(n_ind),
+        theta,
+        cutoff,
+    )
     if has_duplicate_positions:
-        rows = _duplicate_compatible_pair_rows(
-            hap_mat,
-            gpos_arr,
-            hap_sums,
-            j_stop_by_i,
-            pos_arr,
-            ne,
-            float(n_ind),
-            theta,
-            cutoff,
+        loci = _loci_from_row_counts(pos_arr, row_counts)
+        diag_pos, diag_val = _diag_from_first_physical_position(pos_arr, diag_shrink)
+        vector_positions, sums = _r2_vector_from_canonical_row_chunks(
+            loci,
+            diag_pos,
+            diag_val,
+            _compact_pair_chunks_by_physical_lo(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                row_counts,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+                COVARIANCE_WRITE_CHUNK_ROWS,
+            ),
         )
-        vector_positions, sums = _r2_vector_from_canonical_rows(rows)
     else:
-        vector_positions = pos_arr
+        vector_positions = _loci_from_row_counts(pos_arr, row_counts)
         sums = _direct_corr_sum_vector_impl(
             hap_mat,
             gpos_arr,
             hap_sums,
             diag_shrink,
             j_stop_by_i,
+            _active_index_from_row_counts(row_counts),
+            int(vector_positions.size),
             ne,
             float(n_ind),
             theta,
@@ -1121,34 +1295,69 @@ def calc_r2_zarr_partition(
     )
     log_memory_checkpoint("calc_r2_zarr_arrays_built", debug=True)
 
-    duplicate_rows = (
-        _duplicate_compatible_pair_rows(
+    duplicate_row_counts: np.ndarray | None = None
+    duplicate_diag_pos: np.ndarray | None = None
+    duplicate_diag_val: np.ndarray | None = None
+    if has_duplicate_positions:
+        duplicate_row_counts = _count_pairwise_ld_by_i_impl(
             hap_mat,
             gpos_arr,
             hap_sums,
             j_stop_by_i,
-            pos_arr,
             ne,
             float(n_ind),
             theta,
             cutoff,
         )
-        if has_duplicate_positions
-        else None
-    )
+        duplicate_diag_pos, duplicate_diag_val = _diag_from_first_physical_position(
+            pos_arr,
+            diag_shrink,
+        )
 
     if vector_output_path is not None:
         vector_start = time.perf_counter()
-        if duplicate_rows is not None:
-            vector_positions, sums = _r2_vector_from_canonical_rows(duplicate_rows)
+        if duplicate_row_counts is not None:
+            assert duplicate_diag_pos is not None
+            assert duplicate_diag_val is not None
+            vector_positions = _loci_from_row_counts(pos_arr, duplicate_row_counts)
+            vector_positions, sums = _r2_vector_from_canonical_row_chunks(
+                vector_positions,
+                duplicate_diag_pos,
+                duplicate_diag_val,
+                _compact_pair_chunks_by_physical_lo(
+                    hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    duplicate_row_counts,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                ),
+            )
         else:
-            vector_positions = pos_arr
+            vector_row_counts = _count_pairwise_ld_by_i_impl(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+            )
+            vector_positions = _loci_from_row_counts(pos_arr, vector_row_counts)
             sums = _direct_corr_sum_vector_impl(
                 hap_mat,
                 gpos_arr,
                 hap_sums,
                 diag_shrink,
                 j_stop_by_i,
+                _active_index_from_row_counts(vector_row_counts),
+                int(vector_positions.size),
                 ne,
                 float(n_ind),
                 theta,
@@ -1175,11 +1384,30 @@ def calc_r2_zarr_partition(
         )
 
     write_start = time.perf_counter()
-    if duplicate_rows is not None:
-        zarr_positions = np.unique(
-            np.concatenate((duplicate_rows.lo, duplicate_rows.hi))
-        ).astype(np.int32, copy=False)
-        row_chunks = iter([_r2_pair_chunk_from_canonical_rows(duplicate_rows)])
+    if duplicate_row_counts is not None:
+        assert duplicate_diag_pos is not None
+        assert duplicate_diag_val is not None
+        positive_diag = duplicate_diag_val > 0.0
+        zarr_diag_pos = duplicate_diag_pos[positive_diag]
+        zarr_diag_val = duplicate_diag_val[positive_diag]
+        zarr_positions = zarr_diag_pos.astype(np.int32, copy=False)
+        row_chunks = _r2_pair_chunks_from_canonical_stream(
+            _compact_pair_chunks_by_physical_lo(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                duplicate_row_counts,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+                compact_chunk_rows,
+            ),
+            zarr_diag_pos,
+            zarr_diag_val,
+        )
     else:
         zarr_positions = pos_arr
         row_chunks = _r2_pair_chunks_from_covariance(
@@ -1304,6 +1532,9 @@ def calc_covariance(
     assume_sorted_unique_rows = bool(
         pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
     )
+    assume_sorted_rows = bool(
+        pos_arr.size <= 1 or np.all(pos_arr[1:] >= pos_arr[:-1])
+    )
 
     if compact_output and assume_sorted_unique_rows:
         write_start = time.perf_counter()
@@ -1341,6 +1572,7 @@ def calc_covariance(
             output_path.unlink(missing_ok=True)
             log_debug("calc_covariance compact_single_pass_failed using fallback")
 
+    if compact_output and assume_sorted_rows:
         count_start = time.perf_counter()
         row_counts = _count_pairwise_ld_by_i_impl(
             hap_mat,
@@ -1364,31 +1596,56 @@ def calc_covariance(
 
         write_start = time.perf_counter()
         dataset_chunk_rows = min(HDF5_DATASET_CHUNK_ROWS, n_pairs) if n_pairs else 0
-        write_compact_covariance_partition_hdf5_chunks(
-            output_path,
-            positions=pos_arr,
-            row_counts=row_counts,
-            row_chunks=_compact_pair_chunks(
-                hap_mat,
-                gpos_arr,
-                hap_sums,
-                j_stop_by_i,
-                pos_arr,
-                row_counts,
-                ne,
-                float(n_ind),
-                theta,
-                cutoff,
-                compact_chunk_rows,
-            ),
-            chunk_rows=compact_chunk_rows,
-        )
+        if assume_sorted_unique_rows:
+            write_compact_covariance_partition_hdf5_chunks(
+                output_path,
+                positions=pos_arr,
+                row_counts=row_counts,
+                row_chunks=_compact_pair_chunks(
+                    hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    row_counts,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                ),
+                chunk_rows=compact_chunk_rows,
+            )
+            duplicate_stream = False
+        else:
+            unique_positions = np.unique(pos_arr).astype(pos_arr.dtype, copy=False)
+            n_pairs = write_compact_covariance_partition_hdf5_append(
+                output_path,
+                positions=unique_positions,
+                row_chunks=_compact_pair_chunks_by_physical_lo(
+                    hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    row_counts,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                ),
+                chunk_rows=compact_chunk_rows,
+            )
+            duplicate_stream = True
+            dataset_chunk_rows = min(HDF5_DATASET_CHUNK_ROWS, n_pairs) if n_pairs else 0
         log_debug(
             "calc_covariance compact_hdf5_written "
             f"n_pairs={n_pairs} output_bytes={output_path.stat().st_size} "
             f"dataset_chunk_rows={dataset_chunk_rows} "
             f"write_chunk_rows={compact_chunk_rows} "
             "single_pass=false "
+            f"duplicate_stream={duplicate_stream} "
             f"seconds={time.perf_counter() - write_start:.3f} "
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
         )

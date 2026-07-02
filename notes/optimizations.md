@@ -36,15 +36,6 @@ worker paths. Candidate scoring itself is not a meaningful bottleneck. At this
 point, large additional runtime wins are unlikely without deeper rewrites of
 covariance kernels/storage layout or the local-search row-read strategy.
 
-The newest experimental work compares pair-cache strategies directly.
-`r2-zarr` is currently the fastest reported path, but the latest run sizes were
-still 14G for `r2_zarr` versus 16G for both HDF5 modes. The normalized cache
-removes some metadata/coordinate overhead but remains a large retained-pair
-cache. A new `r2-nocache` mode avoids writing pair rows entirely: it writes
-direct vector fragments, then recomputes normalized `r2` streams from the
-reference VCF/BCF for metric and local search. This tests whether saved
-pair-cache I/O can outweigh extra LD recomputation on real storage.
-
 ## Main Improvements
 
 ### 1. Faster Pairwise LD Kernel
@@ -158,12 +149,6 @@ metric passes fell from roughly 71-128 seconds total per chromosome to roughly
 14-25 seconds total, without the RSS inflation seen from local-search worker
 fan-out.
 
-Experimental `--pair-cache r2-nocache` uses the same metric formula but
-recomputes normalized `r2` rows directly from the reference panel instead of
-reading HDF5/Zarr pair rows. This is exact with respect to the float r2 paths
-and can reduce disk usage sharply, but it trades away cache reuse and currently
-streams in one process.
-
 ### 7. Selective Breakpoint Subsets
 
 The default `ldetect2 run --subset fourier_ls` computes only the raw Fourier
@@ -207,72 +192,7 @@ slower, and HDF5 read calls did not materially fall. That micro-optimization was
 reverted; future local-search work should focus on reducing actual HDF5 row
 read amplification or duplicate filtering cost.
 
-The same accumulator now has experimental r2-backed inputs:
-
-- `--pair-cache r2-zarr` streams pre-normalized float64 r2 rows from Zarr;
-- `--pair-cache r2-nocache` recomputes those rows from the VCF/BCF on demand.
-
-Both paths preserve the same partition ownership and duplicate-pair
-first-precedence semantics as HDF5. `r2-nocache` is useful for benchmarking
-whether avoiding large cache write/read I/O is faster than recomputing rows.
-
-### 9. Direct Vector and Pair-Cache Modes
-
-The direct vector implementation computes the Step 3 antidiagonal vector during
-partition LD generation and writes ownership-bounded vector fragments. It is
-used automatically by the experimental r2 pair-cache modes:
-
-| Mode | Pair storage | Vector path | Intended use |
-| --- | --- | --- | --- |
-| `hdf5` + `matrix` | compact HDF5 covariance | matrix-to-vector | Default compatibility path |
-| `hdf5` + `direct` | compact HDF5 covariance | direct fragments | Compare direct vector while keeping HDF5 metric/local-search |
-| `r2-zarr` | normalized float64 r2 Zarr | direct fragments | Fast reusable r2 cache |
-| `r2-nocache` | none | direct fragments | Low-disk recompute benchmark |
-
-Reported run directory sizes were 14G for `r2_zarr` and 16G for both HDF5
-modes. The r2-Zarr path is therefore faster but not fundamentally tiny because
-it still stores one float64 value per retained pair. The pair set is already
-banded by the Wen/Stephens effective range and cutoff predicate; additional
-distance/r2 truncation would be approximate unless it exactly matches that
-predicate.
-
-The r2-Zarr cache now uses a compact version-2 layout for new writes:
-
-- diagonal `r2=1` rows are implicit through a positive-diagonal `diag_idx`
-  array, so logical readers still synthesize diagonal rows while storage keeps
-  only off-diagonal `r2` values;
-- off-diagonal upper endpoints are stored as `hi_delta = hi_idx - lo_idx`
-  instead of absolute `hi_idx`;
-- `ldetect2 run --pair-cache r2-zarr` consolidates partition r2 groups into a
-  chromosome-level `owned_pairs` group, then removes the partition groups. The
-  owned cache streams source partitions in deterministic order and keeps
-  first-retained-pair precedence for duplicate physical pairs. Metric reads the
-  same table through the original lower-endpoint plus partition-end ownership
-  windows; local search replays active partition extent filters against the
-  owned table before duplicate filtering;
-- stronger codecs remain empirical. `ldetect2 run --pair-cache r2-zarr` exposes
-  `--r2-zarr-compressor {default,lz4-bitshuffle,zstd-bitshuffle}`. The default
-  intentionally leaves current Zarr codec behavior unchanged; explicit codecs
-  are for size/runtime benchmarking.
-
-`r2-nocache` tests the opposite tradeoff: write almost no pair data and pay CPU
-to recompute rows for metric/local-search. It uses `cyvcf2` for indexed VCF/BCF
-iteration when available, with a tabix-text fallback. To avoid repeated VCF
-decoding inside one local-search group, the implementation keeps short-lived
-decoded partition inputs in memory (`hap_mat`, positions, allele sums,
-diagonal shrinkage, and genetic stop bounds). It still regenerates normalized
-`r2` rows with the same kernels, so this is an exact cache of inputs rather
-than a persisted or approximate pair cache.
-
-The no-cache metric path now has a fused Numba-backed fast path for partitions
-without duplicate physical positions. It computes pair `r2`, breakpoint
-crossing, and metric accumulation inside the LD loop, avoiding materialized row
-chunks. Duplicate-position partitions keep the canonical row-stream fallback so
-legacy first-pair precedence is preserved. Local-search dense accumulation also
-uses a Numba direct accumulator after filtering and deduplication, so it avoids
-sort/reduce allocation without changing which pairs contribute.
-
-### 10. Failed or Reverted Optimization: Python Duplicate Merge
+### 9. Failed or Reverted Optimization: Python Duplicate Merge
 
 One attempted local-search duplicate optimization moved set-union work from
 NumPy into a Python sorted merge loop. Remote profiling showed this was a clear

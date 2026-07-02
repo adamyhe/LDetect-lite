@@ -357,8 +357,10 @@ def iter_prepared_r2_nocache_partition_rows(
     """Yield normalized r2 rows from decoded partition inputs."""
     from ldetect2.shrinkage import (
         _compact_pair_chunks_single_pass,
-        _duplicate_compatible_pair_rows,
-        _r2_pair_chunk_from_canonical_rows,
+        _compact_pair_chunks_by_physical_lo,
+        _count_pairwise_ld_by_i_impl,
+        _diag_from_first_physical_position,
+        _r2_pair_chunks_from_canonical_stream,
         _r2_pair_chunks_from_covariance,
     )
 
@@ -368,26 +370,52 @@ def iter_prepared_r2_nocache_partition_rows(
 
     if prepared.has_duplicate_positions:
         row_start = time.perf_counter()
-        rows = _duplicate_compatible_pair_rows(
+        row_counts = _count_pairwise_ld_by_i_impl(
             prepared.hap_mat,
             prepared.gpos_arr,
             prepared.hap_sums,
             prepared.j_stop_by_i,
-            prepared.pos_arr,
             prepared.config.ne,
             float(prepared.n_ind),
             prepared.theta,
             prepared.config.cutoff,
         )
-        chunk = _r2_pair_chunk_from_canonical_rows(rows)
-        elapsed = time.perf_counter() - row_start
-        profile.duplicate_fallback_seconds += elapsed
-        profile.row_generation_seconds += elapsed
+        diag_pos, diag_val = _diag_from_first_physical_position(
+            prepared.pos_arr,
+            prepared.diag_shrink,
+        )
+        positive_diag = diag_val > 0.0
+        row_chunks = _r2_pair_chunks_from_canonical_stream(
+            _compact_pair_chunks_by_physical_lo(
+                prepared.hap_mat,
+                prepared.gpos_arr,
+                prepared.hap_sums,
+                prepared.j_stop_by_i,
+                prepared.pos_arr,
+                row_counts,
+                prepared.config.ne,
+                float(prepared.n_ind),
+                prepared.theta,
+                prepared.config.cutoff,
+                chunk_rows,
+            ),
+            diag_pos[positive_diag],
+            diag_val[positive_diag],
+        )
         profile.duplicate_fallback_partitions += 1
-        profile.pair_candidates += int(chunk.lo.size)
-        profile.pairs_after_cutoff += int(np.count_nonzero(chunk.lo < chunk.hi))
-        if chunk.lo.size:
-            yield from _split_r2_chunk(chunk, chunk_rows)
+        while True:
+            try:
+                chunk = next(row_chunks)
+            except StopIteration:
+                elapsed = time.perf_counter() - row_start
+                profile.duplicate_fallback_seconds += elapsed
+                profile.row_generation_seconds += elapsed
+                break
+            profile.tile_count += 1
+            profile.max_tile_snps = max(profile.max_tile_snps, int(chunk.lo.size))
+            profile.pair_candidates += int(chunk.lo.size)
+            profile.pairs_after_cutoff += int(np.count_nonzero(chunk.lo < chunk.hi))
+            yield chunk
         return
 
     row_chunks = _r2_pair_chunks_from_covariance(

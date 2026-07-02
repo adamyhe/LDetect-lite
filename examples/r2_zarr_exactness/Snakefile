@@ -4,7 +4,6 @@ This workflow compares:
     matrix_hdf5: compact HDF5 covariance + matrix-to-vector
     direct_hdf5: compact HDF5 covariance + direct vector fragments
     r2_zarr: experimental normalized r2 Zarr cache + direct vector fragments
-    r2_nocache: direct vector fragments + recomputed r2 metric/local-search
 
 The workflow intentionally lives outside ldetect_example/ldetect_original:
 it is an experimental backend benchmark, not a toy fixture reproduction or the
@@ -20,9 +19,7 @@ configfile: "config.yaml"
 CHROMS = [str(chrom) for chrom in config["chromosomes"]]
 POP = config["population"]
 SUBPOPS = config["subpops"]
-MODES = config.get(
-    "modes", ["matrix_hdf5", "direct_hdf5", "r2_zarr", "r2_nocache"]
-)
+MODES = config.get("modes", ["matrix_hdf5", "direct_hdf5", "r2_zarr"])
 BASELINE_MODE = config.get("baseline_mode", "matrix_hdf5")
 RAW_DIR = Path(config["raw_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
@@ -36,7 +33,6 @@ MODE_ARGS = {
     "matrix_hdf5": "--covariance-cache compact --vector-mode matrix --pair-cache hdf5",
     "direct_hdf5": "--covariance-cache compact --vector-mode direct --pair-cache hdf5",
     "r2_zarr": "--covariance-cache compact --pair-cache r2-zarr",
-    "r2_nocache": "--covariance-cache compact --pair-cache r2-nocache",
 }
 
 if BASELINE_MODE not in MODES:

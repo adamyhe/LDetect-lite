@@ -121,6 +121,38 @@ def _duplicate_position_vcf_stream() -> StringIO:
     )
 
 
+def _inactive_middle_vcf_stream() -> StringIO:
+    return StringIO(
+        "\n".join(
+            [
+                "##fileformat=VCFv4.2",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+                "\tsample_a\tsample_b",
+                "1\t100\trs_active_a\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|0",
+                "1\t200\trs_mono_middle\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|0",
+                "1\t300\trs_active_b\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|0",
+                "",
+            ]
+        )
+    )
+
+
+def _inactive_tail_vcf_stream() -> StringIO:
+    return StringIO(
+        "\n".join(
+            [
+                "##fileformat=VCFv4.2",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+                "\tsample_a\tsample_b",
+                "1\t100\trs_active_a\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|0",
+                "1\t200\trs_active_b\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|1",
+                "1\t300\trs_mono_tail\tA\tG\t.\tPASS\t.\tGT\t0|0\t0|0",
+                "",
+            ]
+        )
+    )
+
+
 def _overlapping_vcf_stream(start: int = 100, end: int = 500) -> StringIO:
     records = [
         (100, "rs_a", "0|1", "0|0"),
@@ -199,6 +231,51 @@ def test_calc_covariance_retains_legacy_duplicate_physical_positions(
     )
     np.testing.assert_array_equal(lo_values, np.unique(rows.lo))
     assert rows.lo.tolist().count(100) > 0
+
+
+def test_calc_covariance_duplicate_compact_matches_full_rows(
+    tmp_path: Path,
+) -> None:
+    """Duplicate-compatible compact streaming should match full canonical rows."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    full_path = tmp_path / "duplicate-full.h5"
+    compact_path = tmp_path / "duplicate-compact.h5"
+    calc_covariance(
+        vcf_stream=_duplicate_position_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=full_path,
+        cutoff=1e-7,
+    )
+    calc_covariance(
+        vcf_stream=_duplicate_position_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=compact_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compact_chunk_rows=2,
+    )
+
+    with open_covariance_reader(full_path, 100, 300) as full_reader:
+        full_rows = full_reader.read_all()
+        full_diag = full_reader.read_diagonal()
+        full_loci = full_reader.read_loci()
+    with open_covariance_reader(compact_path, 100, 300) as compact_reader:
+        compact_rows = compact_reader.read_all()
+        compact_diag = compact_reader.read_diagonal()
+        compact_loci = compact_reader.read_loci()
+
+    np.testing.assert_array_equal(compact_rows.lo, full_rows.lo)
+    np.testing.assert_array_equal(compact_rows.hi, full_rows.hi)
+    np.testing.assert_allclose(compact_rows.shrink_ld, full_rows.shrink_ld)
+    np.testing.assert_array_equal(compact_diag[0], full_diag[0])
+    np.testing.assert_allclose(compact_diag[1], full_diag[1])
+    np.testing.assert_array_equal(compact_loci, full_loci)
 
 
 def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:
@@ -369,6 +446,90 @@ def test_calc_covariance_vector_matches_matrix_to_vector(tmp_path: Path) -> None
         assert value == pytest.approx(matrix[pos])
 
 
+def test_calc_covariance_vector_uses_matrix_loci_for_centers(tmp_path: Path) -> None:
+    """Inactive VCF positions must not shift direct antidiagonal centers."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "store"
+    chrom = "chr1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+
+    covariance_path = chrom_dir / f"{chrom}.100.300.h5"
+    direct_path = tmp_path / "direct-vector.txt.gz"
+    matrix_path = tmp_path / "matrix-vector.txt.gz"
+    calc_covariance(
+        vcf_stream=_inactive_middle_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=covariance_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance_vector(
+        vcf_stream=_inactive_middle_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=direct_path,
+        cutoff=1e-7,
+    )
+    MatrixAnalysis(chrom, CovarianceStore(root=root)).calc_diag_lean(matrix_path)
+
+    direct = _read_vector(direct_path)
+    matrix = _read_vector(matrix_path)
+    assert 200 not in direct
+    assert direct.keys() == matrix.keys()
+    for pos, value in direct.items():
+        assert value == pytest.approx(matrix[pos])
+
+
+def test_calc_covariance_vector_excludes_final_active_locus_by_default(
+    tmp_path: Path,
+) -> None:
+    """Final fragments should match matrix flushing when snp_last is inactive."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "store"
+    chrom = "chr1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+
+    covariance_path = chrom_dir / f"{chrom}.100.300.h5"
+    direct_path = tmp_path / "direct-vector.txt.gz"
+    matrix_path = tmp_path / "matrix-vector.txt.gz"
+    calc_covariance(
+        vcf_stream=_inactive_tail_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=covariance_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance_vector(
+        vcf_stream=_inactive_tail_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=direct_path,
+        cutoff=1e-7,
+    )
+    MatrixAnalysis(chrom, CovarianceStore(root=root)).calc_diag_lean(matrix_path)
+
+    direct = _read_vector(direct_path)
+    matrix = _read_vector(matrix_path)
+    assert 200 not in direct
+    assert direct.keys() == matrix.keys()
+    for pos, value in direct.items():
+        assert value == pytest.approx(matrix[pos])
+
+
 def test_calc_covariance_vector_duplicate_positions_match_matrix_to_vector(
     tmp_path: Path,
 ) -> None:
@@ -464,6 +625,53 @@ def test_calc_r2_zarr_partition_matches_covariance_normalization(
     assert set(zip(lo.tolist(), hi.tolist(), strict=True)) == set(expected)
     for lo_pos, hi_pos, value in zip(lo, hi, r2, strict=True):
         assert value == pytest.approx(expected[(int(lo_pos), int(hi_pos))])
+
+
+def test_calc_r2_zarr_partition_vector_uses_matrix_loci_for_centers(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "store"
+    zarr_root = tmp_path / "zarr"
+    chrom = "chr1"
+    chrom_dir = root / chrom
+    chrom_dir.mkdir(parents=True)
+    (root / f"{chrom}_partitions.txt").write_text("100 300\n")
+
+    covariance_path = chrom_dir / f"{chrom}.100.300.h5"
+    direct_path = tmp_path / "r2-zarr-vector.txt.gz"
+    matrix_path = tmp_path / "matrix-vector.txt.gz"
+    calc_covariance(
+        vcf_stream=_inactive_middle_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=covariance_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_r2_zarr_partition(
+        vcf_stream=_inactive_middle_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_root=zarr_root,
+        name=chrom,
+        start=100,
+        end=300,
+        cutoff=1e-7,
+        vector_output_path=direct_path,
+    )
+    MatrixAnalysis(chrom, CovarianceStore(root=root)).calc_diag_lean(matrix_path)
+
+    direct = _read_vector(direct_path)
+    matrix = _read_vector(matrix_path)
+    assert 200 not in direct
+    assert direct.keys() == matrix.keys()
+    for pos, value in direct.items():
+        assert value == pytest.approx(matrix[pos])
 
 
 def test_calc_r2_zarr_partition_duplicate_positions_match_covariance(

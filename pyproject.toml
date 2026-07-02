@@ -26,7 +26,6 @@ dependencies = [
     "numba>=0.57",
     "h5py>=3.10",
     "zarr<3",
-    "cyvcf2>=0.31",
 ]
 
 [project.optional-dependencies]

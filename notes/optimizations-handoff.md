@@ -32,9 +32,6 @@ partition/chunk/window or stay opt-in until remote profiles prove otherwise.
 | Horizontal aggregation | Implemented and remotely profiled | Dense path keeps dictionary growth out of the hot path, but vertical/horizontal buckets include new dense accumulation detail. |
 | Duplicate merge path | Reverted and remotely profiled | `dedup_merge_seconds` is back to zero; do not reintroduce the Python sorted merge. |
 | Multiprocessing in Step 3/4 | Step 3 and metric workers remotely profiled | `--matrix-workers=4` gives the useful runtime win without material RSS inflation; `--metric-workers=4` is now useful for metric passes; `local-search-workers=4` inflates RSS and should stay off by default. |
-| Direct vector mode | Implemented and experimental | `--vector-mode direct` writes ownership-bounded vector fragments during Step 2. `--pair-cache r2-zarr` and `--pair-cache r2-nocache` force this mode. |
-| r2-Zarr pair cache | Implemented and experimental | Fastest downloaded path so far, but still writes a large pair cache: 14G vs 16G for direct/full HDF5 in the latest reported run. |
-| r2-nocache pair mode | Implemented and experimental | Writes direct vector fragments only, then recomputes normalized `r2` rows from the VCF/BCF for metric/local-search. Uses `cyvcf2` when possible and falls back to tabix text. Local search now caches decoded partition inputs for each group, not pair rows. |
 
 ## Working Change Notes
 
@@ -95,15 +92,15 @@ Do not add flattened-log layout support. Keep chromosome-prefixed filenames.
 
 Current production policy:
 
-- duplicate physical VCF positions are retained through pairwise LD, matching
-  legacy `ldetect` input behavior;
-- duplicate physical endpoint pairs are resolved later with first-row
-  precedence through the canonical row handler;
+- duplicate physical VCF positions are collapsed before pairwise LD;
 - compact covariance rows are canonical sorted `(lo, hi)`;
-- direct vector, r2-Zarr, and r2-nocache paths share the same duplicate-aware
-  fallback when duplicate physical positions appear;
-- HDF5/r2 local search keeps a duplicate-safe row-stream boundary and preserves
+- HDF5 local search keeps a duplicate-safe row-stream boundary and preserves
   first-retained-pair precedence across partitions/chunks.
+
+Known divergence from original `ldetect` on duplicate physical positions is
+still acknowledged. The current changes do not make it substantially harder to
+fix later because duplicate policy is centralized at covariance generation and
+the local-search row stream boundary.
 
 Avoid:
 
@@ -255,105 +252,6 @@ The profile fields show metadata/index time is tiny after compact-index
 discovery. Remaining metric time is row read, normalization, and crossing
 classification; the bounded partition-worker path is implemented and is the
 right default diagnostic scaling knob alongside `matrix_workers=4`.
-
-### Direct Vector, r2-Zarr, and r2-nocache
-
-Recent exactness/runtime work added three experimental comparison modes:
-
-- `matrix_hdf5`: compact HDF5 covariance plus matrix-to-vector;
-- `direct_hdf5`: compact HDF5 covariance plus direct vector fragments;
-- `r2_zarr`: direct vector fragments plus normalized float64 `r2` Zarr rows;
-- `r2_nocache`: direct vector fragments plus on-demand recomputation of
-  normalized `r2` rows for metric/local-search.
-
-The latest reported run directory sizes were:
-
-| Mode | Size |
-| --- | ---: |
-| `r2_zarr` | 14G |
-| `matrix_hdf5` | 16G |
-| `direct_hdf5` | 16G |
-
-Interpretation:
-
-- r2-Zarr is faster but still a pair cache. The payload remains dominated by
-  `float64 r2` for each retained pair, so coordinate compaction alone cannot
-  make it dramatically smaller.
-- The pair streams are already banded by the shrinkage effective range:
-  `j_stop_by_i` bounds the genetic decay window, and the kernel also skips
-  `abs(ds2) < cutoff`. Extra distance/r2 banding would be approximate unless
-  it exactly reproduces that predicate.
-- New r2-Zarr writes use format version 2: diagonal rows are implicit via
-  `diag_idx`, off-diagonal upper endpoints are stored as `hi_delta`, and
-  `ldetect2 run --pair-cache r2-zarr` consolidates partition groups into a
-  chromosome-level `owned_pairs` cache before deleting the partition groups.
-- `ldetect2 run --pair-cache r2-zarr` now has an opt-in
-  `--r2-zarr-compressor {default,lz4-bitshuffle,zstd-bitshuffle}` knob. The
-  default is unchanged so existing `r2-zarr` runtime comparisons remain valid;
-  explicit codecs are only for cache-size/runtime experiments.
-- `r2-nocache` is the low-disk alternative. It does not write HDF5/Zarr pair
-  rows. Instead, Step 2 writes direct vector fragments, then metrics and local
-  search recompute normalized `r2` streams as needed. This can beat cached
-  modes when pair-cache write/read I/O dominates LD recomputation.
-
-Implementation notes:
-
-- `cyvcf2>=0.31` is now a project dependency and is preferred for no-cache
-  VCF/BCF iteration. The code falls back to `tabix -h` text parsing if cyvcf2
-  is unavailable or cannot read a region.
-- To reduce repeated VCF decoding while preserving exactness, no-cache local
-  search now stores a short-lived decoded partition object containing
-  `hap_mat`, physical/genetic positions, allele sums, diagonal shrinkage, and
-  genetic stop bounds. Normalized `r2` rows are still regenerated by the same
-  kernels and duplicate-position canonicalization policy; no pair rows are
-  persisted or approximated.
-- The no-cache metric path now uses one recompute pass per partition and
-  derives the metric denominator loci from the owned row stream, avoiding the
-  previous separate index/discovery recompute pass.
-- The no-cache metric path now has a fused Numba-backed non-duplicate fast path
-  that computes pair `r2`, breakpoint crossing, and metric accumulation inside
-  the LD loop without materializing `R2RowChunk` arrays. Partitions with
-  duplicate physical positions intentionally fall back to the canonical row
-  stream to preserve first-physical-pair precedence.
-- Local-search dense accumulation now uses a Numba-backed direct accumulator
-  after eligibility filtering and duplicate-pair filtering have already run.
-  This keeps dedup semantics unchanged while avoiding per-chunk sort/reduce
-  allocations in the dense accumulator.
-- `r2-nocache` currently streams in one process for metric and local-search
-  recompute. It ignores metric/local-search worker fan-out for now.
-- `r2-nocache` does not support Decimal/high-precision mode.
-- The benchmark workflow in `examples/r2_zarr_exactness` now includes
-  `r2_nocache` alongside the three cached modes.
-
-Implemented exact r2-Zarr size reductions:
-
-1. Implicit diagonal rows. Format v2 stores only positive-diagonal locus indexes
-   in `diag_idx`; `r2=1` diagonal rows are synthesized by readers. This keeps
-   local-search locus bookkeeping compatible without writing one float64 value
-   per diagonal row.
-2. `hi_delta` coordinates. Off-diagonal rows store
-   `hi_delta = hi_idx - lo_idx`; readers reconstruct `hi` from
-   `positions[lo_idx + hi_delta]`. Validators reject overflow and require
-   canonical sorted endpoint rows.
-3. Chromosome owned cache. `write_r2_zarr_owned_cache()` streams partition
-   groups in partition order, buffers only lower endpoints that may still
-   appear in future overlapping partitions, and writes a sorted `owned_pairs`
-   group with first-retained-pair precedence. `ldetect2 run --pair-cache
-   r2-zarr` builds this group after partition workers complete and deletes the
-   partition groups to remove overlap duplication from the final cache.
-
-Exactness notes:
-
-- Metric still applies the original lower-endpoint ownership windows and the
-  source partition end bound when reading `owned_pairs`; otherwise a
-  chromosome-level table would include rows whose lower endpoint is owned by a
-  partition but whose upper endpoint was outside that partition in the HDF5
-  path.
-- Local search replays active partition extent filters against `owned_pairs`
-  before duplicate filtering. This keeps the old active-partition geometry while
-  avoiding duplicate overlap storage.
-- The v2 reader intentionally breaks v1 cache compatibility for size and
-  simplicity. Regenerate experimental r2-Zarr caches after this change.
 
 ## Latest Downloaded Remote Profile
 

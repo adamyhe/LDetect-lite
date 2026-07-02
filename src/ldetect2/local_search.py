@@ -2316,14 +2316,10 @@ class LocalSearch:
             self.precompute_stats.accumulator_seconds += (
                 time.perf_counter() - accumulator_start
             )
-        seen_profiles: set[int] = set()
         for partition in local_partitions:
-            profile_id = id(partition.prepared)
-            if profile_id in seen_profiles:
-                continue
-            seen_profiles.add(profile_id)
+            before = profile_before[id(partition.prepared)]
             self.precompute_stats.absorb_nocache_profile(
-                partition.prepared.profile.delta(profile_before[profile_id])
+                partition.prepared.profile.delta(before)
             )
         self.start_locus = start_locus
         self.start_locus_index = start_locus_index
