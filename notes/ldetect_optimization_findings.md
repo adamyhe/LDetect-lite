@@ -1,5 +1,10 @@
 # LDetect Optimization Findings
 
+Status: historical broad survey. This note is useful background, but newer
+active guidance lives in `notes/README.md`, especially
+`optimizations-handoff.md`, `r2-zarr-cache-optimization-plan.md`, and
+`nocache-optimization-findings.md`.
+
 This document summarizes a technical audit of the [LDetect codebase](https://bitbucket.org/nygcresearch/ldetect/src/master/) (Berisa & Pickrell 2016), covering performance bottlenecks, numerical issues, and architectural improvements. It is intended as a specification for a coding agent tasked with rewriting or refactoring the pipeline.
 
 ---

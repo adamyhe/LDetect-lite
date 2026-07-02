@@ -1,5 +1,9 @@
 # ldetect2 Implementation Plan
 
+Status: historical. This was the original package/CLI port plan. The
+implemented codebase and `AGENTS.md` are now the source of truth for current
+architecture. For active optimization work, start with `notes/README.md`.
+
 ## Context
 
 Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldetect2/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:

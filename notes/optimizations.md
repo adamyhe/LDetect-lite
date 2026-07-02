@@ -2,8 +2,8 @@
 
 This document is the human-readable optimization summary for `ldetect2`. It is
 intended for reports, write-ups, and project context. Detailed agent handoff
-notes, active implementation plans, and profiling runbooks live in
-`notes/optimizations-handoff.md`.
+notes, active implementation plans, and profiling runbooks are indexed in
+`notes/README.md`.
 
 ## Executive Summary
 
