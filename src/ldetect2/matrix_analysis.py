@@ -85,6 +85,7 @@ class MatrixAnalysis:
         self,
         out_path: Path,
         covariance_cache: ChromosomeCovariance | None = None,
+        matrix_workers: int = 1,
     ) -> None:
         """Compute the diagonal correlation-sum vector, writing output incrementally.
 
@@ -92,7 +93,11 @@ class MatrixAnalysis:
         (gzipped TSV: position \\t corr_sum) as each partition is processed.
         """
         if _USE_ARRAY_DIAG:
-            self.calc_diag_array(out_path, covariance_cache=covariance_cache)
+            self.calc_diag_array(
+                out_path,
+                covariance_cache=covariance_cache,
+                matrix_workers=matrix_workers,
+            )
             return
         self._calc_diag_lean_legacy(out_path)
 
@@ -100,6 +105,7 @@ class MatrixAnalysis:
         self,
         out_path: Path,
         covariance_cache: ChromosomeCovariance | None = None,
+        matrix_workers: int = 1,
     ) -> None:
         """Compute the diagonal correlation-sum vector from partition arrays."""
         self.dynamic_delete = True
@@ -112,6 +118,7 @@ class MatrixAnalysis:
             snp_last=self.snp_last,
             out_path=out_path,
             covariance_cache=covariance_cache,
+            matrix_workers=matrix_workers,
         )
         self.calculation_complete = True
 

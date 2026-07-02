@@ -3,7 +3,7 @@
 
 Example:
     tabix -h data/raw/ALL.chr2...genotypes.vcf.gz 2:39967768-40067768 |
-    python scripts/snp_filter_diagnostics.py \
+    uv run python scripts/snp_filter_diagnostics.py \
         --vcf - \
         --individuals resources/EUR_inds.txt \
         --genetic-map data/maps/chr2.interpolated_genetic_map.gz \

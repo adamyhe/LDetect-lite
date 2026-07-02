@@ -53,6 +53,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         action="store_true",
         help="Write a PNG heatmap alongside the output file.",
     )
+    p.add_argument(
+        "--matrix-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for HDF5 matrix-to-vector partition computation "
+            "(default: 1)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -74,7 +84,7 @@ def _run(args: argparse.Namespace) -> int:
             analysis.calc_diag()
             analysis.write_output_to_file(args.output)
         else:
-            analysis.calc_diag_lean(args.output)
+            analysis.calc_diag_lean(args.output, matrix_workers=args.matrix_workers)
     else:
         raise NotImplementedError("vert mode is deprecated; use diag")
 

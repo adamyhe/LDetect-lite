@@ -18,7 +18,7 @@ class CovarianceStore:
         <root>/
             <name>_partitions.txt      # space-delimited start/end pairs
             <name>/
-                <name>.<start>.<end>.npz  # compressed NumPy covariance files
+                <name>.<start>.<end>.h5  # HDF5 covariance partition files
     """
 
     root: Path
@@ -31,7 +31,7 @@ class CovarianceStore:
         return self.root / f"{name}_partitions.txt"
 
     def partition_path(self, name: str, start: int, end: int) -> Path:
-        return self.root / name / f"{name}.{start}.{end}.npz"
+        return self.root / name / f"{name}.{start}.{end}.h5"
 
 
 def read_partitions(name: str, store: CovarianceStore) -> list[tuple[int, int]]:

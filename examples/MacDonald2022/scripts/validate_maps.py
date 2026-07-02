@@ -9,7 +9,7 @@ Checks:
 Writes a TSV summary to --output and prints a table to stdout.
 
 Usage:
-    python scripts/validate_maps.py \
+    uv run python scripts/validate_maps.py \
         --interpolated data/maps/interpolated/chr{1..22}.tab.gz \
         --output results/compare/map_summary.tsv
 """

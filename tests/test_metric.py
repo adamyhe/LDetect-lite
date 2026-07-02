@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.metric import Metric
 
@@ -49,7 +51,17 @@ def _make_store(
                     "j_id": np.array([f"snp{r[1]}" for r in rows]),
                 }
             )
-        np.savez_compressed(chrom_dir / f"chr1.{start}.{end}.npz", **output)
+        write_covariance_partition_hdf5(
+            chrom_dir / f"chr1.{start}.{end}.h5",
+            i_pos=output["i_pos"],
+            j_pos=output["j_pos"],
+            shrink_ld=output["shrink_ld"],
+            naive_ld=output.get("naive_ld"),
+            i_gpos=output.get("i_gpos"),
+            j_gpos=output.get("j_gpos"),
+            i_id=output.get("i_id"),
+            j_id=output.get("j_id"),
+        )
     return CovarianceStore(root=root)
 
 
@@ -120,6 +132,7 @@ def test_metric_covariance_loader_does_not_retain_raw_partitions(
         load_chromosome_covariance,
         load_metric_covariance,
         metric_from_arrays,
+        metric_from_files,
     )
 
     loci = [100, 200, 300, 400, 500]
@@ -134,6 +147,73 @@ def test_metric_covariance_loader_does_not_retain_raw_partitions(
     assert metric_from_arrays(metric_only, [300]) == pytest.approx(
         metric_from_arrays(full, [300])
     )
+    assert metric_from_files(
+        "chr1", store, partitions, 100, 500, [300]
+    ) == pytest.approx(
+        metric_from_arrays(full, [300])
+    )
+
+
+def test_streaming_metric_matches_materialized_array_for_multiple_breakpoints(
+    tmp_path: Path,
+) -> None:
+    from ldetect2._util.covariance_array import (
+        load_metric_covariance,
+        metric_from_arrays,
+        metric_from_files,
+    )
+
+    loci = [100, 200, 300, 400, 500, 600]
+    r2 = {
+        (100, 300): 0.5,
+        (100, 500): 0.2,
+        (200, 400): 0.25,
+        (300, 500): 0.75,
+        (400, 600): 0.125,
+    }
+    partitions = [(100, 400), (200, 600)]
+    store = _make_store(tmp_path, loci, r2, partitions=partitions, compact=True)
+    breakpoints = [250, 450]
+
+    materialized = load_metric_covariance("chr1", store, partitions, 100, 600)
+
+    assert metric_from_files(
+        "chr1", store, partitions, 100, 600, breakpoints
+    ) == pytest.approx(metric_from_arrays(materialized, breakpoints))
+
+
+def test_streaming_metric_workers_match_single_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ldetect2._util.covariance_array as covariance_array
+    from ldetect2._util.covariance_array import metric_from_files
+
+    loci = [100, 200, 300, 400, 500, 600]
+    r2 = {
+        (100, 300): 0.5,
+        (100, 500): 0.2,
+        (200, 400): 0.25,
+        (300, 500): 0.75,
+        (400, 600): 0.125,
+    }
+    partitions = [(100, 400), (200, 600)]
+    store = _make_store(tmp_path, loci, r2, partitions=partitions, compact=True)
+    breakpoints = [250, 450]
+    monkeypatch.setattr(covariance_array, "ProcessPoolExecutor", ThreadPoolExecutor)
+
+    single = metric_from_files("chr1", store, partitions, 100, 600, breakpoints)
+    parallel = metric_from_files(
+        "chr1",
+        store,
+        partitions,
+        100,
+        600,
+        breakpoints,
+        workers=2,
+    )
+
+    assert parallel == pytest.approx(single)
 
 
 def test_metric_accepts_compact_covariance_partition(tmp_path: Path) -> None:

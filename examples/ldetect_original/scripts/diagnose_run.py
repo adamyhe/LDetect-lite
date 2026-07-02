@@ -123,21 +123,17 @@ def summarise_covariance(run_dir: Path, chrom: str) -> dict[str, str]:
     cov_dir = run_dir / chrom
     if not cov_dir.exists():
         cov_dir = run_dir / "cov_matrix" / chrom
-    partitions = sorted(cov_dir.glob(f"{chrom}.*.*.npz"))
+    partitions = sorted(cov_dir.glob(f"{chrom}.*.*.h5"))
     rows = 0
     schemas: set[str] = set()
     total_bytes = 0
+    import h5py
+
     for path in partitions:
         total_bytes += path.stat().st_size
-        with np.load(path) as data:
-            rows += len(data["i_pos"])
-            keys = set(data.files)
-            if {"i_pos", "j_pos", "shrink_ld"} == keys:
-                schemas.add("compact")
-            elif {"i_pos", "j_pos", "shrink_ld"}.issubset(keys):
-                schemas.add("full")
-            else:
-                schemas.add("unknown")
+        with h5py.File(path, "r") as h5:
+            rows += int(h5["covariance/lo"].shape[0])
+            schemas.add("compact" if bool(h5.attrs.get("compact", False)) else "full")
     return {
         "cov_partitions": str(len(partitions)),
         "cov_rows": str(rows),

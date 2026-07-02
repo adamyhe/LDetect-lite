@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+_VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     p = subparsers.add_parser(
@@ -85,6 +87,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--metric-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for streaming metric row passes "
+            "(default: 1)."
+        ),
+    )
+    p.add_argument(
         "--high-precision",
         action="store_true",
         help="Use 50-digit Decimal arithmetic for local search (slower).",
@@ -95,6 +107,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         default=None,
         metavar="N",
         help="Direct target breakpoint count (overrides --n-snps-bw-bpoints).",
+    )
+    p.add_argument(
+        "--subset",
+        choices=_VALID_SUBSETS,
+        action="append",
+        default=None,
+        metavar="SUBSET",
+        help=(
+            "Breakpoint subset to compute. Repeat to compute multiple subsets. "
+            "By default, all subsets are computed for backward compatibility."
+        ),
     )
     p.set_defaults(func=_run)
 
@@ -116,7 +139,9 @@ def _run(args: argparse.Namespace) -> int:
         trackback_step=args.trackback_step,
         init_search_location=args.init_search_loc,
         workers=args.workers,
+        metric_workers=args.metric_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
+        subsets=set(args.subset) if args.subset else None,
     )
     return 0

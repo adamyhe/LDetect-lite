@@ -11,7 +11,7 @@ Metrics reported (overall and per chromosome):
   - Jaccard index on the set of block boundaries (within tolerance)
 
 Usage:
-    python scripts/compare_blocks.py \
+    uv run python scripts/compare_blocks.py \
         --ours    results/EUR_LD_blocks.bed \
         --ref     resources/deCODE_EUR_LD_blocks.bed \
         --output  results/compare/block_comparison.tsv \

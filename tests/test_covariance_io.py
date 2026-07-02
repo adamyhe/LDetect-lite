@@ -16,6 +16,10 @@ from ldetect2.io.covariance import (
     read_partition_into_matrix,
     read_partition_into_matrix_lean,
 )
+from ldetect2.io.covariance_hdf5 import (
+    open_covariance_reader,
+    write_covariance_partition_hdf5,
+)
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.matrix_analysis import MatrixAnalysis
 
@@ -30,15 +34,15 @@ def _make_store(tmp_path: Path) -> tuple[CovarianceStore, list[tuple[int, int]]]
     root.mkdir(parents=True)
     (root / "testchr").mkdir()
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    npz_path = root / "testchr" / "testchr.100.300.npz"
-    np.savez_compressed(
-        npz_path,
+    h5_path = root / "testchr" / "testchr.100.300.h5"
+    write_covariance_partition_hdf5(
+        h5_path,
         i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
         j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9]),
         i_gpos=np.array([1.0, 1.0, 2.0, 2.0, 3.0]),
         j_gpos=np.array([1.0, 2.0, 2.0, 3.0, 3.0]),
         naive_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9]),
-        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9]),
         i_id=np.array(["snpA", "snpA", "snpB", "snpB", "snpC"]),
         j_id=np.array(["snpA", "snpB", "snpB", "snpC", "snpC"]),
     )
@@ -55,9 +59,9 @@ def _make_compact_store(
     root.mkdir(parents=True)
     (root / "testchr").mkdir()
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    npz_path = root / "testchr" / "testchr.100.300.npz"
-    np.savez_compressed(
-        npz_path,
+    h5_path = root / "testchr" / "testchr.100.300.h5"
+    write_covariance_partition_hdf5(
+        h5_path,
         i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
         j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
         shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64),
@@ -65,6 +69,108 @@ def _make_compact_store(
     store = CovarianceStore(root=root)
     partitions: list[tuple[int, int]] = [(100, 300)]
     return store, partitions
+
+
+def test_hdf5_writer_trusted_canonical_path_matches_generic_path(
+    tmp_path: Path,
+) -> None:
+    """Trusted writer mode should preserve canonical rows without reordering."""
+    i_pos = np.array([100, 100, 200, 200, 300], dtype=np.int32)
+    j_pos = np.array([100, 200, 200, 300, 300], dtype=np.int32)
+    shrink_ld = np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64)
+    generic = tmp_path / "generic.h5"
+    trusted = tmp_path / "trusted.h5"
+
+    write_covariance_partition_hdf5(
+        generic,
+        i_pos=i_pos,
+        j_pos=j_pos,
+        shrink_ld=shrink_ld,
+    )
+    write_covariance_partition_hdf5(
+        trusted,
+        i_pos=i_pos,
+        j_pos=j_pos,
+        shrink_ld=shrink_ld,
+        assume_canonical_sorted_unique=True,
+    )
+
+    import h5py
+
+    with h5py.File(generic, "r") as generic_h5, h5py.File(trusted, "r") as trusted_h5:
+        for dataset in (
+            "covariance/lo",
+            "covariance/hi",
+            "covariance/shrink_ld",
+            "index/diag_pos",
+            "index/diag_val",
+            "index/lo_values",
+            "index/lo_offsets",
+        ):
+            np.testing.assert_array_equal(
+                generic_h5[dataset][:], trusted_h5[dataset][:]
+            )
+
+
+def test_hdf5_reader_accepts_files_without_layout_attrs(tmp_path: Path) -> None:
+    """Full-schema and legacy compact HDF5 files predate layout debug attrs."""
+    path = tmp_path / "legacy.h5"
+    write_covariance_partition_hdf5(
+        path,
+        i_pos=np.array([100, 100, 200], dtype=np.int32),
+        j_pos=np.array([100, 200, 200], dtype=np.int32),
+        shrink_ld=np.array([1.0, 0.5, 1.0], dtype=np.float64),
+    )
+
+    import h5py
+
+    with h5py.File(path, "r") as h5:
+        assert "dataset_chunk_rows" not in h5.attrs
+        assert "write_chunk_rows" not in h5.attrs
+
+    with open_covariance_reader(path, 100, 200) as reader:
+        rows = reader.read_all()
+        loci = reader.read_loci()
+
+    np.testing.assert_array_equal(rows.lo, np.array([100, 100, 200]))
+    np.testing.assert_array_equal(loci, np.array([100, 200]))
+
+
+@pytest.mark.parametrize(
+    ("i_pos", "j_pos", "message"),
+    [
+        (
+            np.array([100, 300], dtype=np.int32),
+            np.array([100, 200], dtype=np.int32),
+            "canonical",
+        ),
+        (
+            np.array([100, 300, 200], dtype=np.int32),
+            np.array([100, 300, 200], dtype=np.int32),
+            "sorted",
+        ),
+        (
+            np.array([100, 200, 200], dtype=np.int32),
+            np.array([100, 200, 200], dtype=np.int32),
+            "duplicates",
+        ),
+    ],
+)
+def test_hdf5_writer_trusted_path_enforces_sorted_unique_rows(
+    tmp_path: Path,
+    i_pos: np.ndarray,
+    j_pos: np.ndarray,
+    message: str,
+) -> None:
+    """Trusted writer mode should fail instead of writing invalid indexes."""
+    with pytest.raises(ValueError, match=message):
+        write_covariance_partition_hdf5(
+            tmp_path / "bad.h5",
+            i_pos=i_pos,
+            j_pos=j_pos,
+            shrink_ld=np.ones(i_pos.size, dtype=np.float64),
+            assume_canonical_sorted_unique=True,
+        )
 
 
 def _make_two_partition_store(
@@ -114,7 +220,17 @@ def _make_two_partition_store(
                     "j_id": np.array([f"snp{row[1]}" for row in rows]),
                 }
             )
-        np.savez_compressed(chrom_dir / f"testchr.{start}.{end}.npz", **output)
+        write_covariance_partition_hdf5(
+            chrom_dir / f"testchr.{start}.{end}.h5",
+            i_pos=output["i_pos"],
+            j_pos=output["j_pos"],
+            shrink_ld=output["shrink_ld"],
+            naive_ld=output.get("naive_ld"),
+            i_gpos=output.get("i_gpos"),
+            j_gpos=output.get("j_gpos"),
+            i_id=output.get("i_id"),
+            j_id=output.get("j_id"),
+        )
     return CovarianceStore(root=root), partitions
 
 
@@ -220,7 +336,7 @@ def test_read_partition_off_diagonal_values(tmp_path):
     assert matrix[200][300] == pytest.approx(0.1)
 
 
-def test_read_partition_lean_accepts_compact_npz(tmp_path):
+def test_read_partition_lean_accepts_compact_hdf5(tmp_path):
     store, partitions = _make_compact_store(tmp_path)
     matrix: dict = {}
     locus_list: list[int] = []
@@ -234,18 +350,18 @@ def test_read_partition_lean_accepts_compact_npz(tmp_path):
     assert matrix[300][300] == pytest.approx(0.9)
 
 
-def test_read_partition_full_rejects_compact_npz(tmp_path):
+def test_read_partition_full_rejects_compact_hdf5(tmp_path):
     store, partitions = _make_compact_store(tmp_path)
     matrix: dict = {}
     locus_list: list[int] = []
 
-    with pytest.raises(ValueError, match="compact covariance partition"):
+    with pytest.raises(ValueError, match="lacks full-metadata"):
         read_partition_into_matrix(
             partitions, 0, matrix, locus_list, "testchr", store, 100, 300
         )
 
 
-def test_matrix_to_vector_lean_accepts_compact_npz(tmp_path):
+def test_matrix_to_vector_lean_accepts_compact_hdf5(tmp_path):
     store, _ = _make_compact_store(tmp_path)
     output_path = tmp_path / "vector.txt.gz"
 
@@ -276,6 +392,46 @@ def test_matrix_to_vector_array_matches_legacy_overlapping_partitions(tmp_path):
     _assert_vectors_close(array_path, legacy_path)
 
 
+@pytest.mark.parametrize("compact", [True, False])
+def test_matrix_to_vector_chunked_hdf5_matches_materialized_cache(
+    tmp_path,
+    monkeypatch,
+    compact,
+):
+    import ldetect2._util.vector_array as vector_array
+
+    monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
+    store, partitions = _make_two_partition_store(tmp_path, compact=compact)
+    chunked_path = tmp_path / "chunked.txt.gz"
+    cache_path = tmp_path / "cache.txt.gz"
+    cache = load_chromosome_covariance("testchr", store, partitions, 100, 800)
+
+    MatrixAnalysis("testchr", store).calc_diag_array(chunked_path)
+    MatrixAnalysis("testchr", store).calc_diag_array(
+        cache_path,
+        covariance_cache=cache,
+    )
+
+    _assert_vectors_close(chunked_path, cache_path)
+
+
+def test_matrix_to_vector_hdf5_workers_match_single_process(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    import ldetect2._util.vector_array as vector_array
+
+    monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
+    monkeypatch.setattr(vector_array, "ProcessPoolExecutor", ThreadPoolExecutor)
+    store, _ = _make_two_partition_store(tmp_path)
+    worker_path = tmp_path / "worker.txt.gz"
+    single_path = tmp_path / "single.txt.gz"
+
+    MatrixAnalysis("testchr", store).calc_diag_array(worker_path, matrix_workers=2)
+    MatrixAnalysis("testchr", store).calc_diag_array(single_path)
+
+    _assert_vectors_close(worker_path, single_path)
+
+
 def test_matrix_to_vector_array_accepts_chromosome_covariance_cache(tmp_path):
     store, partitions = _make_two_partition_store(tmp_path)
     cached_path = tmp_path / "cached.txt.gz"
@@ -291,7 +447,7 @@ def test_matrix_to_vector_array_accepts_chromosome_covariance_cache(tmp_path):
     _assert_vectors_close(cached_path, file_path)
 
 
-def test_matrix_to_vector_array_accepts_full_npz(tmp_path):
+def test_matrix_to_vector_array_accepts_full_hdf5(tmp_path):
     store, _ = _make_two_partition_store(tmp_path, compact=False)
     output_path = tmp_path / "vector.txt.gz"
 
@@ -300,7 +456,10 @@ def test_matrix_to_vector_array_accepts_full_npz(tmp_path):
     assert _read_vector(output_path)
 
 
-def test_matrix_to_vector_array_respects_explicit_snp_range(tmp_path):
+def test_matrix_to_vector_array_respects_explicit_snp_range(tmp_path, monkeypatch):
+    import ldetect2._util.vector_array as vector_array
+
+    monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
     store, _ = _make_two_partition_store(tmp_path)
     array_path = tmp_path / "array.txt.gz"
     legacy_path = tmp_path / "legacy.txt.gz"
@@ -323,8 +482,8 @@ def test_matrix_to_vector_array_skips_rows_without_positive_diagonal(
     chrom_dir = root / "testchr"
     chrom_dir.mkdir(parents=True)
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    np.savez_compressed(
-        chrom_dir / "testchr.100.300.npz",
+    write_covariance_partition_hdf5(
+        chrom_dir / "testchr.100.300.h5",
         i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
         j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
         shrink_ld=np.array([1.0, 0.5, 0.0, 0.2, 1.0], dtype=np.float64),
@@ -336,15 +495,13 @@ def test_matrix_to_vector_array_skips_rows_without_positive_diagonal(
     assert _read_vector(output_path) == {100: pytest.approx(1.0)}
 
 
-def test_matrix_to_vector_array_requires_npz_partition(tmp_path):
+def test_matrix_to_vector_array_requires_hdf5_partition(tmp_path):
     root = tmp_path / "cov"
     chrom_dir = root / "testchr"
     chrom_dir.mkdir(parents=True)
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    with gzip.open(chrom_dir / "testchr.100.300.gz", "wt") as f:
-        f.write("snpA snpA 100 100 0 0 1 1\n")
 
-    with pytest.raises(FileNotFoundError, match="requires .npz covariance"):
+    with pytest.raises(FileNotFoundError, match="requires HDF5 covariance"):
         MatrixAnalysis("testchr", CovarianceStore(root=root)).calc_diag_array(
             tmp_path / "vector.txt.gz"
         )

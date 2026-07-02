@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import csv
-import gzip
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
 
+from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
 
 MiB = 1024 * 1024
@@ -138,22 +137,23 @@ def summarize_covariance(
 
 
 def _read_partition_positions(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    if path.exists():
-        data = np.load(path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Covariance partition {path} is missing. Regenerate covariance "
+            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+        )
+    start, end = _partition_bounds_from_path(path)
+    with open_covariance_reader(path, start, end) as reader:
+        rows = reader.read_all()
         return (
-            np.asarray(data["i_pos"], dtype=np.int64),
-            np.asarray(data["j_pos"], dtype=np.int64),
+            np.asarray(rows.lo, dtype=np.int64),
+            np.asarray(rows.hi, dtype=np.int64),
         )
 
-    text_path = path.with_suffix(".gz")
-    i_pos: list[int] = []
-    j_pos: list[int] = []
-    with gzip.open(text_path, "rt") as f:
-        reader = csv.reader(f, delimiter=" ")
-        for row in reader:
-            i_pos.append(int(row[2]))
-            j_pos.append(int(row[3]))
-    return np.asarray(i_pos, dtype=np.int64), np.asarray(j_pos, dtype=np.int64)
+
+def _partition_bounds_from_path(path: Path) -> tuple[int, int]:
+    parts = path.stem.split(".")
+    return int(parts[-2]), int(parts[-1])
 
 
 def _owned_in_range_mask(

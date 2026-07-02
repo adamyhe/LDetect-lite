@@ -14,7 +14,7 @@ Also reports:
   - SNPs only in MacDonald's (positions absent from ours)
 
 Usage:
-    python scripts/compare_maps_ref.py \
+    uv run python scripts/compare_maps_ref.py \
         --ours    data/maps/interpolated/chr{1..22}.tab.gz \
         --ref-dir resources/macdonalds_maps/ \
         --output  results/compare/map_ref_comparison.tsv

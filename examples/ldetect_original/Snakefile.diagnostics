@@ -218,7 +218,7 @@ rule check_reference_beds:
             done
             args="$args --chrom-beds $chrom_args"
         done
-        python scripts/check_reference_beds.py $args --output {output}
+        uv run python scripts/check_reference_beds.py $args --output {output}
         """
 
 
@@ -233,7 +233,7 @@ rule prep_individuals:
         subpops=lambda wc: " ".join(pop_subpops(wc.population)),
     shell:
         """
-        python scripts/prep_individuals.py \
+        uv run python scripts/prep_individuals.py \
             --panel {input.panel} \
             --subpops {params.subpops} \
             --vcf {input.vcf} \
@@ -288,7 +288,7 @@ rule diagnostic_run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 run \
+        uv run ldetect2 run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -324,7 +324,7 @@ rule diagnostic_input_summary:
         population=DIAG_POP,
     shell:
         """
-        python scripts/diagnose_inputs.py \
+        uv run python scripts/diagnose_inputs.py \
             --population {params.population} \
             --chromosome {wildcards.chrom} \
             --raw-vcf {input.raw_vcf} \
@@ -348,7 +348,7 @@ rule diagnostic_summarise_run:
         population=DIAG_POP,
     shell:
         """
-        python scripts/diagnose_run.py \
+        uv run python scripts/diagnose_run.py \
             --run-dir {params.run_dir} \
             --chromosome {wildcards.chrom} \
             --population {params.population} \
@@ -387,7 +387,7 @@ rule diagnostic_run_ldetect2_omni:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        ldetect2 run \
+        uv run ldetect2 run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -421,7 +421,7 @@ rule diagnostic_summarise_omni_run:
         population=DIAG_POP,
     shell:
         """
-        python scripts/diagnose_run.py \
+        uv run python scripts/diagnose_run.py \
             --run-dir {params.run_dir} \
             --chromosome {wildcards.chrom} \
             --population {params.population} \
@@ -439,7 +439,7 @@ rule diagnostic_compare_omni_blocks:
         tolerance=config.get("tolerance", 100_000),
     shell:
         """
-        python scripts/compare_blocks.py \
+        uv run python scripts/compare_blocks.py \
             --ours {input.ours} \
             --ref {input.ref} \
             --output {output} \
@@ -457,7 +457,7 @@ rule diagnostic_compare_blocks:
         tolerance=config.get("tolerance", 100_000),
     shell:
         """
-        python scripts/compare_blocks.py \
+        uv run python scripts/compare_blocks.py \
             --ours {input.ours} \
             --ref {input.ref} \
             --output {output} \
@@ -481,7 +481,7 @@ rule diagnostic_summary:
         control=CONTROL_CHROM,
     shell:
         """
-        python scripts/diagnose_run.py \
+        uv run python scripts/diagnose_run.py \
             --combine-summaries {input.summaries} \
             --combine-comparisons {input.comparisons} \
             --output {output.summary} \
@@ -502,7 +502,7 @@ rule diagnostic_input_summary_all:
         str(DIAG_ROOT / "input_summary.tsv"),
     shell:
         """
-        python scripts/combine_tsv.py \
+        uv run python scripts/combine_tsv.py \
             --input {input.summaries} \
             --output {output}
         """

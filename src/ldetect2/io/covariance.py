@@ -8,13 +8,12 @@ import gzip
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from ldetect2._util.logging import log_debug, log_msg
+from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
 # ---------------------------------------------------------------------------
-# Column indices for the legacy 8-column covariance partition text format:
+# Column indices for row-list insertion helpers:
 #   i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld
 # (Kept for insert_into_matrix* public APIs used in tests and external code.)
 # ---------------------------------------------------------------------------
@@ -31,9 +30,12 @@ _COL_SHRINK = 7
 Matrix = dict[int, Any]
 LocusList = list[int]
 
-_COMPACT_NPZ_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
-_FULL_NPZ_KEYS = frozenset(
-    {"i_pos", "j_pos", "i_gpos", "j_gpos", "naive_ld", "shrink_ld", "i_id", "j_id"}
+_FULL_HDF5_DATASETS = (
+    "covariance/naive_ld",
+    "metadata/i_gpos",
+    "metadata/j_gpos",
+    "metadata/i_id",
+    "metadata/j_id",
 )
 
 
@@ -138,21 +140,14 @@ def _insert_full_values(
             }
 
 
-def _require_npz_keys(
-    path: Path, data: np.lib.npyio.NpzFile, keys: frozenset[str]
-) -> None:
-    missing = sorted(keys - set(data.files))
+def _require_hdf5_datasets(path: Path, h5, datasets: tuple[str, ...]) -> None:
+    missing = sorted(dataset for dataset in datasets if dataset not in h5)
     if not missing:
         return
-    if keys == _FULL_NPZ_KEYS and _COMPACT_NPZ_KEYS.issubset(data.files):
-        raise ValueError(
-            f"{path} is a compact covariance partition and lacks full-schema "
-            f"field(s): {', '.join(missing)}. Full matrix and heatmap readers "
-            "require full covariance partitions; rerun with "
-            "`ldetect2 run --covariance-cache full` or use standalone "
-            "`ldetect2 calc-covariance`."
-        )
-    raise ValueError(f"{path} is missing covariance field(s): {', '.join(missing)}")
+    raise ValueError(
+        f"{path} lacks full-metadata dataset(s): {', '.join(missing)}. Full "
+        "matrix and heatmap readers require full covariance metadata."
+    )
 
 
 def read_partition_into_matrix(
@@ -167,38 +162,41 @@ def read_partition_into_matrix(
     symmetric: bool = False,
 ) -> None:
     path = store.partition_path(name, partitions[p_index][0], partitions[p_index][1])
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Covariance partition {path} is missing. Regenerate covariance "
+            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+        )
     try:
-        if path.exists():
-            with np.load(path) as data:
-                _require_npz_keys(path, data, _FULL_NPZ_KEYS)
-                for ip, jp, ig, jg, naive, shrink, iid, jid in zip(
-                    data["i_pos"],
-                    data["j_pos"],
-                    data["i_gpos"],
-                    data["j_gpos"],
-                    data["naive_ld"],
-                    data["shrink_ld"],
-                    data["i_id"],
-                    data["j_id"],
-                ):
-                    _insert_full_values(
-                        int(ip),
-                        int(jp),
-                        float(ig),
-                        float(jg),
-                        float(naive),
-                        float(shrink),
-                        str(iid),
-                        str(jid),
-                        matrix,
-                        locus_list,
-                        symmetric,
-                    )
-        else:
-            with gzip.open(path.with_suffix(".gz"), "rt") as f:
-                reader = csv.reader(f, delimiter=" ")
-                for row in reader:
-                    insert_into_matrix(row, matrix, locus_list, symmetric)
+        with open_covariance_reader(
+            path, partitions[p_index][0], partitions[p_index][1]
+        ) as reader:
+            h5 = reader.h5
+            _require_hdf5_datasets(path, h5, _FULL_HDF5_DATASETS)
+            rows = reader.read_all()
+            for ip, jp, ig, jg, naive, shrink, iid, jid in zip(
+                rows.lo,
+                rows.hi,
+                h5["metadata/i_gpos"][:],
+                h5["metadata/j_gpos"][:],
+                h5["covariance/naive_ld"][:],
+                rows.shrink_ld,
+                h5["metadata/i_id"].asstr()[:],
+                h5["metadata/j_id"].asstr()[:],
+            ):
+                _insert_full_values(
+                    int(ip),
+                    int(jp),
+                    float(ig),
+                    float(jg),
+                    float(naive),
+                    float(shrink),
+                    str(iid),
+                    str(jid),
+                    matrix,
+                    locus_list,
+                    symmetric,
+                )
     except ValueError:
         raise
     except Exception as exc:
@@ -252,17 +250,18 @@ def read_partition_into_matrix_lean(
     symmetric: bool = False,
 ) -> None:
     path = store.partition_path(name, partitions[p_index][0], partitions[p_index][1])
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Covariance partition {path} is missing. Regenerate covariance "
+            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+        )
     try:
-        if path.exists():
-            with np.load(path) as data:
-                _require_npz_keys(path, data, _COMPACT_NPZ_KEYS)
-                for ip, jp, s in zip(data["i_pos"], data["j_pos"], data["shrink_ld"]):
-                    _insert_lean_values(int(ip), int(jp), float(s), matrix, locus_list)
-        else:
-            with gzip.open(path.with_suffix(".gz"), "rt") as f:
-                reader = csv.reader(f, delimiter=" ")
-                for row in reader:
-                    insert_into_matrix_lean(row, matrix, locus_list)
+        with open_covariance_reader(
+            path, partitions[p_index][0], partitions[p_index][1]
+        ) as reader:
+            rows = reader.read_all()
+            for ip, jp, s in zip(rows.lo, rows.hi, rows.shrink_ld):
+                _insert_lean_values(int(ip), int(jp), float(s), matrix, locus_list)
     except ValueError:
         raise
     except Exception as exc:

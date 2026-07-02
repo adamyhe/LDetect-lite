@@ -1,7 +1,7 @@
 """Compare our generated partition file against the ldetect reference.
 
 Usage:
-    python scripts/compare_partitions.py \
+    uv run python scripts/compare_partitions.py \
         --ours   work/generated_partitions/chr2_partitions \
         --ref    ref/cov_matrix/scripts/chr2_partitions \
         --output results/compare_partitions.tsv
