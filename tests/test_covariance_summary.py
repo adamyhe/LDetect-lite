@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 from pathlib import Path
 
@@ -139,27 +138,6 @@ def test_summarize_covariance_respects_snp_range(tmp_path: Path) -> None:
     assert parts[0].diag_rows == 5
     assert parts[0].offdiag_rows == 4
     assert parts[0].owned_offdiag_rows == 2
-    assert total.unique_loci == 3
-
-
-def test_summarize_covariance_reads_legacy_gzip_partition(tmp_path: Path) -> None:
-    root = tmp_path / "cov"
-    chrom_dir = root / "chr1"
-    chrom_dir.mkdir(parents=True)
-    (root / "chr1_partitions.txt").write_text("100 300\n")
-    with gzip.open(chrom_dir / "chr1.100.300.gz", "wt") as f:
-        f.write("snp100 snp100 100 100 0 0 1 1\n")
-        f.write("snp100 snp200 100 200 0 0 1 0.5\n")
-        f.write("snp200 snp200 200 200 0 0 1 1\n")
-        f.write("snp200 snp300 200 300 0 0 1 0.5\n")
-        f.write("snp300 snp300 300 300 0 0 1 1\n")
-    store = CovarianceStore(root=root)
-
-    parts, total = summarize_covariance("chr1", store)
-
-    assert parts[0].rows == 5
-    assert parts[0].diag_rows == 3
-    assert total.owned_offdiag_rows == 2
     assert total.unique_loci == 3
 
 

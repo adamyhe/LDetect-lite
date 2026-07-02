@@ -13,7 +13,7 @@ from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
 # ---------------------------------------------------------------------------
-# Column indices for the legacy 8-column covariance partition text format:
+# Column indices for row-list insertion helpers:
 #   i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld
 # (Kept for insert_into_matrix* public APIs used in tests and external code.)
 # ---------------------------------------------------------------------------
@@ -162,42 +162,41 @@ def read_partition_into_matrix(
     symmetric: bool = False,
 ) -> None:
     path = store.partition_path(name, partitions[p_index][0], partitions[p_index][1])
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Covariance partition {path} is missing. Regenerate covariance "
+            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+        )
     try:
-        if path.exists():
-            with open_covariance_reader(
-                path, partitions[p_index][0], partitions[p_index][1]
-            ) as reader:
-                h5 = reader.h5
-                _require_hdf5_datasets(path, h5, _FULL_HDF5_DATASETS)
-                rows = reader.read_all()
-                for ip, jp, ig, jg, naive, shrink, iid, jid in zip(
-                    rows.lo,
-                    rows.hi,
-                    h5["metadata/i_gpos"][:],
-                    h5["metadata/j_gpos"][:],
-                    h5["covariance/naive_ld"][:],
-                    rows.shrink_ld,
-                    h5["metadata/i_id"].asstr()[:],
-                    h5["metadata/j_id"].asstr()[:],
-                ):
-                    _insert_full_values(
-                        int(ip),
-                        int(jp),
-                        float(ig),
-                        float(jg),
-                        float(naive),
-                        float(shrink),
-                        str(iid),
-                        str(jid),
-                        matrix,
-                        locus_list,
-                        symmetric,
-                    )
-        else:
-            with gzip.open(path.with_suffix(".gz"), "rt") as f:
-                reader = csv.reader(f, delimiter=" ")
-                for row in reader:
-                    insert_into_matrix(row, matrix, locus_list, symmetric)
+        with open_covariance_reader(
+            path, partitions[p_index][0], partitions[p_index][1]
+        ) as reader:
+            h5 = reader.h5
+            _require_hdf5_datasets(path, h5, _FULL_HDF5_DATASETS)
+            rows = reader.read_all()
+            for ip, jp, ig, jg, naive, shrink, iid, jid in zip(
+                rows.lo,
+                rows.hi,
+                h5["metadata/i_gpos"][:],
+                h5["metadata/j_gpos"][:],
+                h5["covariance/naive_ld"][:],
+                rows.shrink_ld,
+                h5["metadata/i_id"].asstr()[:],
+                h5["metadata/j_id"].asstr()[:],
+            ):
+                _insert_full_values(
+                    int(ip),
+                    int(jp),
+                    float(ig),
+                    float(jg),
+                    float(naive),
+                    float(shrink),
+                    str(iid),
+                    str(jid),
+                    matrix,
+                    locus_list,
+                    symmetric,
+                )
     except ValueError:
         raise
     except Exception as exc:
@@ -251,19 +250,18 @@ def read_partition_into_matrix_lean(
     symmetric: bool = False,
 ) -> None:
     path = store.partition_path(name, partitions[p_index][0], partitions[p_index][1])
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Covariance partition {path} is missing. Regenerate covariance "
+            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+        )
     try:
-        if path.exists():
-            with open_covariance_reader(
-                path, partitions[p_index][0], partitions[p_index][1]
-            ) as reader:
-                rows = reader.read_all()
-                for ip, jp, s in zip(rows.lo, rows.hi, rows.shrink_ld):
-                    _insert_lean_values(int(ip), int(jp), float(s), matrix, locus_list)
-        else:
-            with gzip.open(path.with_suffix(".gz"), "rt") as f:
-                reader = csv.reader(f, delimiter=" ")
-                for row in reader:
-                    insert_into_matrix_lean(row, matrix, locus_list)
+        with open_covariance_reader(
+            path, partitions[p_index][0], partitions[p_index][1]
+        ) as reader:
+            rows = reader.read_all()
+            for ip, jp, s in zip(rows.lo, rows.hi, rows.shrink_ld):
+                _insert_lean_values(int(ip), int(jp), float(s), matrix, locus_list)
     except ValueError:
         raise
     except Exception as exc:

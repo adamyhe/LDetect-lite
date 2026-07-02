@@ -46,13 +46,17 @@ Global options (before the subcommand):
 Options:
 
 - `--ne FLOAT` — effective population size Ne used by the Wen & Stephens shrinkage estimator (default: 11418.0, the CEU/HapMap II value; reproduction configs may override this for non-European populations)
-- `--cov-cutoff FLOAT` — LD pairs with shrinkage correlation below this threshold are not written to disk, reducing storage (default: 1e-7)
-- `--covariance-cache {compact,full}` — partition cache schema for `ldetect2 run` (default: `compact`). Compact caches write only `i_pos`, `j_pos`, and `shrink_ld`, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
+- `--cov-cutoff FLOAT` — LD pairs with absolute shrinkage correlation below this threshold are not written to disk, reducing storage (default: 1e-7)
+- `--covariance-cache {compact,full}` — partition cache schema for `ldetect2 run` (default: `compact`). Compact caches write only canonical position pairs, `shrink_ld`, diagonals, and lookup indexes, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which of the four breakpoint sets to write to the BED file (default: `fourier_ls`; see Step 4 below)
+- `--all-breakpoint-subsets` — compute all four breakpoint sets in the JSON output. By default, `run` computes only the requested `--subset` and its dependencies to avoid unused local-search work.
 - `--workers N` — parallel workers for covariance calculation (default: 1); set to the number of available cores to speed up step 2 significantly
+- `--matrix-workers N` — parallel workers for matrix-to-vector partition processing (default: 1)
 - `--local-search-workers N` — parallel workers for local search (default: 1). Higher values can multiply RAM use because each worker loads its own covariance window.
+- `--metric-workers N` — parallel workers for streaming metric row passes during breakpoint scoring (default: 1)
+- `--high-precision` — use 50-digit Decimal arithmetic for local search instead of the default float path (slower; mainly useful for exact reference comparisons)
 
 ### Step-by-step
 
@@ -87,18 +91,18 @@ tabix -h 1000G.chr2.vcf.gz chr2:39967768-40067768 | \
   uv run ldetect2 calc-covariance \
     --genetic-map chr2.interpolated_genetic_map.gz \
     --individuals eurinds.txt \
-    --output cov_matrix/chr2/chr2.39967768.40067768.npz
+    --output cov_matrix/chr2/chr2.39967768.40067768.h5
 ```
 
 This step must be run once per partition. `ldetect2 run --workers N` runs partitions in parallel automatically.
 
-Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is a compressed NumPy file (`.npz`) with arrays for SNP positions, genetic positions, naive LD, and shrinkage LD.
+Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect2 run` defaults to the compact schema described above.
 
 Arguments:
 - `--genetic-map PATH` — gzipped 3-column map used to convert physical positions to genetic distances (cM) for the shrinkage estimator
 - `--individuals PATH` — plain-text file with one individual ID per line; only these samples are extracted from the VCF
 - `--ne FLOAT` — effective population size for the shrinkage estimator (default: 11418.0)
-- `--cutoff FLOAT` — pairs with shrinkage LD below this are excluded from the output (default: 1e-7)
+- `--cutoff FLOAT` — pairs with absolute shrinkage LD below this are excluded from the output (default: 1e-7)
 
 ---
 
@@ -114,10 +118,11 @@ uv run ldetect2 matrix-to-vector \
 Assembles all partition matrices for a chromosome and reduces them to a 1-D signal: for each SNP position, the sum of squared shrinkage correlations with all other SNPs in its window (the diagonal of the assembled correlation matrix). This produces a `[position, diagonal_sum]` vector over the full chromosome. Positions with many strong LD partners have a high diagonal sum; positions near LD block boundaries where correlations decay have a low diagonal sum. These troughs are the candidate breakpoints detected in step 4.
 
 Arguments:
-- `--dataset-path PATH` — root directory containing the partition `.npz` files and the partition list
+- `--dataset-path PATH` — root directory containing the partition `.h5` files and the partition list
 - `--name TEXT` — chromosome name, used to locate files under `dataset-path`
 - `--snp-first / --snp-last INT` — restrict the vector to a sub-range of positions (auto-detected from partition boundaries if omitted)
 - `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output (requires `ldetect2[heatmap]`)
+- `--matrix-workers N` — parallel workers for partition-level vector computation (default: 1)
 
 `--generate-heatmap` requires full-schema covariance partitions. If your cache was created by the default `ldetect2 run` mode, rerun with `ldetect2 run --covariance-cache full` or create full partitions with standalone `ldetect2 calc-covariance`.
 
@@ -134,22 +139,44 @@ uv run ldetect2 find-minima \
   --output breakpoints-chr2.json
 ```
 
-This is the core block-detection step. It applies a Hanning (raised cosine) smoothing filter to the diagonal-sum vector and finds local minima. The filter width is chosen by binary search: the width is increased until the number of minima matches the target breakpoint count derived from `--n-snps-bw-bpoints` (or `--n-bpoints` directly). Two initial candidate sets are produced — `fourier` (minima from the Fourier-filtered signal) and `uniform` (minima spaced uniformly across the chromosome).
+This is the core block-detection step. It applies a Hanning (raised cosine) smoothing filter to the diagonal-sum vector and finds local minima. The filter width is chosen by binary search: the width is increased until the number of minima matches the target breakpoint count derived from `--n-snps-bw-bpoints` (or `--n-bpoints` directly). Two initial candidate sets can be produced — `fourier` (minima from the Fourier-filtered signal) and `uniform` (minima spaced uniformly across the chromosome).
 
-Each candidate breakpoint is then refined by a local search (`fourier_ls`, `uniform_ls`): nearby positions are evaluated using the sum of squared inter-block correlations as the quality metric, computed to 50-digit decimal precision to avoid floating-point ties. The position that minimises this metric is chosen as the final breakpoint.
+Each candidate breakpoint is then refined by a local search (`fourier_ls`, `uniform_ls`): nearby positions are evaluated using the sum of squared inter-block correlations as the quality metric. The default path uses native floats for speed; add `--high-precision` to use 50-digit Decimal arithmetic for exact reference-style comparisons. The position that minimises this metric is chosen as the final breakpoint.
 
-The output JSON contains four breakpoint sets: `fourier`, `fourier_ls`, `uniform`, `uniform_ls`. `fourier_ls` is the recommended output.
+By default, the standalone command computes all four breakpoint sets for backward compatibility: `fourier`, `fourier_ls`, `uniform`, `uniform_ls`. Use repeated `--subset` flags to compute only selected sets. `fourier_ls` is the recommended output.
 
 Arguments:
 - `--input PATH` — gzipped vector file from step 3
 - `--chr-name TEXT` — chromosome name
 - `--dataset-path PATH` — covariance matrix root directory (used by local search to load partition data)
-- `--n-snps-bw-bpoints N` — target mean SNPs per block; drives the binary search for filter width (default: 10000)
+- `--n-snps-bw-bpoints N` — target mean SNPs per block; drives the binary search for filter width (required for standalone `find-minima`; `run` defaults to 10000)
 - `--n-bpoints N` — directly set the target breakpoint count, bypassing the formula (overrides `--n-snps-bw-bpoints`)
 - `--trackback-delta / --trackback-step` — search range and step size for the coarse local search phase (defaults: 200 / 20)
 - `--init-search-loc` — initial filter width for the binary search (default: 1000)
 - `--workers N` — parallel workers for the local search phase
-- `--high-precision` — use 50-digit Decimal arithmetic throughout (default: only in the final metric comparison; slower)
+- `--metric-workers N` — parallel workers for streaming metric row passes
+- `--high-precision` — use 50-digit Decimal arithmetic for local search and metric comparisons instead of the default float path (slower)
+- `--subset {fourier,fourier_ls,uniform,uniform_ls}` — breakpoint subset to compute; repeat to compute multiple subsets. If omitted, all subsets are computed.
+
+---
+
+### Inspect covariance cache size
+
+```bash
+uv run ldetect2 covariance-summary \
+  --dataset-path cov_matrix/ \
+  --name chr2 \
+  --format tsv
+```
+
+Reads the partition list and covariance row counts, then reports per-partition and total row counts plus estimated memory needed by the covariance-array readers. This is useful before running local search on large chromosomes or when choosing worker counts.
+
+Arguments:
+- `--dataset-path PATH` — root directory containing the partition `.h5` files and the partition list
+- `--name TEXT` — chromosome name, used to locate files under `dataset-path`
+- `--snp-first / --snp-last INT` — restrict the summary to a sub-range of positions (auto-detected from partition boundaries if omitted)
+- `--format {tsv,json}` — output format (default: `tsv`)
+- `--output PATH` — write the summary to a file instead of stdout
 
 ---
 
@@ -196,10 +223,10 @@ The pipeline detects LD block boundaries by finding local minima in a smoothed d
 1. **Partition** — chromosome split into ~5000-SNP overlapping windows at low-recombination boundaries
 2. **Covariance** — Wen & Stephens shrinkage estimator applied to phased haplotypes; shrinks sample correlations toward the expected LD decay to reduce finite-sample noise
 3. **Matrix → vector** — each covariance matrix reduced to a `[position, diagonal_sum]` signal; troughs correspond to LD block boundaries
-4. **Find minima** — binary search for optimal Hanning-window filter width; `scipy.signal.argrelextrema` finds local minima; local search refines each breakpoint using sum of squared inter-block correlations (50-digit decimal precision) as the quality metric
+4. **Find minima** — binary search for optimal Hanning-window filter width; `scipy.signal.argrelextrema` finds local minima; local search refines each breakpoint using sum of squared inter-block correlations as the quality metric
 5. **Extract** — chosen breakpoint set written as BED
 
-Four breakpoint sets are produced: `fourier` and `uniform` (raw minima from Fourier-filtered and uniformly-spaced candidates), `fourier_ls` and `uniform_ls` (after local search refinement). `fourier_ls` is the recommended output.
+The available breakpoint sets are `fourier` and `uniform` (raw minima from Fourier-filtered and uniformly-spaced candidates), plus `fourier_ls` and `uniform_ls` (after local search refinement). `fourier_ls` is the recommended output.
 
 ## Pre-computed LD blocks
 

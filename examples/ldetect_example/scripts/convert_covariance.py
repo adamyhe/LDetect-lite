@@ -1,12 +1,12 @@
-"""Convert legacy ldetect covariance gz (8-column TSV) to ldetect2 NPZ format.
+"""Convert the reference ldetect covariance fixture to ldetect2 HDF5 format.
 
-Legacy column order:
+Input column order:
     i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld
 
 Usage:
     uv run python scripts/convert_covariance.py \
         --input  ref/cov_matrix/chr2/chr2.39967768.40067768.gz \
-        --output work/chr2/chr2.39967768.40067768.npz
+        --output work/chr2/chr2.39967768.40067768.h5
 """
 
 from __future__ import annotations
@@ -17,6 +17,11 @@ import gzip
 from pathlib import Path
 
 import numpy as np
+
+from ldetect2.io.covariance_hdf5 import (
+    validate_covariance_hdf5,
+    write_covariance_partition_hdf5,
+)
 
 
 def main() -> None:
@@ -37,7 +42,7 @@ def main() -> None:
                 continue
             if len(row) != 8:
                 raise ValueError(
-                    f"{args.input}:{line_no}: expected 8 columns in legacy "
+                    f"{args.input}:{line_no}: expected 8 columns in reference "
                     f"covariance row, found {len(row)}"
                 )
             i_id_l.append(row[0])
@@ -51,7 +56,7 @@ def main() -> None:
                 shrink_l.append(float(row[7]))
             except ValueError as exc:
                 raise ValueError(
-                    f"{args.input}:{line_no}: malformed numeric value in legacy "
+                    f"{args.input}:{line_no}: malformed numeric value in reference "
                     "covariance row"
                 ) from exc
 
@@ -59,41 +64,38 @@ def main() -> None:
         raise ValueError(f"{args.input}: no covariance rows found")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
+    chrom, start, end = _partition_metadata(args.output)
+    write_covariance_partition_hdf5(
         args.output,
-        i_id=np.array(i_id_l),
-        j_id=np.array(j_id_l),
+        chrom=chrom,
+        start=start,
+        end=end,
         i_pos=np.array(i_pos_l, dtype=np.int32),
         j_pos=np.array(j_pos_l, dtype=np.int32),
         i_gpos=np.array(i_gpos_l, dtype=np.float64),
         j_gpos=np.array(j_gpos_l, dtype=np.float64),
         naive_ld=np.array(naive_l, dtype=np.float64),
         shrink_ld=np.array(shrink_l, dtype=np.float64),
+        i_id=np.array(i_id_l),
+        j_id=np.array(j_id_l),
     )
     _validate_output(args.output)
     print(f"Converted {len(i_pos_l):,} pairs → {args.output}")
 
 
+def _partition_metadata(path: Path) -> tuple[str | None, int | None, int | None]:
+    parts = path.stem.split(".")
+    if len(parts) >= 3:
+        try:
+            return parts[0], int(parts[-2]), int(parts[-1])
+        except ValueError:
+            pass
+    return None, None, None
+
+
 def _validate_output(path: Path) -> None:
-    required = {"i_pos", "j_pos", "shrink_ld"}
-    with np.load(path) as data:
-        missing = required - set(data.files)
-        if missing:
-            raise ValueError(
-                f"{path}: converted NPZ is missing required field(s): "
-                f"{', '.join(sorted(missing))}"
-            )
-        expected_dtypes = {
-            "i_pos": np.dtype("int32"),
-            "j_pos": np.dtype("int32"),
-            "shrink_ld": np.dtype("float64"),
-        }
-        for key, dtype in expected_dtypes.items():
-            if data[key].dtype != dtype:
-                raise ValueError(
-                    f"{path}: field {key!r} has dtype {data[key].dtype}, "
-                    f"expected {dtype}"
-                )
+    if not validate_covariance_hdf5(path, require_full=True):
+        raise ValueError(f"{path}: converted HDF5 covariance partition is invalid")
 
 
 if __name__ == "__main__":

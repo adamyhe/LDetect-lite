@@ -203,10 +203,11 @@ These are configured in `config.yaml` and passed to `ldetect2 run --ne`.
 6. Compare the generated BEDs against the published ldetect blocks.
 
 By default, this pipeline sets `covariance_cache: compact` and passes
-`ldetect2 run --covariance-cache compact`. The resulting compact `.npz`
-partitions contain `i_pos`, `j_pos`, and `shrink_ld`, which are the fields used
-by the array-backed matrix-to-vector path. Set `covariance_cache: full` only if
-you need full covariance metadata for debugging or heatmap generation.
+`ldetect2 run --covariance-cache compact`. The resulting compact HDF5
+partitions contain canonical position pairs, `shrink_ld`, diagonal entries, and
+lookup indexes, which are the fields used by the array-backed matrix-to-vector
+path. Set `covariance_cache: full` only if you need full covariance metadata for
+debugging or heatmap generation.
 
 ## Notes for Developers
 

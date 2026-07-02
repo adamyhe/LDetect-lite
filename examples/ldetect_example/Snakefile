@@ -7,11 +7,11 @@ Reference data (chr2:39967768-40067768, 379 EUR individuals) is downloaded
 from BitBucket. The original VCF is not publicly archived, so this example
 starts from the reference covariance matrix in the legacy 8-column gzipped text
 format. The workflow converts that reference-only .gz file to the current
-ldetect2 NPZ partition format before any ldetect2 command consumes it.
+ldetect2 HDF5 partition format before any ldetect2 command consumes it.
 
 Pipeline steps:
     0  Download reference intermediates from BitBucket
-    1  Stage legacy covariance as ldetect2 NPZ (example-only compatibility)
+    1  Stage reference covariance as ldetect2 HDF5 (example-only compatibility)
     2  Stage reference partition file
     3  Run matrix-to-vector   (compare vs reference vector)
     4  Run find-minima         (compare vs reference breakpoints)
@@ -53,7 +53,7 @@ REF_BPOINTS  = REF_DIR / f"minima/minima-EUR-{CHROM}-{N_SNPS}-{START}-{END}.pick
 REF_BED      = REF_DIR / f"bed/EUR-{CHROM}-{N_SNPS}-{START}-{END}.bed"
 
 # Our pipeline outputs
-WORK_NPZ    = WORK_DIR / f"{CHROM}/{CHROM}.{START}.{END}.npz"
+WORK_H5     = WORK_DIR / f"{CHROM}/{CHROM}.{START}.{END}.h5"
 WORK_PARTS  = WORK_DIR / f"{CHROM}_partitions.txt"
 WORK_VECTOR = WORK_DIR / f"vector-{CHROM}.txt.gz"
 WORK_BPTS   = WORK_DIR / f"breakpoints-{CHROM}.json"
@@ -110,14 +110,14 @@ rule download_ref:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Stage legacy covariance as ldetect2 NPZ
+# Step 1: Stage reference covariance as ldetect2 HDF5
 # ---------------------------------------------------------------------------
 
 rule convert_ref_covariance:
     input:
         str(REF_COV_GZ),
     output:
-        str(WORK_NPZ),
+        str(WORK_H5),
     shell:
         """
         mkdir -p $(dirname {output})
@@ -144,7 +144,7 @@ rule stage_ref_partitions:
 
 rule matrix_to_vector:
     input:
-        npz   = str(WORK_NPZ),
+        h5    = str(WORK_H5),
         parts = str(WORK_PARTS),
     output:
         str(WORK_VECTOR),

@@ -500,8 +500,6 @@ def test_matrix_to_vector_array_requires_hdf5_partition(tmp_path):
     chrom_dir = root / "testchr"
     chrom_dir.mkdir(parents=True)
     (root / "testchr_partitions.txt").write_text("100 300\n")
-    with gzip.open(chrom_dir / "testchr.100.300.gz", "wt") as f:
-        f.write("snpA snpA 100 100 0 0 1 1\n")
 
     with pytest.raises(FileNotFoundError, match="requires HDF5 covariance"):
         MatrixAnalysis("testchr", CovarianceStore(root=root)).calc_diag_array(

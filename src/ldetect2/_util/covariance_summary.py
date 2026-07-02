@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import gzip
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -139,24 +137,18 @@ def summarize_covariance(
 
 
 def _read_partition_positions(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    if path.exists():
-        start, end = _partition_bounds_from_path(path)
-        with open_covariance_reader(path, start, end) as reader:
-            rows = reader.read_all()
-            return (
-                np.asarray(rows.lo, dtype=np.int64),
-                np.asarray(rows.hi, dtype=np.int64),
-            )
-
-    text_path = path.with_suffix(".gz")
-    i_pos: list[int] = []
-    j_pos: list[int] = []
-    with gzip.open(text_path, "rt") as f:
-        reader = csv.reader(f, delimiter=" ")
-        for row in reader:
-            i_pos.append(int(row[2]))
-            j_pos.append(int(row[3]))
-    return np.asarray(i_pos, dtype=np.int64), np.asarray(j_pos, dtype=np.int64)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Covariance partition {path} is missing. Regenerate covariance "
+            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+        )
+    start, end = _partition_bounds_from_path(path)
+    with open_covariance_reader(path, start, end) as reader:
+        rows = reader.read_all()
+        return (
+            np.asarray(rows.lo, dtype=np.int64),
+            np.asarray(rows.hi, dtype=np.int64),
+        )
 
 
 def _partition_bounds_from_path(path: Path) -> tuple[int, int]:
