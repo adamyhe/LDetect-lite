@@ -10,7 +10,7 @@ This script splits the genome-wide deCODE file into one per-chromosome file,
 selecting columns: interval_start → position, cM_per_Mb → rate, cumulative_cM → cM.
 
 Usage:
-    python scripts/convert_decode_map.py \
+    uv run python scripts/convert_decode_map.py \
         --input data/maps/decode_raw/aau1043_datas3.gz \
         --output-dir data/maps/decode_raw/ \
         [--chromosomes 1 2 22]

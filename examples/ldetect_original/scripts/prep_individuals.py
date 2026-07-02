@@ -5,7 +5,7 @@ requested subpopulations, then intersects with the samples actually present
 in the VCF to produce a clean individual list.
 
 Usage:
-    python scripts/prep_individuals.py \
+    uv run python scripts/prep_individuals.py \
         --panel resources/integrated_call_samples_v3.20130502.ALL.panel \
         --subpops CEU TSI FIN GBR IBS \
         --vcf data/filtered/chr22.vcf.gz \

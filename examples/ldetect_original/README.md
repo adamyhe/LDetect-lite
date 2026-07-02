@@ -15,13 +15,13 @@ The workflow starts from public 1000 Genomes Phase 1 VCFs and runs the modern
 cd examples/ldetect_original
 
 # Dry-run all configured chromosomes and populations.
-snakemake -n
+uv run snakemake -n
 
 # Run a small smoke test.
-snakemake --cores 8 --config chromosomes='[22]'
+uv run snakemake --cores 8 --config chromosomes='[22]'
 
 # Run the configured analysis.
-snakemake --cores 32
+uv run snakemake --cores 32
 ```
 
 The main outputs are:
@@ -110,7 +110,7 @@ bcftools query -l data/raw/ALL.chr2.phase1_release_v3.20101123.snps_indels_svs.g
 After running the pipeline, compare against the published BED files:
 
 ```bash
-python scripts/compare_blocks.py \
+uv run python scripts/compare_blocks.py \
   --ours results/EUR_LD_blocks.bed \
   --ref resources/ldetect_ref/EUR_fourier_ls-all.bed \
   --output results/compare/EUR_block_comparison.tsv \
@@ -141,19 +141,19 @@ consistency, and optionally reruns chr10 with the Pickrell CEU OMNI map.
 Dry-run the default diagnostic:
 
 ```bash
-snakemake -s Snakefile.diagnostics -n
+uv run snakemake -s Snakefile.diagnostics -n
 ```
 
 Run the default diagnostic:
 
 ```bash
-snakemake -s Snakefile.diagnostics --cores 4
+uv run snakemake -s Snakefile.diagnostics --cores 4
 ```
 
 Run the five problematic EUR chromosomes plus chr13 as a control:
 
 ```bash
-snakemake -s Snakefile.diagnostics --cores 4 \
+uv run snakemake -s Snakefile.diagnostics --cores 4 \
   --config chromosomes='[8,9,10,11,12,13]' \
            case_chromosome=10 \
            control_chromosome=13 \

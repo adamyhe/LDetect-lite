@@ -5,7 +5,7 @@ then intersects those sample IDs with the samples actually present in the VCF
 to produce a clean individual list.
 
 Usage:
-    python scripts/prep_individuals.py \
+    uv run python scripts/prep_individuals.py \
         --sample-data-base-url ftp://.../1000_genomes_project/data \
         --subpops TSI IBS CEU GBR \
         --vcf data/filtered/chr22.vcf.gz \

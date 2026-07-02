@@ -3,7 +3,7 @@
 Both files are gzipped TSV with columns: position  value
 
 Usage:
-    python scripts/compare_vector.py \
+    uv run python scripts/compare_vector.py \
         --ours   work/vector-chr2.txt.gz \
         --ref    ref/vector/vector-EUR-chr2-39967768-40067768.txt.gz \
         --output results/compare_vector.tsv

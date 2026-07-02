@@ -10,7 +10,7 @@ pip install ldetect2
 
 The main `ldetect2 run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect2 calc-covariance`, and so must be on PATH.
 
-**Optional** (`--generate-heatmap`): install matplotlib via `pip install ldetect2[heatmap]`. Generating covariance heatmaps requires a matplotlib install.
+**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect2[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
 
 ### Development
 
@@ -19,15 +19,17 @@ Install from source
 ```bash
 git clone https://github.com/adamyhe/ldetect2.git
 cd ldetect2
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
+
+From a development checkout, run CLI commands through `uv run` so they use the managed environment.
 
 ## Usage
 
 ### End-to-end pipeline
 
 ```bash
-ldetect2 run \
+uv run ldetect2 run \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --reference-panel 1000G.chr2.vcf.gz \
   --individuals eurinds.txt \
@@ -61,7 +63,7 @@ The pipeline has five stages that can be run individually:
 **Step 1 — Partition chromosome** into overlapping windows:
 
 ```bash
-ldetect2 partition-chromosome \
+uv run ldetect2 partition-chromosome \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --n-individuals 379 \
   --output chr2_partitions.txt
@@ -82,7 +84,7 @@ Arguments:
 
 ```bash
 tabix -h 1000G.chr2.vcf.gz chr2:39967768-40067768 | \
-  ldetect2 calc-covariance \
+  uv run ldetect2 calc-covariance \
     --genetic-map chr2.interpolated_genetic_map.gz \
     --individuals eurinds.txt \
     --output cov_matrix/chr2/chr2.39967768.40067768.npz
@@ -103,7 +105,7 @@ Arguments:
 **Step 3 — Matrix to vector**:
 
 ```bash
-ldetect2 matrix-to-vector \
+uv run ldetect2 matrix-to-vector \
   --dataset-path cov_matrix/ \
   --name chr2 \
   --output vector-chr2.txt.gz
@@ -124,7 +126,7 @@ Arguments:
 **Step 4 — Find breakpoints**:
 
 ```bash
-ldetect2 find-minima \
+uv run ldetect2 find-minima \
   --input vector-chr2.txt.gz \
   --chr-name chr2 \
   --dataset-path cov_matrix/ \
@@ -154,7 +156,7 @@ Arguments:
 **Step 5 — Extract to BED**:
 
 ```bash
-ldetect2 extract-bpoints \
+uv run ldetect2 extract-bpoints \
   --name chr2 \
   --dataset-path cov_matrix/ \
   --breakpoints breakpoints-chr2.json \
@@ -176,7 +178,7 @@ Arguments:
 Convert a recombination rate map (e.g. the [deCODE map](https://www.science.org/doi/10.1126/science.aau1043) or [HapMap-interpolated 1000G maps](https://github.com/joepickrell/1000-genomes-genetic-maps)) to per-SNP genetic positions required by steps 1 and 2:
 
 ```bash
-ldetect2 interpolate-maps \
+uv run ldetect2 interpolate-maps \
   --snp-file snps.bed.gz \
   --genetic-map recombination_map.gz \
   --output chr2.interpolated_genetic_map.gz

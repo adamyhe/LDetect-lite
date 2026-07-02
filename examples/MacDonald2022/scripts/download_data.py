@@ -9,7 +9,7 @@ Sample lists are built by the Snakemake workflow from the 1000G population
 directories, following the MacDonald et al. README.
 
 Usage:
-    python scripts/download_data.py --config config.yaml [--chromosomes 22]
+    uv run python scripts/download_data.py --config config.yaml [--chromosomes 22]
 
 The deCODE map is behind a paywall. If the download fails, place the file
 manually at data/maps/decode_raw/aau1043_datas3.gz and re-run; the script

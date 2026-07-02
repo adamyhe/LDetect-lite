@@ -4,7 +4,7 @@ Legacy column order:
     i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld
 
 Usage:
-    python scripts/convert_covariance.py \
+    uv run python scripts/convert_covariance.py \
         --input  ref/cov_matrix/chr2/chr2.39967768.40067768.gz \
         --output work/chr2/chr2.39967768.40067768.npz
 """

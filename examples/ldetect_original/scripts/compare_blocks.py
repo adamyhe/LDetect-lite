@@ -12,7 +12,7 @@ Metrics reported (overall and per chromosome):
   - Recall curve: match rate at [10k, 25k, 50k, 100k, 250k, 500k] bp tolerance
 
 Usage:
-    python scripts/compare_blocks.py \
+    uv run python scripts/compare_blocks.py \
         --ours    results/EUR_LD_blocks.bed \
         --ref     resources/ldetect_ref/EUR_fourier_ls-all.bed \
         --output  results/compare/EUR_block_comparison.tsv \

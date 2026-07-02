@@ -3,7 +3,7 @@
 Compares all four subsets: fourier, fourier_ls, uniform, uniform_ls.
 
 Usage:
-    python scripts/compare_bpoints.py \
+    uv run python scripts/compare_bpoints.py \
         --ours   work/breakpoints-chr2.json \
         --ref    ref/minima/minima-EUR-chr2-50-39967768-40067768.pickle \
         --output results/compare_bpoints.tsv

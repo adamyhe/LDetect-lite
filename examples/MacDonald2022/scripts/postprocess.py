@@ -6,7 +6,7 @@ Two operations matching MacDonald et al. (2022):
      (counted from a filtered VCF) into its left neighbour.
 
 Usage:
-    python scripts/postprocess.py \
+    uv run python scripts/postprocess.py \
         --bed results/EUR/chr2/chr2-ld-blocks.bed \
         --vcf data/filtered/chr2.vcf.gz \
         --centromeres resources/hg38_centromeres.txt.gz \

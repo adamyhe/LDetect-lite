@@ -1,7 +1,7 @@
 """Compare our BED output against the ldetect reference BED.
 
 Usage:
-    python scripts/compare_bed.py \
+    uv run python scripts/compare_bed.py \
         --ours   work/chr2-ld-blocks.bed \
         --ref    ref/bed/EUR-chr2-50-39967768-40067768.bed \
         --output results/compare_bed.tsv
