@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 
 # Local cache directory (gitignored).
@@ -53,10 +54,10 @@ def _download_example_data(dest: Path) -> None:
         urllib.request.urlretrieve(url, target)
 
 
-def _ensure_example_npz_covariance(dest: Path) -> None:
+def _ensure_example_hdf5_covariance(dest: Path) -> None:
     text_path = dest / "cov_matrix/chr2/chr2.39967768.40067768.gz"
-    npz_path = text_path.with_suffix(".npz")
-    if npz_path.exists():
+    h5_path = text_path.with_suffix(".h5")
+    if h5_path.exists():
         return
 
     i_pos: list[int] = []
@@ -69,8 +70,8 @@ def _ensure_example_npz_covariance(dest: Path) -> None:
             j_pos.append(int(row[3]))
             shrink_ld.append(float(row[7]))
 
-    np.savez_compressed(
-        npz_path,
+    write_covariance_partition_hdf5(
+        h5_path,
         i_pos=np.array(i_pos, dtype=np.int32),
         j_pos=np.array(j_pos, dtype=np.int32),
         shrink_ld=np.array(shrink_ld, dtype=np.float64),
@@ -81,7 +82,7 @@ def _ensure_example_npz_covariance(dest: Path) -> None:
 def example_data_dir() -> Path:
     """Return the path to the example data, downloading it if necessary."""
     _download_example_data(DATA_DIR)
-    _ensure_example_npz_covariance(DATA_DIR)
+    _ensure_example_hdf5_covariance(DATA_DIR)
     return DATA_DIR
 
 

@@ -96,6 +96,124 @@ def test_find_breakpoints_json_structure(example_data_dir, example_store, tmp_pa
         assert subset in data, f"Missing subset {subset!r}"
         assert "loci" in data[subset]
         assert "metric" in data[subset]
+    assert data["computed_subsets"] == [
+        "fourier",
+        "fourier_ls",
+        "uniform",
+        "uniform_ls",
+    ]
+    assert data["skipped_subsets"] == []
+
+
+def test_find_breakpoints_fourier_subset_skips_local_search(
+    example_data_dir,
+    example_store,
+    tmp_path,
+    monkeypatch,
+):
+    """Raw Fourier output should not pay local-search cost."""
+    import ldetect2.pipeline as pipeline_mod
+
+    def fail_local_search(*args, **kwargs):
+        raise AssertionError("local search should be skipped")
+
+    monkeypatch.setattr(pipeline_mod, "_run_local_search", fail_local_search)
+
+    out_json = tmp_path / "breakpoints.json"
+    ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
+    pipeline_mod.find_breakpoints(
+        input_path=ref_vector,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=out_json,
+        subsets={"fourier"},
+    )
+
+    data = json.loads(out_json.read_text())
+    assert "fourier" in data
+    assert "fourier_ls" not in data
+    assert "uniform" not in data
+    assert "uniform_ls" not in data
+    assert data["computed_subsets"] == ["fourier"]
+    assert data["skipped_subsets"] == ["fourier_ls", "uniform", "uniform_ls"]
+
+
+def test_find_breakpoints_fourier_ls_skips_uniform_local_search(
+    example_data_dir,
+    example_store,
+    tmp_path,
+    monkeypatch,
+):
+    """fourier_ls should run only Fourier local search and skip uniform work."""
+    import ldetect2.pipeline as pipeline_mod
+
+    calls: list[str] = []
+
+    def fake_local_search(*args, **kwargs):
+        calls.append(kwargs["subset_name"])
+        breakpoint_loci = args[1]
+        return {"loci": breakpoint_loci, "metrics": [None] * len(breakpoint_loci)}
+
+    monkeypatch.setattr(pipeline_mod, "_run_local_search", fake_local_search)
+
+    out_json = tmp_path / "breakpoints.json"
+    ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
+    pipeline_mod.find_breakpoints(
+        input_path=ref_vector,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=out_json,
+        subsets={"fourier_ls"},
+    )
+
+    data = json.loads(out_json.read_text())
+    assert calls == ["fourier_ls"]
+    assert set(data) >= {"fourier", "fourier_ls"}
+    assert "uniform" not in data
+    assert "uniform_ls" not in data
+    assert data["computed_subsets"] == ["fourier", "fourier_ls"]
+    assert data["skipped_subsets"] == ["uniform", "uniform_ls"]
+
+
+def test_find_breakpoints_uniform_ls_skips_fourier_local_search(
+    example_data_dir,
+    example_store,
+    tmp_path,
+    monkeypatch,
+):
+    """uniform_ls needs uniform data but not Fourier local search."""
+    import ldetect2.pipeline as pipeline_mod
+
+    calls: list[str] = []
+
+    def fake_local_search(*args, **kwargs):
+        calls.append(kwargs["subset_name"])
+        breakpoint_loci = args[1]
+        return {"loci": breakpoint_loci, "metrics": [None] * len(breakpoint_loci)}
+
+    monkeypatch.setattr(pipeline_mod, "_run_local_search", fake_local_search)
+
+    out_json = tmp_path / "breakpoints.json"
+    ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
+    pipeline_mod.find_breakpoints(
+        input_path=ref_vector,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=out_json,
+        subsets={"uniform_ls"},
+    )
+
+    data = json.loads(out_json.read_text())
+    assert calls == ["uniform_ls"]
+    assert "fourier" not in data
+    assert "fourier_ls" not in data
+    assert "uniform" in data
+    assert "uniform_ls" in data
+    assert data["computed_subsets"] == ["uniform", "uniform_ls"]
+    assert data["skipped_subsets"] == ["fourier", "fourier_ls"]
 
 
 def test_find_breakpoints_loci_in_range(example_data_dir, example_store, tmp_path):

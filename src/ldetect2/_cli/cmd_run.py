@@ -8,13 +8,9 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
+from ldetect2.io.covariance_hdf5 import validate_covariance_hdf5
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
-_COMPACT_COVARIANCE_KEYS = frozenset({"i_pos", "j_pos", "shrink_ld"})
-_FULL_COVARIANCE_KEYS = frozenset(
-    {"i_pos", "j_pos", "i_gpos", "j_gpos", "naive_ld", "shrink_ld", "i_id", "j_id"}
-)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -101,6 +97,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         help="Breakpoint set for final BED output (default: fourier_ls).",
     )
     p.add_argument(
+        "--all-breakpoint-subsets",
+        action="store_true",
+        help=(
+            "Compute all four breakpoint subsets in the JSON output. By default, "
+            "only the subset requested by --subset and its dependencies are "
+            "computed to avoid unused local-search work."
+        ),
+    )
+    p.add_argument(
         "--workers",
         type=int,
         default=1,
@@ -115,6 +120,26 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         help=(
             "Parallel workers for local search. Higher values may multiply "
             "memory use because each worker loads its own covariance window "
+            "(default: 1)."
+        ),
+    )
+    p.add_argument(
+        "--matrix-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for Step 3 matrix-to-vector partition computation "
+            "(default: 1)."
+        ),
+    )
+    p.add_argument(
+        "--metric-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Parallel workers for Step 4 streaming metric row passes "
             "(default: 1)."
         ),
     )
@@ -141,6 +166,7 @@ def _calc_partition(
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
     """
+    from ldetect2._util.memory import log_memory_checkpoint
     from ldetect2.shrinkage import calc_covariance
 
     region = f"{chrom}:{start}-{end}"
@@ -166,12 +192,15 @@ def _calc_partition(
             compact_output=compact_output,
         )
     tabix_proc.wait()
+    log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
 
 
 def _run(args: argparse.Namespace) -> int:
     import json
 
+    import ldetect2
     from ldetect2._util.logging import log_msg
+    from ldetect2._util.memory import log_memory_checkpoint
     from ldetect2.io.bed import write_bed
     from ldetect2.io.partitions import CovarianceStore, read_partitions
     from ldetect2.matrix_analysis import MatrixAnalysis
@@ -186,30 +215,36 @@ def _run(args: argparse.Namespace) -> int:
     cov_dir.mkdir(exist_ok=True)
 
     store = CovarianceStore(root=output_dir)
+    log_msg(
+        "ldetect2 runtime: "
+        f"version={getattr(ldetect2, '__version__', 'unknown')} "
+        f"source={Path(ldetect2.__file__).resolve()}"
+    )
+    log_memory_checkpoint("run_start")
 
     # ------------------------------------------------------------------ #
     # Step 1: Partition chromosome                                         #
     # ------------------------------------------------------------------ #
     partitions_path = output_dir / f"{chrom}_partitions.txt"
     log_msg("Step 1: Partitioning chromosome")
+    log_memory_checkpoint("step1_start")
     partition_chromosome(
         genetic_map_path=args.genetic_map,
         n_individuals=_count_individuals(args.individuals),
         output_path=partitions_path,
         ne=args.ne,
     )
+    log_memory_checkpoint("step1_end")
 
     # ------------------------------------------------------------------ #
     # Step 2: Calculate covariance for each partition                     #
     # ------------------------------------------------------------------ #
     compact_output = args.covariance_cache == "compact"
-    required_covariance_keys = (
-        _COMPACT_COVARIANCE_KEYS if compact_output else _FULL_COVARIANCE_KEYS
-    )
     log_msg(
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache})"
     )
+    log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
 
     pending = []
@@ -219,7 +254,9 @@ def _run(args: argparse.Namespace) -> int:
         if not partition_path.exists():
             pending.append((start, end))
             continue
-        if not _is_valid_covariance_partition(partition_path, required_covariance_keys):
+        if not _is_valid_covariance_partition(
+            partition_path, require_full=not compact_output
+        ):
             invalid += 1
             partition_path.unlink()
             pending.append((start, end))
@@ -254,6 +291,7 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             log_msg(f"  Partition {start}-{end} done")
+    log_memory_checkpoint("step2_end")
 
     snp_first = partitions[0][0]
     snp_last = partitions[-1][1]
@@ -263,14 +301,17 @@ def _run(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
     log_msg("Step 3: Converting matrix to vector")
+    log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
-    analysis.calc_diag_lean(vector_path)
+    analysis.calc_diag_lean(vector_path, matrix_workers=args.matrix_workers)
+    log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #
     # Step 4: Find minima                                                 #
     # ------------------------------------------------------------------ #
     breakpoints_path = output_dir / f"breakpoints-{chrom}.json"
     log_msg("Step 4: Finding breakpoints")
+    log_memory_checkpoint("step4_start")
     find_breakpoints(
         input_path=vector_path,
         chr_name=chrom,
@@ -278,16 +319,28 @@ def _run(args: argparse.Namespace) -> int:
         n_snps_bw_bpoints=args.n_snps_bw_bpoints,
         output_path=breakpoints_path,
         workers=args.local_search_workers,
+        metric_workers=args.metric_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
+        subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
     )
+    log_memory_checkpoint("step4_end")
 
     # ------------------------------------------------------------------ #
     # Step 5: Extract breakpoints to BED                                  #
     # ------------------------------------------------------------------ #
     bed_path = output_dir / f"{chrom}-ld-blocks.bed"
     log_msg(f"Step 5: Extracting {args.subset} breakpoints to {bed_path}")
+    log_memory_checkpoint("step5_start")
     data = json.loads(breakpoints_path.read_text())
+    if args.subset not in data:
+        computed = ", ".join(data.get("computed_subsets", [])) or "(none)"
+        print(
+            f"Error: requested subset {args.subset!r} was not computed. "
+            f"Computed subset(s): {computed}",
+            file=sys.stderr,
+        )
+        return 1
     loci: list[int] = data[args.subset]["loci"]
 
     write_bed(
@@ -295,6 +348,7 @@ def _run(args: argparse.Namespace) -> int:
     )
 
     log_msg(f"Done. BED file: {bed_path}")
+    log_memory_checkpoint("run_end")
     return 0
 
 
@@ -307,11 +361,19 @@ def _count_individuals(path: Path) -> int:
     return count
 
 
+def _breakpoint_subsets_for_run(
+    subset: str, all_breakpoint_subsets: bool
+) -> set[str] | None:
+    """Return the breakpoint subset request passed from ``run`` to the pipeline.
+
+    ``None`` intentionally preserves the full historical JSON output; otherwise
+    ``run`` asks the pipeline to compute only the final BED subset and its
+    dependencies.
+    """
+    return None if all_breakpoint_subsets else {subset}
+
+
 def _is_valid_covariance_partition(
-    path: Path, required_keys: frozenset[str] = _FULL_COVARIANCE_KEYS
+    path: Path, require_full: bool = True
 ) -> bool:
-    try:
-        with np.load(path) as data:
-            return required_keys.issubset(data.files)
-    except Exception:
-        return False
+    return validate_covariance_hdf5(path, require_full=require_full)
