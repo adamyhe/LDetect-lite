@@ -63,6 +63,16 @@ def position_comparison_path(population, chrom, dataset, variant_filter):
     )
 
 
+def ld_comparison_path(population, chrom, dataset, variant_filter):
+    return str(
+        PROV_ROOT
+        / population
+        / f"chr{chrom}"
+        / "ld_sets"
+        / f"{dataset}_{variant_filter}_vs_{BASELINE_SOURCE}_{BASELINE_FILTER}.tsv"
+    )
+
+
 def comparison_targets():
     targets = []
     for population in POPS:
@@ -74,9 +84,21 @@ def comparison_targets():
     return targets
 
 
+def ld_comparison_targets():
+    targets = []
+    for population in POPS:
+        for chrom in CHROMS_BY_POP[population]:
+            for dataset, variant_filter in COMPARISON_CANDIDATES:
+                targets.append(
+                    ld_comparison_path(population, chrom, dataset, variant_filter)
+                )
+    return targets
+
+
 rule all:
     input:
         str(PROV_ROOT / "position_comparison_summary.tsv"),
+        str(PROV_ROOT / "ld_comparison_summary.tsv"),
 
 
 rule download_source_vcf:
@@ -204,6 +226,63 @@ rule combine_position_comparisons:
         script="scripts/combine_tsv.py",
     output:
         str(PROV_ROOT / "position_comparison_summary.tsv"),
+    shell:
+        """
+        uv run python scripts/combine_tsv.py \
+            --input {input.summaries} \
+            --output {output}
+        """
+
+
+rule compare_ld_sets:
+    input:
+        baseline=lambda wc: filtered_vcf_path(
+            BASELINE_SOURCE, BASELINE_FILTER, wc.population, wc.chrom
+        ),
+        baseline_tbi=lambda wc: filtered_vcf_path(
+            BASELINE_SOURCE, BASELINE_FILTER, wc.population, wc.chrom
+        )
+        + ".tbi",
+        candidate=lambda wc: filtered_vcf_path(
+            wc.dataset, wc.variant_filter, wc.population, wc.chrom
+        ),
+        candidate_tbi=lambda wc: filtered_vcf_path(
+            wc.dataset, wc.variant_filter, wc.population, wc.chrom
+        )
+        + ".tbi",
+        individuals=str(RES_ROOT / BASELINE_SOURCE / "{population}_inds.txt"),
+        script="scripts/compare_vcf_ld.py",
+    output:
+        f"results/provenance_diagnostics/{{population}}/chr{{chrom}}/ld_sets/{{dataset}}_{{variant_filter}}_vs_{BASELINE_SOURCE}_{BASELINE_FILTER}.tsv",
+    params:
+        baseline_label=f"{BASELINE_SOURCE}/{BASELINE_FILTER}",
+        candidate_label=lambda wc: f"{wc.dataset}/{wc.variant_filter}",
+        window_bp=config.get("ld_window_bp", 5000),
+        max_anchors=config.get("ld_max_anchors", 500),
+        pairs_per_anchor=config.get("ld_pairs_per_anchor", 5),
+    shell:
+        """
+        uv run python scripts/compare_vcf_ld.py \
+            --population {wildcards.population} \
+            --chromosome {wildcards.chrom} \
+            --baseline-label {params.baseline_label} \
+            --candidate-label {params.candidate_label} \
+            --baseline-vcf {input.baseline} \
+            --candidate-vcf {input.candidate} \
+            --individuals {input.individuals} \
+            --window-bp {params.window_bp} \
+            --max-anchors {params.max_anchors} \
+            --pairs-per-anchor {params.pairs_per_anchor} \
+            --output {output}
+        """
+
+
+rule combine_ld_comparisons:
+    input:
+        summaries=ld_comparison_targets(),
+        script="scripts/combine_tsv.py",
+    output:
+        str(PROV_ROOT / "ld_comparison_summary.tsv"),
     shell:
         """
         uv run python scripts/combine_tsv.py \

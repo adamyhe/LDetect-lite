@@ -168,3 +168,184 @@ Best AFR follow-up comparisons:
 4. Overlay unmatched AFR chr22 boundaries with haplotype-error positions and
    accessibility-mask intervals. This is mainly a triage step for local-quality
    artifacts, not yet a primary explanation.
+
+## Provenance position/LD diagnostics follow-up
+
+Date: 2026-07-02
+
+Ran item 1 above (`Snakefile.provenance_diagnostics`) across EUR chr8-13 and
+AFR chr11/13/22, using chr13 as an exact-match control in each population, for
+v3/snps, v2/all, v2/snps, v1/all, and old2011/all against the v3/all baseline.
+Results in `results/provenance_diagnostics/position_comparison_summary.tsv`.
+
+### Finding: VCF release-version and SNP/indel filtering are ruled out
+
+Position-jaccard between v3/all and every candidate is essentially identical
+whether the chromosome is divergent or an exact-match control:
+
+```text
+                v3/snps   v2/all   v1/all
+EUR chr8  (div) 0.943     0.944    0.806
+EUR chr9  (div) 0.940     0.940    0.808
+EUR chr10 (div) 0.938     0.943    0.813
+EUR chr11 (div) 0.939     0.943    0.809
+EUR chr12 (div) 0.936     0.940    0.802
+EUR chr13 (ctl) 0.934     0.942    0.802
+AFR chr11 (div) 0.951     0.948    0.877
+AFR chr13 (ctl) 0.947     0.945    0.870
+AFR chr22 (div) 0.949     0.945    0.881
+```
+
+The divergent chromosomes track their population's control chromosome almost
+exactly. This rules out "SNP-only vs. all-variant" filtering and "which Phase
+1 release version" as differentiators between divergent and matched
+chromosomes: whatever's different about EUR chr8-12 and AFR chr11/chr22 is not
+visible in which physical positions are called.
+
+Also checked commit history on the two upstream data repositories this
+pipeline depends on, since a "some chromosomes were silently patched later"
+explanation would produce exactly the observed contiguous-range symptom:
+
+- `joepickrell/1000-genomes-genetic-maps`: every
+  `interpolated_from_hapmap/chr*.interpolated_genetic_map.gz` file was added
+  in a single 2014-06-19 commit (`73cbe924`, message "hapmap") and has never
+  been modified since (checked via `gh api .../commits?path=...` per
+  chromosome for chr7-13).
+- `nygcresearch/ldetect-data`: all EUR `fourier_ls-chr*.bed` files were added
+  together in one commit (`777d32666e`, "added EUR dataset", 2015-04-15); AFR
+  and ASN were likewise added together in one commit (`f651dc409a`, "Added
+  AFR and ASN", 2015-04-30). There are only 14 commits in the repo's entire
+  history and none of them touch a subset of per-chromosome BED files after
+  the initial per-population add.
+
+This rules out both "the published reference blocks were patched for some
+chromosomes after initial publication" and "the genetic map was regenerated
+for some chromosomes" as explanations — both artifacts have been static,
+whole-population, single-commit additions since 2014-2015.
+
+### New diagnostic: `scripts/compare_vcf_ld.py`
+
+The position-set comparison only sees which SNP positions are *called*, not
+genotype or phasing content at *shared* positions. That is the main gap,
+since 1000G Phase 1 v1->v2->v3 differ mainly in re-phasing/re-imputation, not
+just which sites are called, and phasing feeds directly into the Wen &
+Stephens shrinkage covariance in `ldetect2.shrinkage`.
+
+Added `scripts/compare_vcf_ld.py`: for a deterministic, evenly-spaced sample
+of nearby SNP pairs at positions shared between a baseline and candidate VCF,
+it computes minor allele frequency and phased-haplotype r^2 independently
+within each VCF, then compares the resulting values (Pearson r and mean/
+median/max absolute difference) between releases. r^2 computed within one VCF
+is invariant to a whole-chromosome per-individual haplotype relabeling (swapping
+which copy is called "haplotype 1" vs "haplotype 2" for an individual doesn't
+change any pairwise haplotype r^2), so no cross-VCF haplotype-index alignment
+is required — only local switch errors or re-calling differences between
+releases would show up as a difference in the compared r^2 values.
+
+Wired into `Snakefile.provenance_diagnostics` as `compare_ld_sets` /
+`combine_ld_comparisons`, writing
+`results/provenance_diagnostics/ld_comparison_summary.tsv` using the same
+`comparison_candidates` list and the already-filtered VCFs from the position-set
+diagnostic (no new downloads required; confirmed via `snakemake -n`). New
+`ld_window_bp`/`ld_max_anchors`/`ld_pairs_per_anchor` knobs added to
+`provenance_diagnostics.yaml`. Not yet run against real data — bcftools is not
+available in this environment. The script's pure logic (pair selection, MAF,
+r^2, output aggregation) and full `compare()` flow were validated against a
+synthetic mocked-`bcftools` fixture: identical phasing between two "releases"
+produces `abs_diff` ≈ 0 for shared pairs, a scrambled/switch-error-like site
+produces `abs_diff` = 0.75.
+
+### Duplicate/multiallelic-position handling: prior work exists on other branches, correcting an initial overclaim
+
+`ldetect2.shrinkage.calc_covariance` (`src/ldetect2/shrinkage.py:634-654` on
+`ldetect-original-fix`) deduplicates VCF rows by physical position while
+parsing: it keeps the *first* row seen at a given `POS` and drops the rest,
+logging the dropped count. This was initially flagged here as a "real,
+previously-undocumented difference" from the original `P00_01_calc_covariance.py`,
+which appends every row to `allpos` with no dedup at all. **That framing was
+too strong; both parts need correction:**
+
+1. **This exact question was already investigated, on other branches — the
+   user's recollection was correct.** `further-optimizations` -> `nocache-mode`
+   (and downstream `hdf5-experiments-direct-vector-r2-zarr` /
+   `hdf5-memory-optimizations`) contain commits `c9a18f0` ("Dedup"), `145f07d`
+   ("Fixed another duplicate handling issue"), and `47a060d` ("Patched matrix
+   and direct method divergence"). None of these branches are merged into
+   `ldetect-original-fix` or `main` (they diverge from the common ancestor
+   `2e7579d`). That work was pursued as part of a large memory/performance
+   optimization effort (compact HDF5 caching, an `r2-zarr` pair cache, tiled
+   local search) and specifically fixed *internal* inconsistency between three
+   computational backends (`matrix_hdf5`, `direct_hdf5`, `r2_zarr`) that had
+   accidentally implemented different duplicate-position precedence rules from
+   each other. `notes/optimizations-handoff.md` on `nocache-mode` states
+   explicitly: "Known divergence from original `ldetect` on duplicate physical
+   positions is still acknowledged" — i.e. that work did not claim to close,
+   and did not verify closing, the gap against the *published Berisa/Pickrell
+   reference blocks*. There is no evidence on those branches of an
+   EUR-chr8-12/AFR-chr11/chr22 reproduction rerun tied to this change.
+
+2. **Reading the legacy matrix-insertion code directly weakens the "different
+   precedence" theory.** `_reference/ldetect_original/ldetect/baselib/flat_file.py:104`
+   (`insert_into_matrix`) only inserts `matrix[l]['data'][r]` `if r not in
+   matrix[l]['data']` — i.e. legacy is **first-insert-wins**, not last-wins as
+   originally assumed here. Because covariance rows are written in `allpos`
+   iteration order (VCF encounter order) and two duplicate-position variants at
+   the same physical position share an identical genetic-distance window (the
+   window depends only on physical position via `pos2gpos`), the
+   first-VCF-encountered duplicate variant's row for any given neighbor `r`
+   is always written — and therefore always kept — before the second
+   duplicate's row for that same `r`. That means legacy's dict-overwrite
+   dedup and ldetect2's parse-time "keep first, drop rest" dedup select the
+   *same* surviving variant and should produce the *same* LD values for
+   cross-position pairs. `notes/covariance-streaming-cache-implementation-note.md`
+   (a design-only branch, also forked from `2e7579d`) independently documents
+   this same "current" skip-duplicates-before-arrays behavior as an accepted
+   baseline, not a bug.
+
+**What remains a genuinely open, less-scrutinized candidate** is *cross-partition*
+duplicate handling, not same-VCF duplicate physical positions. Partitions
+overlap (`io/partitions.py` / `relevant_subpartitions`), so the same canonical
+`(lo, hi)` pair can appear in more than one partition file. The
+`covariance-streaming` design note flags this as a distinct mechanism ("Duplicate
+Pairs Across Partitions") where local search "preserves partition and row order
+and applies first-row-wins for canonical duplicate pairs in the active stream" —
+this ownership/ordering logic is materially different from the simple
+same-VCF-row case just ruled out above, has its own edge cases (see also
+"Partition Overlap Ownership", "Boundary Inclusivity", "First-Locus Odd Pairs"
+in that note), and has not been checked against the reference reproduction
+either.
+
+### Recommended next steps, in cost order
+
+1. Run the new `compare_ld_sets` diagnostic (cheap — reuses already-filtered
+   VCFs, no new downloads) for EUR chr8-13 and AFR chr11/13/22. If the
+   divergent chromosomes show elevated `r2_mean_abs_diff` / degraded
+   `r2_pearson_r` relative to the chr13 control, that is strong evidence of a
+   phasing/re-calling difference between VCF releases, and a full old-VCF
+   pipeline rerun becomes worth the cost.
+2. Settle the duplicate-position question empirically instead of re-deriving it
+   from first principles, but do **not** check out, diff against, or port code
+   from `nocache-mode`/`further-optimizations`/etc. as part of this. Those
+   branches were a large, never-merged optimization effort, and the same
+   commits that touched duplicate handling there were fixing bugs the branch
+   itself introduced (`47a060d` "Patched matrix and direct method divergence"),
+   so their code is not a trustworthy oracle and pulling from it risks
+   importing a different, undiscovered problem instead of resolving this one.
+   Instead, write a small standalone script (in `examples/ldetect_original/scripts/`,
+   independent of `src/ldetect2`) that parses one divergent chromosome's
+   partition VCF twice — once reproducing `calc_covariance`'s current
+   keep-first-drop-rest dedup, once with a from-scratch "retain every row,
+   canonicalize with first-row-wins per `(lo, hi)` pair" implementation
+   written directly against the legacy semantics described above — and diff
+   the resulting covariance rows/vectors directly. This tests the hypothesis
+   with fresh, purpose-built code instead of a legacy oracle port or
+   another branch's code.
+3. Only after (1) and (2) come back inconclusive is it worth running the full
+   `ldetect2 run` pipeline end-to-end on an old VCF release (v1/old2011) for
+   one divergent chromosome. The position-set diagnostic already shows the
+   divergent chromosomes are indistinguishable from the exact-match control by
+   which release is used, so a blind full-pipeline VCF swap is unlikely to fix
+   anything on its own; it is informative only once paired with a real
+   phasing-level anomaly detected in (1), or to test a specific "the original
+   authors mixed up VCF sets for a batch of chromosomes" hypothesis after (1)
+   and (2) leave that as the remaining explanation.

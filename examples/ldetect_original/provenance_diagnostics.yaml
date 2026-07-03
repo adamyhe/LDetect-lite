@@ -40,3 +40,12 @@ comparison_candidates:
   - {source: v2, variant_filter: snps}
   - {source: v1, variant_filter: all}
   - {source: old2011, variant_filter: all}
+
+# compare_vcf_ld.py parameters: deterministic evenly-spaced sample of nearby
+# SNP pairs (positions shared with the v3/all baseline) used to compare
+# per-release minor allele frequency and phased-haplotype r^2. This targets
+# genotype/phasing differences at shared positions that compare_vcf_positions
+# (position-set membership only) cannot see.
+ld_window_bp: 5000
+ld_max_anchors: 500
+ld_pairs_per_anchor: 5
