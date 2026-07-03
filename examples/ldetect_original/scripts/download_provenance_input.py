@@ -24,7 +24,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--dataset")
-    parser.add_argument("--kind", required=True, choices=["vcf", "panel"])
+    parser.add_argument("--kind", required=True, choices=["vcf", "vcf-index", "panel"])
     parser.add_argument("--chromosome")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -39,8 +39,10 @@ def main() -> None:
             raise SystemExit(
                 "--dataset is required when it cannot be inferred from output path"
             ) from exc
-    if args.kind == "vcf" and chromosome is None:
+    if args.kind in {"vcf", "vcf-index"} and chromosome is None:
         match = re.search(r"chr([^/.]+)\.vcf\.gz$", args.output.name)
+        if not match:
+            match = re.search(r"chr([^/.]+)\.vcf\.gz\.tbi$", args.output.name)
         if not match:
             raise SystemExit(
                 "--chromosome is required when it cannot be inferred from output path"
@@ -48,10 +50,12 @@ def main() -> None:
         chromosome = match.group(1)
 
     source = load_source(args.config, dataset)
-    if args.kind == "vcf":
+    if args.kind in {"vcf", "vcf-index"}:
         if not chromosome:
             raise SystemExit("--chromosome is required for --kind vcf")
         fname = source["filename_template"].format(chrom=chromosome)
+        if args.kind == "vcf-index":
+            fname = f"{fname}.tbi"
         url = f"{source['base_url']}/{fname}"
     else:
         url = source["panel_url"]
