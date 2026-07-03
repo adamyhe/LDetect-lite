@@ -1,11 +1,23 @@
 # LDetect2
 
-A modern reimplementation of [LDetect](https://bitbucket.org/nygcresearch/ldetect), a method for calculating approximately independent linkage disequilibrium (LD) blocks in the human genome. The algorithm is described in [Berisa & Pickrell, 2016](https://academic.oup.com/bioinformatics/article/32/2/283/1743626).
+[![PyPI](https://img.shields.io/pypi/v/ldetect2)](https://pypi.org/project/ldetect2/)
+[![Tests](https://github.com/adamyhe/ldetect2/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/ldetect2/actions/workflows/tests.yml)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/ldetect2?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/ldetect2)
+
+A modern, fast re-implementation of [LDetect](https://bitbucket.org/nygcresearch/ldetect), a method for calculating approximately independent linkage disequilibrium (LD) blocks in the human genome. The algorithm is described in [Berisa & Pickrell, 2016](https://academic.oup.com/bioinformatics/article/32/2/283/1743626).
 
 ## Installation
 
+Install from PyPI via:
+
 ```bash
 pip install ldetect2
+```
+
+Or, with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv add ldetect2
 ```
 
 The main `ldetect2 run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect2 calc-covariance`, and so must be on PATH.

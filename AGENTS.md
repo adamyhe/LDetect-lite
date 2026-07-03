@@ -105,7 +105,9 @@ Tracked in detail in `notes/ldetect-original-main-pipeline-audit.md` (log of rec
 
 - **ASN**: exact match, all 22 autosomes.
 - **AFR**: exact except chr22. (chr11 was previously tracked as divergent too, but is resolved — a data-corruption bug in the published reference BED itself, not a real pipeline divergence.)
-- **EUR**: exact block counts and coverage on every chromosome, but chr8–12 have shifted internal boundaries relative to the published reference (contiguous range bracketed by exact chr7/chr13 matches). Leading hypothesis is upstream input/provenance divergence for those chromosomes rather than a current ldetect2 bug — precision (Decimal vs. float64) and legacy-downstream diagnostics rule out arbitrary implementation-choice ambiguity as the cause.
+- **EUR**: exact block counts and coverage on every chromosome, but chr8–12 have shifted internal boundaries relative to the published reference (contiguous range bracketed by exact chr7/chr13 matches).
+
+EUR chr8-12 and AFR chr22 are **parked as an accepted, documented residual divergence**, not an active investigation. An extensive diagnostic effort ruled out VCF release-version provenance (including a full pipeline rerun on 4 alternate releases plus one undocumented snapshot), SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, sample/panel provenance, and reference-BED structural integrity. The leading remaining hypothesis is an unidentified upstream input/provenance divergence for those chromosomes specifically (precision and legacy-downstream diagnostics rule out arbitrary implementation-choice ambiguity as the cause) — see `notes/ldetect-original-handoff.md`'s "If this is picked up again" section for the concrete next steps if this is ever revisited.
 
 When investigating reproduction mismatches, read `notes/ldetect-original-handoff.md` first; it likely already rules out several hypotheses.
 

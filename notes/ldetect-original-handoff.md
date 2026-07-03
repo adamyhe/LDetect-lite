@@ -1,9 +1,14 @@
-# ldetect_original reproduction — handoff (2026-07-03)
+# ldetect_original reproduction — status (parked 2026-07-03)
 
-Current-state summary for picking this investigation back up. For the full
-chronological log of every diagnostic run and its reasoning, see
-`notes/ldetect-original-main-pipeline-audit.md` (append new dated entries
-there as the log of record; this file is a snapshot, not a log).
+**Status: parked, not actively being investigated.** After an extensive
+diagnostic effort (summarized below, full detail in
+`notes/ldetect-original-main-pipeline-audit.md`), EUR chr8-12 and AFR chr22
+are being accepted as a documented, understood residual divergence from the
+published Berisa & Pickrell (2016) reference rather than something to keep
+chasing right now. This doc is the entry point if that decision is revisited
+later — it summarizes what's ruled out (so it isn't re-litigated), what's
+resolved, and the one open thread (a mechanism hypothesis, not yet confirmed
+for AFR) that would be the natural next step if this is picked back up.
 
 ## Where things stand
 
@@ -17,7 +22,9 @@ from `examples/ldetect_original`. Status:
   bracketed by exact chr7/chr13). Block *counts* match exactly everywhere;
   only internal boundary *positions* differ on these chromosomes.
 
-Two genuinely open mysteries remain: **EUR chr8-12** and **AFR chr22**.
+**EUR chr8-12 and AFR chr22 are the two accepted, documented residual
+divergences.** Every concrete, checkable hypothesis for them has been ruled
+out (see below) short of the original authors' own internal processing logs.
 
 ## Ruled out this investigation (do not re-litigate without new evidence)
 
@@ -86,7 +93,7 @@ orange=divergent vs. reference within tolerance) and reference boundaries
 
 Generated 3-window comparisons (concordant-only / divergent-only / mixed) for
 both **EUR chr10** and **AFR chr22**, saved at
-`examples/ldetect_original/plots/` (untracked; not yet committed):
+`examples/ldetect_original/plots/` (committed):
 
 - EUR chr10 concordant: 61.5-63.1 Mb (boundaries 61891409, 62660140)
 - EUR chr10 divergent: 99.5-105.7 Mb
@@ -169,7 +176,7 @@ The user obtained the paper's supplementary PDF directly (was previously
 unreachable via automated fetch) — already fully mined for findings (see
 main audit log). No further paper-side leads outstanding.
 
-## Key scripts/infra built this session (all in `examples/ldetect_original/`)
+## Key scripts/infra built during this investigation (all in `examples/ldetect_original/`)
 
 - `scripts/compare_vcf_ld.py` — phasing-sensitive LD comparison between two
   VCF releases (had two real bugs, both fixed: a `.bed`-extension region-file
@@ -180,30 +187,32 @@ main audit log). No further paper-side leads outstanding.
 - `Snakefile.alternate_source_rerun` + `alternate_source_rerun.yaml` — full
   end-to-end pipeline rerun on alternate VCF releases for divergent
   chromosomes only. Already run and analyzed (see "ruled out" above).
-- `scripts/plot_vector_boundaries.py` — vector/boundary visualization, this
-  session's newest tool.
+- `scripts/plot_vector_boundaries.py` — vector/boundary visualization tool,
+  used to generate the plots referenced above.
 - `tests/_partition_fixtures.py`, `tests/test_duplicate_overlap_integration.py`
   — new regression tests proving duplicate-position/cross-partition handling
   matches legacy.
 
-## Recommended next steps, roughly in priority order
+## If this is picked up again
+
+Not currently planned — parked per the status note at the top — but if
+revisited, roughly in priority order:
 
 1. Close the AFR chr22 gap in the precision/legacy-downstream evidence: run
-   `--high-precision` for AFR chr22, and run the now-generalized
-   `Snakefile.legacy_diagnostics` (see above — updated 2026-07-03 to cover
-   AFR chr21/chr22 alongside EUR) to check whether the same "implementations
-   agree with each other, both disagree with the reference" pattern found
-   for EUR chr8-12 also holds there. This would confirm the
+   `--high-precision` for AFR chr22, and run the already-generalized
+   `Snakefile.legacy_diagnostics` (updated 2026-07-03 to cover AFR
+   chr21/chr22 alongside EUR — see above) to check whether the same
+   "implementations agree with each other, both disagree with the reference"
+   pattern found for EUR chr8-12 also holds there. This would confirm the
    upstream-signal-difference framing applies uniformly rather than being
    EUR-specific.
-2. The real open question is now squarely upstream of covariance/local
-   search: what input or preprocessing step produces a subtly different
-   vector than whatever the original authors used, for exactly these
-   chromosomes? The Tier 1 hidden-assumption items are the remaining
-   concrete leads here: v1/old2011 sample-panel vintage, EUR/AFR/ASN
-   subpopulation-code provenance (see the hidden-assumption-audit plan/log
-   entries for detail).
-3. If (1) and (2) don't turn up anything, this may be close to the practical
-   limit of what's resolvable without the original authors' internal logs —
-   worth an explicit conversation with the user about whether to keep
-   digging or document this as an accepted, understood residual divergence.
+2. The real open question is squarely upstream of covariance/local search:
+   what input or preprocessing step produces a subtly different vector than
+   whatever the original authors used, for exactly these chromosomes? The
+   Tier 1 hidden-assumption items are the remaining concrete leads here:
+   v1/old2011 sample-panel vintage, EUR/AFR/ASN subpopulation-code
+   provenance (see the hidden-assumption-audit plan/log entries for detail).
+3. Absent new evidence (a new data source, an errata from the original
+   authors, etc.), this is close to the practical limit of what's resolvable
+   without their internal processing logs — don't restart from (1) without
+   a concrete new lead.

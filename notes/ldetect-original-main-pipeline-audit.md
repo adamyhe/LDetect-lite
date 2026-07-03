@@ -1219,3 +1219,53 @@ holds for AFR chr22 — `Snakefile.legacy_diagnostics`/`legacy_diagnostics.yaml`
 already exist and could be pointed at AFR chr22 to check directly. Until
 that's run, treat this reassessment as confirmed for EUR chr8-12 and merely
 "expected to generalize" for AFR chr22.
+
+`Snakefile.legacy_diagnostics` was generalized the same day (2026-07-03) from
+a single hardcoded EUR-only population to a `chromosomes_by_population` dict
+(`EUR: [8,9,10,11,12,13]`, `AFR: [21, 22]`), mirroring
+`Snakefile.alternate_source_rerun`'s pattern, so this AFR chr22 check is
+ready to run whenever this investigation is picked back up. It has not been
+run yet (needs the user's compute environment; snakemake isn't installed in
+the diagnostic-writing sandbox, so only a manual read-through of the
+generalized rules was possible, not a live dry-run).
+
+## Status: parked as an accepted, documented residual divergence (2026-07-03)
+
+This investigation is being parked here, not resolved. Summary of where it
+ends up:
+
+- **Resolved** (not a real divergence): AFR chr11 — a data-corruption bug in
+  the published reference BED itself (two rows with a literal `"None"`
+  coordinate at exactly the boundary ldetect2 was flagged for).
+- **Ruled out** as explanations for EUR chr8-12 / AFR chr22: VCF
+  release-version provenance (four documented releases plus the
+  undocumented `merged_umich` snapshot, tested both by sampling diagnostics
+  and full end-to-end pipeline reruns), SNP-only vs. all-variant filtering,
+  genetic map family (HapMap vs. OMNI), `Ne` assignment,
+  duplicate-position/cross-partition handling in `ldetect2` (proven
+  equivalent to legacy with new regression tests), sample/panel provenance,
+  and reference-BED structural integrity (audited genome-wide and per
+  chromosome). Multiallelic ALT-trimming order was deprioritized rather than
+  disproven (no positive evidence either way).
+- **Reframed, not solved**: the vector/boundary visualization shows
+  divergent boundaries fall in flat, low-signal stretches of the smoothed
+  LD vector, and folding in older (2026-05/06) precision/legacy-downstream
+  diagnostics shows this isn't implementation-choice ambiguity (two
+  independent implementations agree with each other and disagree with the
+  reference) — the most likely remaining explanation is a still-unidentified
+  upstream input/provenance difference from whatever generated the
+  published EUR chr8-12 blocks specifically. This has not been confirmed for
+  AFR chr22 (see caveat above).
+
+**Decision**: given the depth of what's already been ruled out, further
+progress here would require either a new external lead (the original
+authors' internal processing logs, an errata, or a not-yet-discovered data
+source) or a substantially different investigative angle — not more
+diagnostics of the kind already run. Rather than continue indefinitely,
+this is being accepted as a known, documented, low-priority residual
+divergence so the branch can merge and attention can move to other issues.
+See `notes/ldetect-original-handoff.md` for the condensed status this
+decision is based on, and the "If this is picked up again" section there for
+the concrete next steps (AFR chr22 precision/legacy-downstream confirmation,
+then the still-open Tier 1 hidden-assumption items) if new evidence or
+motivation arises later.
