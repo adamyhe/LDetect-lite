@@ -353,11 +353,64 @@ environment): that `bcftools query -R`'s same-POS tie order matches the
 tabix-streamed order `calc_covariance` sees; this is standard, documented
 htslib behavior (neither tool re-sorts), so treated as reliable. Verified
 against a mocked-`bcftools` fixture with two records at one position and
-different GT values — first now wins. **Not yet rerun against real data
-after this second fix** — the `v3/snps` vs `v3/all` numbers above (and, to an
-unknown but likely small degree, the v1/v2/old2011 numbers too, wherever a
-duplicate-position site's record order differs between releases) should be
-treated as unreliable until it is.
+different GT values — first now wins.
+
+#### Final confirmed results after both fixes
+
+Date: 2026-07-02 (later same day)
+
+Reran `compare_ld_sets` again after the `read_phased_haplotypes()` fix. This
+resolves the ambiguity above and gives a clean, final picture:
+
+- **`v3/snps` vs `v3/all` (same release, filter-only): perfect concordance
+  everywhere** — `r2_pearson_r=1`, `mean=0`, `max=0` for every single row.
+  Confirms the fix: the previous implausible discordance was entirely the
+  last-write-wins bug, not a real effect.
+- **`v2/all` vs `v3/all`: also perfect concordance everywhere** — `1`/`0`/`0`
+  for every chromosome, both populations, divergent and control alike. The
+  previously-reported "AFR chr11 v2 mismatch (`max=0.938`)" flagged as a
+  "mildly interesting, inconclusive signal" was *also* entirely the
+  last-write-wins bug. v2 and v3 are genuinely byte-identical at every
+  sampled shared position on every chromosome checked. No ambiguity remains
+  here at all.
+- **`v1/all`/`old2011/all` vs `v3/all`: still substantial, still uniform
+  across divergent and control chromosomes.** Updated numbers (small shifts
+  from the pre-second-fix table, same conclusion):
+
+```text
+                    r2_pearson_r  r2_mean_abs_diff  r2_max_abs_diff
+EUR chr8  (div)     0.9871        0.00655           0.9913
+EUR chr9  (div)     0.9829        0.00622           0.9999983
+EUR chr10 (div)     0.9786        0.00808           0.999993
+EUR chr11 (div)     0.9940        0.00425           0.9525
+EUR chr12 (div)     0.9808        0.00669           0.9917
+EUR chr13 (ctl)     0.9768        0.00649           0.999997
+AFR chr11 (div)     0.9732        0.00623           0.999996
+AFR chr13 (ctl)     0.9729        0.00717           0.999967
+AFR chr22 (div)     0.9855        0.00538           0.999996
+```
+
+EUR chr13 (control) again has the lowest Pearson r of the EUR set; AFR chr13
+(control) is again essentially tied with AFR chr11 (divergent) and slightly
+worse than AFR chr22 (divergent) on mean_abs_diff.
+
+**Conclusion: VCF-release-version/phasing provenance is now decisively and
+comprehensively ruled out**, at every level checked: which positions are
+called (earlier position-set diagnostic), and now actual phasing-sensitive
+LD at shared positions, for both a near release (v2, perfectly identical to
+v3 everywhere) and a distant one (v1/old2011, substantial but
+uniformly-distributed discordance uncorrelated with reproduction success).
+Combined with the earlier duplicate-position/cross-partition-handling
+elimination (also empirically closed this session), essentially all
+"cheap" upstream-input hypotheses for the EUR chr8-12 / AFR chr11/chr22
+divergence are now exhausted. The leading remaining explanation is still the
+one from the "Upstream provenance checks" section above: the published
+reference blocks for those specific chromosomes were generated from a
+different upstream snapshot/pipeline state than what's reproducible from
+current public inputs, or a narrow implementation detail not yet identified.
+Both remaining avenues (archaeology into the original authors' exact
+run/errata, or a full alternate-VCF-release end-to-end rerun) are
+substantially more expensive than anything tried so far.
 
 ### Duplicate/multiallelic-position handling: prior work exists on other branches, correcting an initial overclaim
 
