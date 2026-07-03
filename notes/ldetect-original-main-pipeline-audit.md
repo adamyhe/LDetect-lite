@@ -962,3 +962,38 @@ two remaining chromosomes. Candidates not yet tried: the undocumented
 better-candidate releases already failed to move the needle), or accepting
 this as an unresolved provenance mismatch with the original authors' exact
 (unrecoverable) process.
+
+## Chromosome-specific reference BED audit — reconfirms consistency, AFR chr11 corruption traced to the earliest available source
+
+Date: 2026-07-03
+
+Downloaded all 66 chromosome-specific reference files
+(`https://bitbucket.org/nygcresearch/ldetect-data/raw/master/{POP}/fourier_ls-chr{N}.bed`,
+3 populations x 22 chromosomes) and compared each against the corresponding
+chromosome's slice of the genome-wide `{POP}_fourier_ls-all.bed`, using
+raw string-preserving parsing (not normalized/whitespace-stripped, so
+malformed values like `"None"` are caught rather than silently coerced).
+
+**All 66 pairs are byte-identical.** This reconfirms and extends the earlier
+`reference_bed_consistency.tsv` check (which found the same "all 66 match")
+with a stricter comparison method, and it still holds perfectly — the
+all/chromosome-specific published files are fully consistent everywhere.
+
+**The AFR chr11 corruption exists identically in the chromosome-specific file
+too**, not just the genome-wide one:
+
+```text
+AFR/chr11 (chromosome-specific file) line 103: (108823642, None)
+AFR/chr11 (chromosome-specific file) line 104: (None, 111048570)
+```
+
+This was checked hoping the more "primitive" per-chromosome file might carry
+the real, uncorrupted boundary value (if the corruption were introduced
+during Bitbucket's genome-wide concatenation) — it doesn't. The corruption is
+present in the earliest, most direct data source the original authors
+published, so it must originate in whatever script generated/exported the
+AFR breakpoints in the first place. There is no more-authoritative published
+source left to check; the true intended value at that boundary is not
+recoverable from anything Bitbucket has published. Does not change the
+conclusion (AFR chr11 remains a reference-data bug, not a real pipeline
+divergence) — just confirms the trail ends here.
