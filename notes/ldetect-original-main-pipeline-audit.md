@@ -34,6 +34,13 @@ AFR is nearly exact. The only residual differences are chr11 and chr22. AFR
 chr11 has two extra blocks but still near-perfect 100 kb boundary recall. AFR
 chr22 has one extra block and a localized boundary disagreement.
 
+**Update 2026-07-03: AFR chr11 is resolved — see "Supplementary PDF obtained"
+below.** The "126 ref blocks" figure below is a parsing artifact of two
+corrupted rows in the published reference BED file (`"None"` literal instead
+of a real coordinate at exactly the boundary ldetect2 was flagged for
+emitting an "extra" boundary at). Our output is very likely correct there;
+treat AFR chr11 as no longer an open divergence. AFR chr22 remains open.
+
 ## AFR divergences
 
 | Chrom | Our blocks | Ref blocks | Recall | Precision | Boundary Jaccard | Median offset kb | p90 offset kb | bp-Jaccard |
@@ -612,3 +619,346 @@ effort should focus on (1) the `compare_ld_sets` phasing/re-calling diagnostic
 and, if that's inconclusive, (3) a targeted old-VCF-release rerun, per the
 "Recommended next steps" above — not further duplicate/overlap-handling code
 changes.
+
+## Hidden-assumption audit: data preprocessing & provenance
+
+Date: 2026-07-03
+
+While the alternate-source-rerun pipeline runs, audited implicit
+preprocessing/provenance assumptions that were never surfaced as an explicit
+hypothesis to test (as opposed to another empirical diagnostic). Method: read
+the actual legacy code/config, compare against what `ldetect2`/the example
+pipelines do today, and use the existing success/failure pattern (ASN exact
+genome-wide; EUR chr1-7/13-22 and AFR chr1-10/12-21 exact; EUR chr8-12 and
+AFR chr11/chr22 the only failures) as a control on each candidate.
+
+### Partition-boundary `Ne` hardcoding — real divergence, doesn't explain the failures
+
+`_reference/ldetect_original/ldetect/examples/P00_00_partition_chromosome.py`
+line 53 hardcodes `exp(-4.0*11418.0*df/(2.0*nind))` — literally `11418.0`,
+not a parameter — for the partition-boundary-extension step, for *every*
+population including AFR and ASN. Current `ldetect2`
+(`src/ldetect2/_cli/cmd_run.py::_run()`,
+`partition_chromosome(..., ne=args.ne)`) instead passes the population-
+specific `--ne` into that same step (17469 for AFR, 14269 for ASN) — a real,
+previously-unverified divergence from legacy for every non-EUR population.
+
+This doesn't explain the observed failures: ASN is subject to the identical
+substitution (Ne=14269 instead of legacy's implicit 11418 for partition
+boundaries) and still reproduces exactly, genome-wide, on every chromosome.
+If this substitution meaningfully shifted boundary placement, ASN should show
+some symptom too — it shows none. No further action; not a candidate root
+cause, but worth documenting since nobody had actually checked `ldetect2`'s
+own behavior here before (only speculated about it, in
+`notes/local-search-divergence-asn22.md`).
+
+### EUR sample list — definitively confirmed correct, byte-for-byte
+
+`_reference/ldetect_original/ldetect/examples/example_data/eurinds.txt` is
+the *actual* 379-individual EUR sample list distributed with the original
+`ldetect` toy example — a real artifact from the original authors, not an
+inference. Diffed directly against `examples/ldetect_original/resources/EUR_inds.txt`
+(our pipeline's own subpopulation-filter output, derived from
+`config.yaml`'s `EUR: [CEU, TSI, FIN, GBR, IBS]`):
+
+```text
+diff <(sort eurinds.txt) <(sort EUR_inds.txt)   # empty diff, exit 0
+```
+
+**Exact match, 379/379 individuals, zero differences.** This is a definitive,
+not inferred, confirmation that our EUR subpopulation-code choice and
+sample-selection logic exactly reproduce the original authors' actual EUR
+sample list. Since EUR chr8-12 still diverge despite the EUR sample list
+being *proven* identical, this closes off "wrong EUR sample composition" as
+an explanation entirely — not just unlikely, but directly disproven.
+
+No equivalent original AFR/ASN individual list is distributed anywhere in
+`_reference/` (the toy example is EUR/chr2 only), so the same direct check
+isn't available for AFR — AFR sample-list correctness remains only as
+well-supported as the existing count-matching checks (246 individuals,
+consistent across all four VCF releases), not a byte-for-byte proof like EUR.
+
+### Multiallelic ALT-allele-trimming order of operations — no evidence of impact, deprioritized
+
+Confirmed via repo-wide grep that no `bcftools view -a`/`--trim-alt-alleles`
+or `bcftools norm` step exists anywhere in any example pipeline
+(`Snakefile`, `Snakefile.provenance_diagnostics`,
+`Snakefile.alternate_source_rerun`, MacDonald2022). The filter chain
+(`bcftools view -S individuals -Ou vcf | bcftools view -i 'MAC[0]>=1' -m2 -M2`)
+subsets samples before the biallelic filter without trimming unobserved ALT
+alleles first, so a site triallelic in the *full* panel is excluded even if
+only 2 alleles are observed within the analyzed population. This exact
+command sequence is what reproduces the toy chr2 example's 672-SNP count, but
+that window is only 100 kb (chr2:39967768-40067768) — too small to fully
+validate genome-wide-scale behavior on its own.
+
+Not pursued further for now: if this caused a meaningful, systematic SNP-
+inclusion difference from whatever the original pipeline did, it would most
+likely show up as some boundary or count divergence on *most* chromosomes
+(density-dependent, not chr8-12/chr11/chr22-specific), which we don't
+observe — ASN matches exactly on all 22 chromosomes and EUR/AFR match exactly
+on all but 7 chromosomes total. Not disproven the way the two items above
+are, but deprioritized given no positive evidence points at it and the
+existing near-total genome-wide exact-match rate is hard to reconcile with a
+real, impactful trimming discrepancy.
+
+### v1/old2011 panel vintage — definitively closed, no discrepancy ever existed
+
+Date: 2026-07-03 (external/web research, approved)
+
+Directly browsed the 1000G FTP archive (network access confirmed working via
+plain `curl ftp://...`):
+
+- `technical/working/20120213_phase1_integrated_release_version1/` (v1) and
+  `technical/working/20111111_old_phase1_release_files/` (old2011) each
+  contain **only** VCF/TBI files plus a README — no panel file of their own.
+  v1's own README explicitly directs users to the standard
+  `phase1_integrated_calls.20101123.ALL.panel` (the same file `config.yaml`
+  already uses for v3) — so reusing the v3 panel for v1/old2011 isn't a gap
+  in our config, it's what the original 1000G documentation itself always
+  specified. There was never a period-specific panel for these releases to
+  have missed.
+- `technical/working/20120316_phase1_integrated_release_version2/` (v2) does
+  have its own distinct panel file,
+  `phase1_integrated_calls_v2.20101123.ALL.panel` (already the one
+  `provenance_diagnostics.yaml` uses for v2). Downloaded it and diffed
+  directly against the final v3 panel
+  (`release/20110521/phase1_integrated_calls.20101123.ALL.panel`):
+  **zero differences, 1092/1092 samples identical.**
+
+Combined with the EUR sample-list exact-match finding above, sample/panel
+provenance across every tested release is now about as thoroughly closed as
+it can be without the original authors' own logs.
+
+### Original paper / Bitbucket archaeology — thin, but one new lead surfaced
+
+Date: 2026-07-03 (external/web research, approved)
+
+- Berisa & Pickrell (2016), Bioinformatics 32(2):283 (PMC free full text:
+  https://pmc.ncbi.nlm.nih.gov/articles/PMC4731402/). Main text methods are
+  thin: *"We applied this method to sequencing data from European, African
+  and East Asian populations in the 1000 Genomes Phase 1 dataset"* and a mean
+  block size of 10,000 SNPs (matches our `n_snps_bw_bpoints` default) — no
+  release date/version, no population-code list, no Ne values, no filtering
+  parameters given in the main text.
+- The Supplementary Data PDF (`supp_btv546_document-sup.pdf`, linked from the
+  article) could not be retrieved — the old Oxford Journals DOI-based
+  supplementary link (`bioinformatics.oxfordjournals.org/lookup/suppl/...`)
+  now redirects to the generic current article page, not the file; the
+  bioRxiv preprint (`biorxiv.org/content/10.1101/020255v2.full`) returned
+  HTTP 403. Not resolved — would need a subscriber login or a different
+  mirror to actually read it.
+- `nygcresearch/ldetect-data`'s Bitbucket README says only *"Thanks to: Yue Li
+  (comments pointing to several ambiguities)"* with no detail on what those
+  ambiguities were. Both `ldetect` and `ldetect-data` repos have their issue
+  trackers disabled (API returns `Gone`, `has_issues: False`) and no wiki;
+  the Wayback Machine has zero archived snapshots of anything under
+  `bitbucket.org/nygcresearch/ldetect*` (checked via CDX API). The original
+  content of Yue Li's ambiguity reports is not recoverable through any
+  channel tried.
+- **New lead: a previously-untested, undocumented Phase 1 snapshot exists.**
+  Browsing `technical/working/` directly (not referenced anywhere in our
+  config or in any note before now) turned up
+  `20120117_new_phase1_intgrated_genotypes/`, dated Jan 19 2012 — chronologically
+  between `old2011` (Nov 2011) and `v1` (Feb 13 2012). Filename template
+  `ALL.chr{chrom}.merged_umich.20101123.snps_indels_svs.vcf.gz`, genome-wide,
+  all chromosomes present. No README, no panel file, no documentation of any
+  kind in that directory — it reads as an internal University-of-Michigan
+  integration-center snapshot that happened to be left on the public FTP
+  server, not one of the citable, documented public releases. Assessed as
+  lower-priority than the four already-tested releases (v1/v2/v3/old2011 are
+  the only ones with any public documentation/citation trail, making them
+  far more likely candidates for what a careful published analysis would
+  have actually used), but it is a genuine, previously-unknown-to-us
+  candidate that has not been ruled out. Not added to
+  `Snakefile.alternate_source_rerun` without checking with the user first,
+  since that pipeline is already running.
+
+### Recommended posture going forward
+
+Sample/panel provenance (EUR composition, panel-file vintage across all four
+tested releases) is now closed about as tightly as it can be from first
+principles — two independent, direct, byte-level proofs (EUR sample list;
+v2-vs-v3 panel diff) rather than inference. The paper/Bitbucket trail is
+exhausted short of a subscriber login for the supplementary PDF. The
+remaining live threads are: (a) the `merged_umich` snapshot, if worth the
+compute cost given it's undocumented and the four documented releases already
+showed no chromosome-specific signal; (b) reading the actual supplementary
+PDF if a copy can be obtained some other way; (c) waiting on the
+`alternate_source_rerun` results themselves, which are a more direct test
+than any further provenance archaeology can offer.
+
+## Supplementary PDF obtained — and it resolves AFR chr11 completely
+
+Date: 2026-07-03
+
+The user obtained `document-sup.pdf` (the paper's supplementary material,
+previously unreachable via automated web fetch) and provided it directly.
+
+### Confirms existing assumptions, no new leads there
+
+- Genetic map source: *"Genome-wide recombination rates were obtained from
+  Phase 2 HapMap Release 22 (Frazer et al., 2007) and interpolated to all
+  positions in the 1000 Genomes dataset."* Matches what
+  `joepickrell/1000-genomes-genetic-maps` already provides and what we've
+  been using — confirmed correct, not a new lead.
+- Mean segment size: *"For the published blocks, we used 10^4 SNPs for the
+  mean segment size"* — matches `n_snps_bw_bpoints=10000`, our existing
+  default — confirmed correct.
+- Shrinkage/covariance formula (Section 1) matches `ldetect2.shrinkage`'s
+  implementation exactly (population-scaled recombination rate in the
+  exponential decay term, sample-size normalization).
+- No new information on exact 1000G release version or population
+  definitions beyond "1000 Genomes Project Phase 1 dataset" — doesn't add
+  anything beyond the empirical byte-level proofs already established
+  (EUR sample list, panel diffs).
+
+### Fig. 2's per-chromosome block-count table — real signal, and a real bug found
+
+Fig. 2 gives an exact block count per chromosome per population. Cross-checked
+directly against our local `resources/ldetect_ref/{POP}_fourier_ls-all.bed`
+files and our own `results/{POP}_LD_blocks.bed`, for all 22 chromosomes x 3
+populations (66 rows):
+
+**Every single row satisfies `supplement_count == raw_bed_row_count + 1`,
+with zero exceptions** — a clean, uniform off-by-one, almost certainly a
+"number of breakpoints vs. number of blocks" counting-convention difference
+between the paper's figure-generation script and the distributed `.bed`
+files, not a real discrepancy. Not investigated further; the `.bed` files
+remain the correct, authoritative comparison target (as already used
+everywhere in this investigation), and this cross-check just confirms that
+target is internally consistent with the paper's own reported statistics
+once the off-by-one convention is accounted for.
+
+**The one place this cross-check initially looked inconsistent — AFR chr11 —
+turned out to be a real, previously-unknown bug in the published reference
+BED file itself, not in our pipeline or in the off-by-one theory.**
+
+Investigation: `AFR_fourier_ls-all.bed` has 128 raw rows for chr11 (matches
+our own `results/AFR_LD_blocks.bed`'s 128 rows for chr11 exactly), but
+`ldetect2.io.bed.read_genome_bed()` (used by `compare_blocks.py`) parses only
+126 valid blocks for chr11 — it silently drops 2 malformed rows that fail the
+"is this a valid integer coordinate" check
+(`src/ldetect2/io/bed.py::_iter_bed_records`, correct, defensive behavior).
+Found the actual malformed rows:
+
+```text
+chr11 	 107843326 	 108823642
+chr11 	 108823642 	 None       <- malformed: end coordinate is the literal string "None"
+chr11 	 None 	 111048570      <- malformed: start coordinate is the literal string "None"
+chr11 	 111048570 	 112221476
+```
+
+This is exactly the pair of coordinates (`108823642`, `111048570`) previously
+flagged in this file as "AFR chr11 emits one additional internal boundary at
+`109897792`, about 1.07 Mb from the nearest reference boundary
+(`108823642`)" (see "AFR divergences" above) — and our own current output
+confirms it precisely:
+
+```text
+results/AFR_LD_blocks.bed, chr11:
+107843326  108823642
+108823642  109897792   <- exactly the block whose end got corrupted to "None" in the reference
+109897792  111048570   <- exactly the block whose start got corrupted to "None" in the reference
+111048570  112221476
+```
+
+**Conclusion: AFR chr11 is not a real reproduction divergence at all.** The
+published reference file has a data-corruption bug — two block-boundary
+values were serialized as the literal string `"None"` instead of the real
+breakpoint (`109897792`) — isolated to this one exact location in the AFR
+file (confirmed via `grep -c "None"`: zero occurrences anywhere in the EUR or
+ASN reference files, and no other occurrence anywhere else in the AFR file).
+Our pipeline's output is very likely *correct* here; the "extra boundary"
+was never extra, it's the reference artifact that's missing it. This fully
+resolves what was previously the second-most-tracked AFR residual alongside
+chr22. AFR chr22 remains unexplained — no similar corruption found there,
+and its divergence pattern (1 extra block, boundaries displaced beyond
+simple tolerance in places) doesn't match this specific failure mode.
+
+### Updated residual list
+
+- ~~AFR chr11~~ — resolved: reference-file corruption, not a real divergence.
+- AFR chr22 — still open, no explanation found.
+- EUR chr8-12 — still open, no explanation found.
+
+### Broader structural audit of the reference BED files — nothing else found
+
+Date: 2026-07-03
+
+Audited all three reference files (and our own genome-wide outputs, for
+comparison) for gaps, overlaps, zero/negative-length blocks, out-of-order
+boundaries, and duplicate rows (parsing with the same permissive-but-safe
+logic as `ldetect2.io.bed`, skipping the harmless header row).
+
+```text
+REF AFR: 1 issue  — chr11: GAP of 2,224,928 bp (108823642 -> 111048570)
+REF EUR: 0 issues
+REF ASN: 0 issues
+OURS AFR/EUR/ASN: 0 issues each
+```
+
+The one flagged issue is the same chr11 corruption already found — filtering
+out the two malformed `"None"` rows leaves a large gap exactly where they
+were, which is confirming triangulation from a different angle (contiguity)
+rather than a new finding. No overlaps, no degenerate blocks, no ordering
+problems, no duplicates anywhere else in any of the three reference files;
+our own outputs are perfectly contiguous everywhere as expected. This rules
+out "silent structural data-quality issues elsewhere in the reference files"
+as a contributor to AFR chr22 or EUR chr8-12 — there is nothing else to find
+in this direction.
+
+## Alternate-source full-pipeline rerun results — decisive, VCF release is not the answer
+
+Date: 2026-07-03
+
+`Snakefile.alternate_source_rerun` completed (21 full `ldetect2 run` executions:
+v1/v2/old2011 x EUR chr8/9/10/11/12 x AFR chr11/22). This is the direct
+empirical test the earlier `compare_ld_sets` diagnostic could only infer from
+sampled positions/LD pairs. Extracted the 21 real per-chromosome result rows
+from `results/alternate_source_rerun/comparison_summary.tsv` (the file also
+contains ~440 padding rows from `compare_blocks.py` iterating the full
+22-chromosome reference against each single-chromosome run — filtered to
+`our_n != 0`).
+
+Recall at 100kb tolerance, vs. the v3 baseline already on record:
+
+```text
+pop  chrom  v3(baseline)   v1      v2      old2011
+EUR  chr8   0.4105         0.4330  0.4526  0.4330
+EUR  chr9   0.3467         0.3158  0.3467  0.3158
+EUR  chr10  0.2907         0.3068  0.3023  0.3068
+EUR  chr11  0.4588         0.4138  0.4824  0.4138
+EUR  chr12  0.3614         0.3810  0.3902  0.3810
+AFR  chr22  0.8056         0.7222  0.7778  0.7222
+AFR  chr11  0.9922*        0.7984  0.9070  0.7984
+```
+\* AFR chr11's v3 recall is measured against the corrupted reference file
+(see above) and isn't a clean number; already resolved independently as a
+reference-file bug.
+
+Findings:
+
+- **v1 and old2011 produce byte-identical results on every chromosome** —
+  consistent with the earlier `compare_ld_sets` finding that these two
+  "releases" are functionally the same processed dataset for our filtered,
+  individual-subsetted universe.
+- **v2 gives a modest recall improvement on 4 of 5 EUR chromosomes**
+  (chr8, chr11, chr12 up; chr9 flat) but nowhere near the ~1.0 recall seen on
+  exact-match control chromosomes (chr7, chr13). Not remotely sufficient to
+  call this "the fix."
+- **For AFR chr22, every alternate release is worse than v3** — v3 is the
+  best-performing source of the four for that chromosome.
+
+**Conclusion: swapping the 1000G VCF release does not fix EUR chr8-12 or AFR
+chr22.** This directly confirms (rather than just infers, as the phasing/LD
+diagnostic did) that VCF-release provenance is not the explanation. Combined
+with everything else ruled out this investigation (SNP-only filtering,
+genetic map family, Ne assignment, duplicate-position/cross-partition
+handling, sample/panel provenance, reference-file structural integrity), the
+input-and-implementation search space is now essentially exhausted for these
+two remaining chromosomes. Candidates not yet tried: the undocumented
+`merged_umich` snapshot (low expected value given the four documented,
+better-candidate releases already failed to move the needle), or accepting
+this as an unresolved provenance mismatch with the original authors' exact
+(unrecoverable) process.

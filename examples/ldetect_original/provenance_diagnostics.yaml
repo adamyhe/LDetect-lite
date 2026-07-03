@@ -26,6 +26,15 @@ sources:
     base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20111111_old_phase1_release_files"
     filename_template: "ALL.chr{chrom}.merged_beagle_mach.20101123.snps_indels_svs.genotypes.vcf.gz"
     panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+  # Undocumented intermediate Phase 1 snapshot, chronologically between
+  # old2011 (Nov 2011) and v1 (Feb 2012). No README or panel file in its own
+  # directory (unlike v1/old2011, whose own docs point at the standard
+  # panel below, this one has no documentation at all) -- reusing the
+  # standard panel is the only available option, not a confirmed match.
+  merged_umich:
+    base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20120117_new_phase1_intgrated_genotypes"
+    filename_template: "ALL.chr{chrom}.merged_umich.20101123.snps_indels_svs.vcf.gz"
+    panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
 
 # `all` matches the main reproduction pipeline. `snps` tests whether the
 # published blocks used an effectively SNP-only universe.
@@ -40,6 +49,7 @@ comparison_candidates:
   - {source: v2, variant_filter: snps}
   - {source: v1, variant_filter: all}
   - {source: old2011, variant_filter: all}
+  - {source: merged_umich, variant_filter: all}
 
 # compare_vcf_ld.py parameters: deterministic evenly-spaced sample of nearby
 # SNP pairs (positions shared with the v3/all baseline) used to compare
