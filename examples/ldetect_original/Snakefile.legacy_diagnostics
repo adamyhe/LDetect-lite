@@ -1,0 +1,301 @@
+"""Run vendored legacy ldetect against ldetect2-generated covariance data."""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "legacy_diagnostics.yaml"
+
+
+DIAG_POP = config.get("population", "EUR")
+DIAG_CHROMS = [str(chrom) for chrom in config.get("chromosomes", [8, 9, 10, 11, 12, 13])]
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = RESULTS / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+LEGACY_ROOT = RESULTS / "legacy_diagnostics" / DIAG_POP
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def ldetect2_dir(wildcards):
+    return str(LEGACY_ROOT / str(wildcards.chrom) / "ldetect2_full")
+
+
+def ref_bed_fallback_url(wildcards):
+    return config.get("ldetect_ref_fallback_urls", {}).get(wildcards.population, "")
+
+
+rule all:
+    input:
+        expand(
+            str(LEGACY_ROOT / "{chrom}" / "compare" / "ldetect2_vs_legacy.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        expand(
+            str(LEGACY_ROOT / "{chrom}" / "compare" / "legacy_vs_reference.tsv"),
+            chrom=DIAG_CHROMS,
+        ),
+        expand(
+            str(LEGACY_ROOT / "{chrom}" / "legacy" / "{chrom}-ld-blocks.bed"),
+            chrom=DIAG_CHROMS,
+        ),
+
+
+rule legacy_download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule legacy_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule legacy_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule legacy_download_ref_bed:
+    output:
+        str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+        fallback_url=ref_bed_fallback_url,
+    shell:
+        """
+        mkdir -p {RES_DIR}/ldetect_ref
+        tmp="{output}.tmp"
+        if ! wget -q -O "$tmp" \
+            "{params.base_url}/{wildcards.population}/fourier_ls-all.bed"; then
+            rm -f "$tmp"
+            if [ -n "{params.fallback_url}" ]; then
+                wget -q -O "$tmp" "{params.fallback_url}"
+            else
+                exit 1
+            fi
+        fi
+        mv "$tmp" {output}
+        """
+
+
+rule legacy_prep_individuals:
+    input:
+        panel=rules.legacy_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule legacy_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+rule legacy_run_ldetect2_full:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.replace("{population}", DIAG_POP),
+        tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        individuals=str(RES_DIR / f"{DIAG_POP}_inds.txt"),
+    output:
+        bed=str(LEGACY_ROOT / "{chrom}" / "ldetect2_full" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(
+            LEGACY_ROOT / "{chrom}" / "ldetect2_full" / "breakpoints-{chrom}.json"
+        ),
+        vector=str(LEGACY_ROOT / "{chrom}" / "ldetect2_full" / "vector-{chrom}.txt.gz"),
+        partitions=str(LEGACY_ROOT / "{chrom}" / "ldetect2_full" / "{chrom}_partitions.txt"),
+    log:
+        run=str(LEGACY_ROOT / "{chrom}" / "logs" / "ldetect2_full.log"),
+        timing=str(LEGACY_ROOT / "{chrom}" / "logs" / "ldetect2_full.timing.log"),
+    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    params:
+        output_dir=ldetect2_dir,
+        log_dir=str(LEGACY_ROOT / "{chrom}" / "logs"),
+        ne=pop_ne(DIAG_POP),
+        cutoff=config["cov_cutoff"],
+        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        local_search_workers=lambda wildcards, threads: min(
+            config.get("local_search_workers", 1),
+            threads,
+        ),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            > {log.run} 2>&1
+        """
+
+
+rule stage_legacy_dataset:
+    input:
+        bed=rules.legacy_run_ldetect2_full.output.bed,
+        partitions=rules.legacy_run_ldetect2_full.output.partitions,
+        converter="scripts/legacy_hdf5_to_gz.py",
+    output:
+        marker=str(LEGACY_ROOT / "{chrom}" / "legacy_dataset" / ".staged"),
+    threads: config.get("ldetect2_job_threads", 1)
+    params:
+        dataset=str(LEGACY_ROOT / "{chrom}" / "legacy_dataset"),
+        ldetect2_dir=ldetect2_dir,
+        staging_workers=config.get("staging_workers", 1),
+    shell:
+        """
+        mkdir -p {params.dataset}/scripts
+        mkdir -p {params.dataset}/{wildcards.chrom}
+        cp {input.partitions} {params.dataset}/scripts/{wildcards.chrom}_partitions
+        awk \
+            -v chrom="{wildcards.chrom}" \
+            -v in_dir="{params.ldetect2_dir}" \
+            -v out_dir="{params.dataset}" \
+            '{{print in_dir "/" chrom "/" chrom "." $1 "." $2 ".h5", out_dir "/" chrom "/" chrom "." $1 "." $2 ".gz"}}' \
+            {input.partitions} \
+            | xargs -n 2 -P {params.staging_workers} sh -c \
+                'uv run python scripts/legacy_hdf5_to_gz.py --input "$1" --output "$2"' sh
+        touch {output.marker}
+        """
+
+
+rule run_legacy_ldetect:
+    input:
+        marker=rules.stage_legacy_dataset.output.marker,
+        runner="scripts/run_legacy_ldetect.py",
+    output:
+        vector=str(LEGACY_ROOT / "{chrom}" / "legacy" / "vector-{chrom}.txt.gz"),
+        pickle=str(LEGACY_ROOT / "{chrom}" / "legacy" / "breakpoints-{chrom}.pickle"),
+        json=str(LEGACY_ROOT / "{chrom}" / "legacy" / "breakpoints-{chrom}.json"),
+        bed=str(LEGACY_ROOT / "{chrom}" / "legacy" / "{chrom}-ld-blocks.bed"),
+        summary=str(LEGACY_ROOT / "{chrom}" / "legacy" / "summary.tsv"),
+    threads: config.get("ldetect2_job_threads", 1)
+    log:
+        str(LEGACY_ROOT / "{chrom}" / "logs" / "legacy_ldetect.log"),
+    params:
+        dataset=str(LEGACY_ROOT / "{chrom}" / "legacy_dataset"),
+        output_dir=str(LEGACY_ROOT / "{chrom}" / "legacy"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+    shell:
+        """
+        uv run python scripts/run_legacy_ldetect.py \
+            --dataset-path {params.dataset} \
+            --chromosome {wildcards.chrom} \
+            --population {DIAG_POP} \
+            --output-dir {params.output_dir} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            > {log} 2>&1
+        """
+
+
+rule compare_legacy_outputs:
+    input:
+        ldetect2_vector=rules.legacy_run_ldetect2_full.output.vector,
+        legacy_vector=rules.run_legacy_ldetect.output.vector,
+        ldetect2_breakpoints=rules.legacy_run_ldetect2_full.output.breakpoints,
+        legacy_breakpoints=rules.run_legacy_ldetect.output.json,
+        ldetect2_bed=rules.legacy_run_ldetect2_full.output.bed,
+        legacy_bed=rules.run_legacy_ldetect.output.bed,
+        reference_bed=str(RES_DIR / "ldetect_ref" / f"{DIAG_POP}_fourier_ls-all.bed"),
+        script="scripts/compare_legacy_outputs.py",
+    output:
+        ldetect2_vs_legacy=str(
+            LEGACY_ROOT / "{chrom}" / "compare" / "ldetect2_vs_legacy.tsv"
+        ),
+        legacy_vs_reference=str(
+            LEGACY_ROOT / "{chrom}" / "compare" / "legacy_vs_reference.tsv"
+        ),
+    params:
+        subset=config.get("subset", "fourier_ls"),
+        tolerance=config.get("tolerance", 100_000),
+    shell:
+        """
+        uv run python scripts/compare_legacy_outputs.py \
+            --chromosome {wildcards.chrom} \
+            --ldetect2-vector {input.ldetect2_vector} \
+            --legacy-vector {input.legacy_vector} \
+            --ldetect2-breakpoints {input.ldetect2_breakpoints} \
+            --legacy-breakpoints {input.legacy_breakpoints} \
+            --ldetect2-bed {input.ldetect2_bed} \
+            --legacy-bed {input.legacy_bed} \
+            --reference-bed {input.reference_bed} \
+            --subset {params.subset} \
+            --tolerance {params.tolerance} \
+            --ldetect2-vs-legacy {output.ldetect2_vs_legacy} \
+            --legacy-vs-reference {output.legacy_vs_reference}
+        """

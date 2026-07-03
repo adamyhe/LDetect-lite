@@ -1,0 +1,33 @@
+"""Targeted provenance diagnostics for ldetect_original divergences."""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "provenance_diagnostics.yaml"
+
+
+RESULTS = Path(config["results_dir"])
+PROV_ROOT = RESULTS / "provenance_diagnostics"
+
+
+rule all:
+    input:
+        str(PROV_ROOT / "position_comparison_summary.tsv"),
+
+
+rule provenance_position_diagnostics:
+    input:
+        driver="scripts/run_provenance_position_diagnostics.py",
+        downloader="scripts/download_provenance_input.py",
+        comparer="scripts/compare_vcf_positions.py",
+        prep="scripts/prep_individuals.py",
+    output:
+        str(PROV_ROOT / "position_comparison_summary.tsv"),
+    shell:
+        """
+        uv run python scripts/run_provenance_position_diagnostics.py \
+            --base-config config.yaml \
+            --diagnostics-config provenance_diagnostics.yaml \
+            --output {output}
+        """
