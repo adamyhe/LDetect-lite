@@ -119,6 +119,18 @@ def read_phased_haplotypes(
     Column order matches the *given* VCF's own query output and is only ever
     used for within-VCF comparisons (r^2, MAF), so it does not need to match
     the column order used for the other VCF.
+
+    A physical position can have more than one VCF record (e.g. a SNP and a
+    co-located indel, or a split multiallelic site); ``bcftools query``
+    emits all of them. This keeps only the *first* one per position, in
+    on-disk file order, matching how ``ldetect2.shrinkage.calc_covariance``
+    resolves the same situation when it streams a VCF (see
+    notes/ldetect-original-main-pipeline-audit.md, "Duplicate-position /
+    cross-partition equivalence"). A plain last-write-wins dict assignment
+    here previously let the record order of duplicate-position sites (which
+    can differ between VCF releases and between the "all"/"snps" filtered
+    views of the same release) silently swap in an unrelated variant's
+    genotype, producing spurious r^2 discordance unrelated to phasing.
     """
     out = _run(
         [
@@ -141,6 +153,8 @@ def read_phased_haplotypes(
             continue
         parts = line.split("\t")
         pos = int(parts[0])
+        if pos in haps:
+            continue
         arr = np.full(2 * len(samples), -1, dtype=np.int8)
         for i, gt in enumerate(parts[1:]):
             total_gt += 1

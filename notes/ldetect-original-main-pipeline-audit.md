@@ -286,10 +286,78 @@ downstream of that call.
 **Fix**: renamed the temp file to `regions.txt` (`compare_vcf_ld.py`, in
 `compare()`), so bcftools uses the plain 1-based-inclusive convention that
 `write_region_file()` was already written for. No other code changed.
-Not yet re-validated against real data (bcftools still unavailable in this
-session) — **the `ld_comparison_summary.tsv` results gathered before this fix
-should be discarded and the diagnostic rerun** before drawing any conclusion
-about VCF-release phasing/re-calling differences.
+
+#### Real run after the fix: release-version phasing differences do not distinguish divergent chromosomes either
+
+Date: 2026-07-02 (later same day)
+
+Reran `compare_ld_sets` for real after the `.bed`-extension fix. Data is now
+non-degenerate (`n_pairs` ~2500/row, matching `max_anchors=500 *
+pairs_per_anchor=5`).
+
+**v1/old2011 vs v3/all (different 1000G release): decisive negative result.**
+The exact-match control chromosomes show r^2 discordance across releases
+that's statistically indistinguishable from — or worse than — the divergent
+chromosomes:
+
+```text
+                    r2_pearson_r  r2_mean_abs_diff  r2_max_abs_diff
+EUR chr8  (div)     0.9820        0.00767           0.9998
+EUR chr9  (div)     0.9829        0.00622           0.99998
+EUR chr10 (div)     0.9786        0.00810           0.999993
+EUR chr11 (div)     0.9940        0.00436           0.9525
+EUR chr12 (div)     0.9782        0.00716           0.9917
+EUR chr13 (ctl)     0.9738        0.00703           0.999997
+AFR chr11 (div)     0.9732        0.00623           0.999996
+AFR chr13 (ctl)     0.9729        0.00719           0.999967
+AFR chr22 (div)     0.9855        0.00539           0.999996
+```
+
+EUR chr13 (control) has the *lowest* Pearson r of the whole EUR set; AFR
+chr13 (control) is essentially tied with AFR chr11. This extends the earlier
+position-set-only negative result to actual phasing-sensitive LD: VCF release
+version is now ruled out both for which positions are called and for the LD
+estimated at shared positions.
+
+**v2/all vs v3/all (closer release): one inconclusive signal, not pursued
+further.** AFR chr11 (divergent) shows real discordance (`max=0.938`) against
+a perfectly-concordant AFR chr13 control (`max=0`) and a near-perfect AFR
+chr22 (divergent, `max=0.0143`) — but EUR chr11 is the EUR outlier
+(`max=0.755` vs control's `0.165`) while EUR chr9 (also divergent) is *more*
+concordant than the control (`max=0.00127`). Inconsistent across the two
+divergent EUR chromosomes checked; not treated as evidence either way.
+
+**Second bug found and fixed: duplicate-position last-write-wins in
+`read_phased_haplotypes()`.** The `v3/snps` vs `v3/all` rows (same release,
+only the SNP-only filter differs) showed implausibly large discordance (e.g.
+AFR chr22 `max=0.566`, EUR chr9 `max=0.467`) that should be ~0, since a SNP's
+genotype calls don't change when unrelated indel records elsewhere in the
+file are filtered out. Cause: `read_phased_haplotypes()` built
+`haps[pos] = arr` as a plain, unconditional dict assignment, so when a
+physical position had more than one VCF record (e.g. a SNP and a co-located
+indel), whichever record `bcftools query` emitted *last* silently won —
+arbitrary with respect to variant type, and can differ between VCF releases
+or between the "all"/"snps" views of the same release.
+
+Fix: keep only the *first* record per position (`if pos in haps: continue`
+before parsing), matching how `ldetect2.shrinkage.calc_covariance` resolves
+the same situation when it streams a VCF (see the "Duplicate-position /
+cross-partition equivalence" section below) — `bcftools query -R` traverses
+the same on-disk sorted/indexed file order as `calc_covariance`'s own
+VCF-stream parsing, so "first" here should correspond to the same record the
+real production pipeline would actually use at that locus. This is not
+"pick the true SNP" in the abstract — it's "match what the real pipeline
+would see," which is what this diagnostic is trying to measure. One
+assumption not independently verified (bcftools unavailable in this
+environment): that `bcftools query -R`'s same-POS tie order matches the
+tabix-streamed order `calc_covariance` sees; this is standard, documented
+htslib behavior (neither tool re-sorts), so treated as reliable. Verified
+against a mocked-`bcftools` fixture with two records at one position and
+different GT values — first now wins. **Not yet rerun against real data
+after this second fix** — the `v3/snps` vs `v3/all` numbers above (and, to an
+unknown but likely small degree, the v1/v2/old2011 numbers too, wherever a
+duplicate-position site's record order differs between releases) should be
+treated as unreliable until it is.
 
 ### Duplicate/multiallelic-position handling: prior work exists on other branches, correcting an initial overclaim
 
