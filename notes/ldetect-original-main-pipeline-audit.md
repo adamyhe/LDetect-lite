@@ -248,12 +248,48 @@ Wired into `Snakefile.provenance_diagnostics` as `compare_ld_sets` /
 `comparison_candidates` list and the already-filtered VCFs from the position-set
 diagnostic (no new downloads required; confirmed via `snakemake -n`). New
 `ld_window_bp`/`ld_max_anchors`/`ld_pairs_per_anchor` knobs added to
-`provenance_diagnostics.yaml`. Not yet run against real data — bcftools is not
-available in this environment. The script's pure logic (pair selection, MAF,
-r^2, output aggregation) and full `compare()` flow were validated against a
-synthetic mocked-`bcftools` fixture: identical phasing between two "releases"
-produces `abs_diff` ≈ 0 for shared pairs, a scrambled/switch-error-like site
-produces `abs_diff` = 0.75.
+`provenance_diagnostics.yaml`. Not run against real data in the session that
+wrote it — bcftools is not available in that environment. The script's pure
+logic (pair selection, MAF, r^2, output aggregation) and full `compare()` flow
+were validated against a synthetic mocked-`bcftools` fixture: identical
+phasing between two "releases" produces `abs_diff` ≈ 0 for shared pairs, a
+scrambled/switch-error-like site produces `abs_diff` = 0.75.
+
+#### Bug found on first real run: `.bed`-extension region file (fixed)
+
+Date: 2026-07-02 (later same day)
+
+The user ran `compare_ld_sets` for real (EUR chr8-13, AFR chr11/13/22, all 5
+candidates each) and every single row of `ld_comparison_summary.tsv` came back
+`n_pairs=0` with every downstream stat `nan` — including the MAF stats, not
+just r^2. That total, uniform failure (46/46 rows, both populations, all
+chromosomes and candidates) is not a plausible biological result; it means the
+haplotype extraction step returned nothing for every position in every run.
+
+Root cause: `compare()` wrote its temporary region file as
+`Path(tmpdir) / "regions.bed"`, then read it back with `bcftools query -R`.
+`bcftools` autodetects the region-file coordinate convention from the file
+**extension**: a `.bed`-named file is parsed as 0-based, half-open BED
+intervals; anything else uses the plain 1-based-inclusive `CHROM\tBEG\tEND`
+convention. `write_region_file()` writes `pos\tpos` (start == end) intending
+"select exactly this 1-based position" — correct for the plain convention,
+but a zero-width, half-open `[pos, pos)` interval under BED semantics, which
+matches **no** records. Because the file was named `regions.bed`, every
+`bcftools -R` genotype query returned empty output, for every position, in
+every comparison — exactly matching the observed symptom.
+
+This is a real gap in the earlier validation: the mocked-`bcftools` unit test
+stubbed out the `_run()` subprocess call entirely, so it could never exercise
+real bcftools' region-file-parsing semantics — only the pure Python logic
+downstream of that call.
+
+**Fix**: renamed the temp file to `regions.txt` (`compare_vcf_ld.py`, in
+`compare()`), so bcftools uses the plain 1-based-inclusive convention that
+`write_region_file()` was already written for. No other code changed.
+Not yet re-validated against real data (bcftools still unavailable in this
+session) — **the `ld_comparison_summary.tsv` results gathered before this fix
+should be discarded and the diagnostic rerun** before drawing any conclusion
+about VCF-release phasing/re-calling differences.
 
 ### Duplicate/multiallelic-position handling: prior work exists on other branches, correcting an initial overclaim
 
@@ -349,3 +385,109 @@ either.
    phasing-level anomaly detected in (1), or to test a specific "the original
    authors mixed up VCF sets for a batch of chromosomes" hypothesis after (1)
    and (2) leave that as the remaining explanation.
+
+## Duplicate-position / cross-partition equivalence: closed empirically
+
+Date: 2026-07-02
+
+Item 2 above ("settle the duplicate-position question empirically") is now
+closed. Direct comparison of legacy `_reference/ldetect_original/ldetect/` code
+against current `src/ldetect2` (branch `ldetect-original-fix`), followed by new
+regression tests, both point the same way: **duplicate-VCF-position and
+cross-partition-overlap handling in the current codebase are legacy-faithful,
+not the source of the EUR chr8-12/AFR chr11/chr22 divergence.**
+
+### Why they're equivalent (the reasoning, not just the conclusion)
+
+**Within-partition duplicate VCF positions** (two records sharing one `POS`):
+
+- Legacy `baselib/flat_file.py::insert_into_matrix` (`if r not in
+  matrix[l]['data']: ...`, line ~104-105) and `insert_into_matrix_lean` (`if r
+  not in matrix[l]: ...`, line ~163) are **first-write-wins** dict inserts — a
+  second write to an already-populated key is silently skipped, not applied.
+  This was previously misread as last-write-wins in this file's earlier
+  "Duplicate/multiallelic-position handling" section above; that was wrong.
+- `P00_01_calc_covariance.py` never deduplicates `allpos` — every VCF row,
+  including duplicates, gets its own row(s) in the flat covariance output,
+  driven by array *index* (not unique position).
+- The key insight: two duplicate-position VCF rows sit at the *same physical
+  position*, so they get an *identical* genetic-distance window (window only
+  depends on `pos2gpos[pos]`). Because legacy's output-row order follows
+  outer-loop index order (= VCF encounter order), the first-VCF-encountered
+  duplicate's row for any neighbor `r` is *always* written, and therefore
+  always kept, before the second duplicate's row for that same `r`. So
+  first-write-wins always resolves to "use the first-VCF-encountered
+  duplicate's genotype data for every neighbor" — which is exactly what
+  `ldetect2.shrinkage.calc_covariance` (`shrinkage.py:634-657`) already does
+  by dropping every row after the first at a given `POS`, before computing
+  anything. Same outcome via a different mechanism (upfront drop vs.
+  downstream insert-once), not a divergence.
+
+**Cross-partition overlap** (the same canonical `(lo, hi)` pair, redundantly
+computed by two adjacent, overlapping partitions):
+
+- Legacy `E07_metric.py`/`E08_local_search.py` and current `metric.py`/
+  `local_search.py`/`_util/covariance_array.py::_owned_bounds` all use the
+  same "next-partition-start" locus-ownership boundary
+  (`end_locus = partitions[p+1][0]`).
+- Legacy `E03_matrix_to_vector.py::calc_diag` and current `matrix_analysis.py`/
+  `_util/vector_array.py` both use the same "midpoint" boundary
+  (`floor((partitions[p][1] + partitions[p+1][0]) / 2)`).
+  These are two intentionally different legacy-faithful conventions (one per
+  algorithm), not an internal inconsistency in `ldetect2`.
+- Which *value* wins for a redundant pair is decided by a shared primitive,
+  `io/covariance.py::_insert_lean_values` (`if hi not in matrix[lo]:
+  matrix[lo][hi] = shrink`) — plain partition-read-order first-write-wins,
+  used identically by `MatrixAnalysis._calc_diag_lean_legacy`,
+  `Metric._calc_metric_lean`, and `LocalSearch`'s dict/`use_decimal=True`
+  path. This is a direct, already-tested port of legacy's
+  `insert_into_matrix` precedence.
+- The array-backed paths resolve the same redundancy differently, but also
+  correctly: `metric.py`/`covariance_array.py::_owned_in_range_mask` use a
+  *structural* guarantee — ownership is decided purely by a row's lower
+  position (`i_pos`) against fixed, non-overlapping numeric windows, so a
+  redundant pair's two copies (which always share the same `i_pos`) can never
+  both be "owned" — no identity-based dedup is needed or possible to get
+  wrong. `local_search.py` is the one array path that genuinely needs
+  identity-based resolution (its windows load full overlapping partition row
+  sets), and it has explicit, tested first-partition-wins logic
+  (`canonical_local_search_rows`, `_first_seen_pair_mask`).
+- One consequence of this reasoning: `_util/covariance_array.py::
+  _deduplicate_metric_pairs` was dead code (defined, zero call sites) — its
+  job is already structurally guaranteed by `_owned_in_range_mask`. Deleted.
+
+### What was empirically verified (new tests, all passing on `ldetect-original-fix`)
+
+- `tests/test_shrinkage.py::test_calc_covariance_duplicate_position_matches_first_encountered_variant`
+  — value-level check (not just sortedness/uniqueness like the pre-existing
+  `test_calc_covariance_canonicalizes_duplicate_physical_positions`): two
+  duplicate-position variants engineered to give provably opposite-sign LD
+  with a shared neighbor; asserts the deduped output matches an independently
+  hand-computed "first-encountered-only" value, not the second variant's.
+- `tests/test_covariance_io.py::test_matrix_to_vector_array_matches_legacy_with_divergent_overlap_pair`
+  and `tests/test_metric.py::test_array_metric_matches_legacy_with_divergent_overlap_pair`
+  — the pre-existing overlapping-partition fixtures for these two modules
+  happened to give both overlapping partitions *identical* values for their
+  shared boundary rows, so they never exercised actual overlap-resolution
+  precedence. New tests use a fixture (`tests/_partition_fixtures.py::
+  divergent_overlap_partitions`) where the redundant pair has genuinely
+  different values (`0.7` vs `0.2`) in each partition, cross-checked against
+  an independent from-scratch oracle (`first_write_wins_pair_value`, plain
+  Python, no imports from `ldetect2`). Both pass.
+- `tests/test_duplicate_overlap_integration.py` — the one combination flagged
+  as untested anywhere: a duplicate VCF position that also sits inside a
+  cross-partition overlap zone, exercised through real (not hand-typed)
+  `calc_covariance()` runs on two overlapping VCF slices
+  (`tests/_partition_fixtures.py::build_two_overlapping_partitions_with_duplicate_position`).
+  Confirms (a) the two partitions' independently-computed redundant pairs are
+  **bit-identical**, not just close, and (b) `matrix_analysis`, `metric`, and
+  `local_search` all agree between their array/fast paths and legacy dict
+  paths on this combined scenario. All four tests pass.
+
+### Conclusion
+
+Duplicate-position and cross-partition handling are not implicated. Diagnostic
+effort should focus on (1) the `compare_ld_sets` phasing/re-calling diagnostic
+and, if that's inconclusive, (3) a targeted old-VCF-release rerun, per the
+"Recommended next steps" above — not further duplicate/overlap-handling code
+changes.

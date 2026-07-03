@@ -25,6 +25,13 @@ from ldetect2.local_search import (
     local_search_hdf5_partition,
 )
 from ldetect2.metric import Metric
+from tests._partition_fixtures import (
+    divergent_overlap_partitions,
+    first_write_wins_pair_value,
+)
+from tests._partition_fixtures import (
+    make_custom_partitioned_store as _make_custom_partitioned_store,
+)
 
 
 def _make_store(
@@ -120,27 +127,6 @@ def _make_partitioned_store(
             j_gpos=output.get("j_gpos"),
             i_id=output.get("i_id"),
             j_id=output.get("j_id"),
-        )
-    return CovarianceStore(root=root)
-
-
-def _make_custom_partitioned_store(
-    tmp_path: Path,
-    partitions: dict[tuple[int, int], list[tuple[int, int, float]]],
-) -> CovarianceStore:
-    root = tmp_path / "cov"
-    chrom_dir = root / "chr1"
-    chrom_dir.mkdir(parents=True)
-    with (root / "chr1_partitions.txt").open("w") as f:
-        for start, end in partitions:
-            f.write(f"{start} {end}\n")
-
-    for (start, end), rows in partitions.items():
-        write_covariance_partition_hdf5(
-            chrom_dir / f"chr1.{start}.{end}.h5",
-            i_pos=np.array([row[0] for row in rows], dtype=np.int32),
-            j_pos=np.array([row[1] for row in rows], dtype=np.int32),
-            shrink_ld=np.array([row[2] for row in rows], dtype=np.float64),
         )
     return CovarianceStore(root=root)
 
@@ -313,23 +299,9 @@ def test_local_search_matches_legacy_with_duplicate_pairs(
 def test_local_search_matches_legacy_with_cross_partition_duplicate_pairs(
     tmp_path: Path,
 ) -> None:
-    partitions = {
-        (100, 400): [
-            (100, 100, 1.0),
-            (200, 200, 1.0),
-            (300, 300, 1.0),
-            (400, 400, 1.0),
-            (200, 400, 0.7),
-        ],
-        (200, 500): [
-            (200, 200, 1.0),
-            (300, 300, 1.0),
-            (400, 400, 1.0),
-            (500, 500, 1.0),
-            (400, 200, 0.2),
-            (300, 500, 0.8),
-        ],
-    }
+    # Same scenario used to test matrix_analysis/metric overlap resolution;
+    # see tests/_partition_fixtures.py::divergent_overlap_partitions.
+    partitions = divergent_overlap_partitions()
     store = _make_custom_partitioned_store(tmp_path, partitions)
 
     _assert_precompute_matches_legacy(
@@ -341,6 +313,7 @@ def test_local_search_matches_legacy_with_cross_partition_duplicate_pairs(
         first=100,
         last=500,
     )
+    assert first_write_wins_pair_value(partitions, 200, 400) == pytest.approx(0.7)
 
 
 def test_hdf5_precompute_matches_legacy_with_duplicate_pairs(

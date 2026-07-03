@@ -11,6 +11,11 @@ import pytest
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.metric import Metric
+from tests._partition_fixtures import (
+    divergent_overlap_partitions,
+    first_write_wins_pair_value,
+    make_custom_partitioned_store,
+)
 
 
 def _make_store(
@@ -123,6 +128,26 @@ def test_array_metric_deduplicates_overlapping_partitions(tmp_path: Path) -> Non
     assert fast["sum"] == pytest.approx(legacy["sum"])
     assert fast["N_nonzero"] == legacy["N_nonzero"]
     assert fast["N_zero"] == pytest.approx(legacy["N_zero"])
+
+
+def test_array_metric_matches_legacy_with_divergent_overlap_pair(
+    tmp_path: Path,
+) -> None:
+    """`_make_store`'s overlapping partitions always agree on shared pairs
+    (they're derived from one shared r2_by_pair dict), so it never exercises
+    actual overlap-resolution precedence. Use a fixture where the redundant
+    pair (200, 400) has genuinely different values in each partition (0.7 vs
+    0.2), and cross-check against an independent first-write-wins oracle."""
+    partitions = divergent_overlap_partitions()
+    store = make_custom_partitioned_store(tmp_path, partitions)
+
+    legacy = Metric("chr1", store, [300], 100, 500)._calc_metric_lean()
+    fast = Metric("chr1", store, [300], 100, 500).calc_metric()
+
+    assert fast["sum"] == pytest.approx(legacy["sum"])
+    assert fast["N_nonzero"] == legacy["N_nonzero"]
+    assert fast["N_zero"] == pytest.approx(legacy["N_zero"])
+    assert first_write_wins_pair_value(partitions, 200, 400) == pytest.approx(0.7)
 
 
 def test_metric_covariance_loader_does_not_retain_raw_partitions(

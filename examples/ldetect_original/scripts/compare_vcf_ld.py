@@ -22,8 +22,8 @@ Usage:
         --chromosome 10 \
         --baseline-label v3/all \
         --candidate-label v1/all \
-        --baseline-vcf  results/provenance_diagnostics/filtered_vcf/v3/all/EUR/chr10.EUR.all.vcf.gz \
-        --candidate-vcf results/provenance_diagnostics/filtered_vcf/v1/all/EUR/chr10.EUR.all.vcf.gz \
+        --baseline-vcf results/provenance_diagnostics/filtered_vcf/v3/all/EUR/c10.gz \
+        --candidate-vcf results/provenance_diagnostics/filtered_vcf/v1/all/EUR/c10.gz \
         --individuals resources/v3/EUR_inds.txt \
         --output results/provenance_diagnostics/EUR/chr10/ld_sets/v1_all_vs_v3_all.tsv
 """
@@ -65,7 +65,8 @@ def _run(cmd: list[str]) -> str:
 
 
 def vcf_samples(path: Path) -> list[str]:
-    return [line for line in _run(["bcftools", "query", "-l", str(path)]).splitlines() if line]
+    out = _run(["bcftools", "query", "-l", str(path)])
+    return [line for line in out.splitlines() if line]
 
 
 def vcf_positions(path: Path) -> set[int]:
@@ -193,7 +194,9 @@ def compare(args: argparse.Namespace) -> tuple[dict[str, str], list[dict[str, st
     vcf_chrom = args.chromosome.removeprefix("chr")
 
     individuals = [
-        line.split()[0] for line in args.individuals.read_text().splitlines() if line.strip()
+        line.split()[0]
+        for line in args.individuals.read_text().splitlines()
+        if line.strip()
     ]
     baseline_samples = set(vcf_samples(args.baseline_vcf))
     candidate_samples = set(vcf_samples(args.candidate_vcf))
@@ -211,7 +214,12 @@ def compare(args: argparse.Namespace) -> tuple[dict[str, str], list[dict[str, st
     positions_needed = {p for pair in pairs for p in pair}
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        region_file = Path(tmpdir) / "regions.bed"
+        # Not named "*.bed": bcftools -R auto-detects BED (0-based, half-open)
+        # from that extension, which would turn every "pos\tpos" row below
+        # into a zero-width interval matching nothing. Any other extension
+        # (or none) gets bcftools's plain 1-based-inclusive CHROM/BEG/END
+        # convention, which is what write_region_file() actually writes.
+        region_file = Path(tmpdir) / "regions.txt"
         write_region_file(positions_needed, vcf_chrom, region_file)
         baseline_haps, baseline_missing = read_phased_haplotypes(
             args.baseline_vcf, region_file, common_individuals
@@ -275,11 +283,19 @@ def compare(args: argparse.Namespace) -> tuple[dict[str, str], list[dict[str, st
         "n_shared_positions": str(len(shared)),
         "n_pairs": str(len(pair_rows)),
         "maf_pearson_r": _fmt(_pearson(maf_baseline, maf_candidate)),
-        "maf_mean_abs_diff": _fmt(statistics.mean(abs_maf_diffs)) if abs_maf_diffs else "nan",
-        "maf_median_abs_diff": _fmt(statistics.median(abs_maf_diffs)) if abs_maf_diffs else "nan",
+        "maf_mean_abs_diff": (
+            _fmt(statistics.mean(abs_maf_diffs)) if abs_maf_diffs else "nan"
+        ),
+        "maf_median_abs_diff": (
+            _fmt(statistics.median(abs_maf_diffs)) if abs_maf_diffs else "nan"
+        ),
         "r2_pearson_r": _fmt(_pearson(r2_baseline, r2_candidate)),
-        "r2_mean_abs_diff": _fmt(statistics.mean(abs_r2_diffs)) if abs_r2_diffs else "nan",
-        "r2_median_abs_diff": _fmt(statistics.median(abs_r2_diffs)) if abs_r2_diffs else "nan",
+        "r2_mean_abs_diff": (
+            _fmt(statistics.mean(abs_r2_diffs)) if abs_r2_diffs else "nan"
+        ),
+        "r2_median_abs_diff": (
+            _fmt(statistics.median(abs_r2_diffs)) if abs_r2_diffs else "nan"
+        ),
         "r2_max_abs_diff": _fmt(max(abs_r2_diffs)) if abs_r2_diffs else "nan",
         "baseline_missing_gt_rate": _fmt(baseline_missing),
         "candidate_missing_gt_rate": _fmt(candidate_missing),
@@ -306,7 +322,10 @@ def main() -> None:
         "--max-anchors",
         type=int,
         default=500,
-        help="Number of evenly-spaced anchor positions sampled across the chromosome (default: 500)",
+        help=(
+            "Number of evenly-spaced anchor positions sampled across the "
+            "chromosome (default: 500)"
+        ),
     )
     parser.add_argument(
         "--pairs-per-anchor",
