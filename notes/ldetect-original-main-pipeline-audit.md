@@ -1,5 +1,100 @@
 # ldetect_original Main Pipeline Audit
 
+## Historical background: fp64/high-precision concordance & legacy-downstream diagnostics (2026-05-06 to 2026-06-21)
+
+Folded in from the retired `ldetect-original-concordance.md` (superseded as a
+standalone doc by this log, but its findings are unique and not duplicated
+below — kept verbatim-in-substance as the earliest record of this
+investigation).
+
+**2026-05-06 — high-precision (Decimal) rerun for EUR chr10.** At the time,
+known problem chromosomes were `EUR: chr8,9,10,11,12` and
+`AFR: chr11,16,22` (chr16 and chr11 were later resolved/reclassified — see
+main log below). A rerun of EUR chr10 with `--high-precision` (routes local
+search through the legacy-equivalent Decimal/dictionary path instead of the
+default float64/array path) produced **the same poor concordance** against
+`EUR_fourier_ls` (`recall=0.2907`, `median_offset=264.2 kb`), and **the
+Decimal and float64 breakpoint JSONs were identical**. This rules out
+ordinary float64-vs-Decimal numerical drift as the cause of the EUR chr10
+divergence, and makes the rebuilt array local-search path itself an unlikely
+primary cause, since the legacy-equivalent Decimal path reaches the exact
+same answer. `bp_jaccard=1.0` was noted as uninformative here since both BEDs
+tile the same contiguous chromosome span regardless of internal boundary
+agreement. Per-chromosome EUR pattern at the time: chr8 recall=0.4105,
+chr9=0.3467, chr10=0.2907, chr11=0.4588, chr12=0.3614, all p90 offsets in the
+650-725 kb range, all five with correct block counts.
+
+**2026-06-20 — Bitbucket reference BED consistency (first pass).** Downloaded
+all 66 chromosome-specific reference files and compared each against the
+matching slice of the genome-wide `{POP}_fourier_ls-all.bed` (normalized
+whitespace, header skipped). All 66 matched exactly, including EUR chr8-13
+block counts (94/74/85/84/82/62). This ruled out an internally inconsistent
+`fourier_ls-all.bed` as the cause. (Redone with a stricter, non-normalizing
+parser on 2026-07-03 — see "Chromosome-specific reference BED audit" below —
+with the same conclusion, plus the AFR chr11 corruption discovery.)
+
+**2026-06-21 — diagnostic summary review, EUR chr10 vs. chr13 control.**
+Reviewed `results/diagnostics/EUR/` outputs. chr10 still failed
+(`recall=0.2907`) while chr13 remained an exact control (`recall=1.0`). A
+Pickrell `interpolated_OMNI` (CEU/EUR-specific) map rerun for chr10 did
+**not** rescue the mismatch (`recall=0.314`, materially different vector and
+more covariance rows, but still poor final concordance) — disfavoring a
+simple "wrong Pickrell map family" explanation. Input-scale diagnostics
+(`filtered_vcf_records`, `vector_rows`, `partitions`, `found_width`) showed
+no obvious pathological difference between chr10 and chr13 beyond expected
+size scaling. Leading hypotheses at this point: either the published EUR
+chr8-12 blocks came from a different 1000G/public-input snapshot or filtering
+state than current release files, or there's still an unidentified upstream
+implementation/provenance detail before vector/minima selection.
+
+**2026-06-21 — EUR chr7-13 diagnostic batch.** Reran the diagnostic workflow
+for chr7-13. Confirmed pattern: chr7 and chr13 exact (`recall=1.0`,
+`median_offset=0.0 kb`); chr8-12 all fail with correct block counts but
+`median_offset` 117-264 kb. Genetic maps had zero inversions for all
+chr7-13; chr8-12 were not uniquely large-map-gap chromosomes (chr13, an
+exact control, had the largest max cM gap in the batch); partition/vector
+row counts scaled with chromosome size as expected; EUR sample count was
+consistently 379. This reinforced that the failure is localized and
+boundary-placement-specific, not a global current-code bug in filtering,
+partitioning, vector generation, minima selection, local search, Ne, or
+reference-BED comparison. (Runtime note: EUR chr11 in this batch briefly hit
+~108 GB max RSS at `--local-search-workers 4`, since resolved by later
+chunked/streaming memory optimizations — no longer a live constraint.)
+
+**2026-06-21 — legacy downstream diagnostic (most informative finding of this
+period).** Ran copied legacy downstream scripts
+(`results/legacy_diagnostics/EUR/{8,9,10,11,12,13}/compare/`) on covariance
+data derived from the **same** ldetect2-generated full covariance partitions,
+testing whether the EUR chr8-12 mismatch originates in ldetect2's downstream
+steps (matrix-to-vector, minima selection, local search) rather than upstream
+of covariance:
+
+| chrom | ldetect2-vs-ref | legacy-vs-ref | ldetect2-vs-legacy |
+| --- | ---: | ---: | ---: |
+| chr8 | 0.4105 | 0.4211 | 0.8737 |
+| chr9 | 0.3467 | 0.3467 | 0.8800 |
+| chr10 | 0.2907 | 0.3372 | 0.8256 |
+| chr11 | 0.4588 | 0.4471 | 0.9647 |
+| chr12 | 0.3614 | 0.3855 | 0.8795 |
+| chr13 | 1.0000 | 0.9365 | 0.9365 |
+
+The legacy run is not bit-identical to ldetect2 (vector SHA256 hashes differ
+on every checked chromosome; final loci are not all identical), but **legacy
+and ldetect2 are much closer to each other than either is to the published
+reference on chr8-12** — and running actual legacy downstream code on the
+same covariance data still does **not** reproduce the published chr8-12
+reference. The chr13 result is a useful caveat against over-trusting this
+diagnostic as a perfect oracle (ldetect2 matches chr13 exactly, but the
+copied legacy diagnostic is only 0.9365 concordant with the reference there)
+— but it's still informative because it fails in the *same direction* as
+ldetect2 on chr8-12 given the same input covariance. **Conclusion carried
+forward: the chr8-12 mismatch is not primarily a downstream (post-covariance)
+implementation bug in either codebase — the best remaining explanation is an
+upstream provenance/input/covariance difference between current public
+inputs and whatever generated the published EUR chr8-12 reference.** This
+conclusion is revisited and sharpened by the vector/boundary visualization
+work below (see "Revisiting the flat-region hypothesis").
+
 Date: 2026-07-02
 
 Inputs audited:
@@ -997,3 +1092,130 @@ source left to check; the true intended value at that boundary is not
 recoverable from anything Bitbucket has published. Does not change the
 conclusion (AFR chr11 remains a reference-data bug, not a real pipeline
 divergence) — just confirms the trail ends here.
+
+## `merged_umich` snapshot check — negative, statistically indistinguishable from v2
+
+Date: 2026-07-03
+
+Ran the cheap position-set + phasing-sensitive LD diagnostics
+(`compare_vcf_positions.py`, `compare_vcf_ld.py`) against the newly-discovered
+undocumented `merged_umich` Phase 1 snapshot
+(`technical/working/20120117_new_phase1_intgrated_genotypes`, chronologically
+between `old2011` and `v1`) for all divergent chromosomes plus the EUR
+chr13/AFR chr13 concordant controls, in both populations.
+
+**Result: `merged_umich` is a strict position-superset of `v3` (0
+baseline-only positions everywhere, ~5-6% candidate-only positions) and, at
+every shared position, phased-haplotype r² and MAF are byte-identical to v3**
+(`r2_pearson_r`=1, `r2_max_abs_diff`=0, `maf_pearson_r`=1, all mean/median
+abs diffs=0) — for both divergent chromosomes (EUR chr8-12, AFR chr22) and
+the concordant controls (EUR/AFR chr13) alike. Duplicate-position counts are
+also nearly identical to v2's.
+
+This is quantitatively indistinguishable from the `v2/all` row already
+measured for the same chromosomes: same "0 baseline-only, ~5-6%
+candidate-only" position-set shape, same perfect r=1/0-diff LD concordance,
+same duplicate-position counts within a few percent. `v1`/`old2011`, by
+contrast, are visibly different from both (`v1`/`old2011` have real
+baseline-only positions — sites present in v3 but missing from the older
+snapshot — and non-zero LD/MAF diffs, e.g. AFR chr22 r2_pearson_r=0.9855 vs.
+merged_umich's 1.0).
+
+**Conclusion**: whatever `merged_umich` actually is, at the level these
+diagnostics can see it behaves like a near-duplicate of `v2`, not like a
+distinct earlier-vintage snapshot with different phasing/genotype calls.
+Since a full-pipeline rerun of `v2` already gave only a small, non-decisive
+recall bump on some EUR chromosomes and made AFR chr22 *worse* (see
+"Alternate-source full-pipeline rerun results" above), and `merged_umich`
+is indistinguishable from `v2` on every metric these cheap diagnostics
+measure, a full-pipeline rerun of `merged_umich` has very low expected
+marginal value and is not recommended. Treating this candidate as
+exhausted — matches the user's own prior stated suspicion going in.
+
+This closes out the last outstanding "untested VCF snapshot" lead. VCF
+release/provenance as a category is now about as thoroughly ruled out as
+it can be without the original authors' internal processing logs.
+
+## Vector/boundary visualization: divergent boundaries sit in flat, low-signal stretches
+
+Date: 2026-07-03
+
+Built `examples/ldetect_original/scripts/plot_vector_boundaries.py`, which
+plots the raw + Hann-smoothed diagonal-sum vector (the actual signal minima
+are detected on, at the real `found_width` from `breakpoints-<chrom>.json`)
+for a genomic window, overlaid with our boundaries (blue=matched,
+orange=divergent vs. reference within tolerance) and reference boundaries
+(red dashed) — similar in spirit to Fig. 1c/d of Berisa & Pickrell (2016).
+
+Generated 3-window comparisons (concordant-only / divergent-only / mixed) for
+both EUR chr10 and AFR chr22, saved at `examples/ldetect_original/plots/`
+(untracked; not yet committed):
+
+- EUR chr10 concordant: 61.5-63.1 Mb (boundaries 61891409, 62660140)
+- EUR chr10 divergent: 99.5-105.7 Mb
+- EUR chr10 mixed: 53.0-57.5 Mb
+- AFR chr22 concordant: 31.2-34.5 Mb (boundaries 31439173, 32665304, 34279012)
+- AFR chr22 divergent: 47.6-49.15 Mb
+- AFR chr22 mixed: 21.2-23.9 Mb
+
+**Consistent pattern across both chromosomes**: concordant boundaries sit on
+visually sharp, well-defined troughs in the smoothed vector. Divergent
+boundaries consistently fall in comparatively flat, low-amplitude,
+featureless stretches of the smoothed signal — no clear minimum, many nearby
+points nearly tied.
+
+## Revisiting the flat-region hypothesis in light of the 2026-05/06 precision diagnostics
+
+Date: 2026-07-03
+
+The flat-region observation above was initially framed as "inherent
+algorithmic sensitivity in ambiguous regions" — the idea that in a flat
+stretch, any two reasonable implementations could tip toward different
+near-tied local minima purely from arbitrary floating-point/implementation
+choices, with no data/provenance discrepancy required. Folding the
+2026-05-06/06-21 high-precision and legacy-downstream diagnostics (see
+"Historical background" at the top of this log) back in against that framing
+changes the picture:
+
+- **The Decimal-vs-float64 test (2026-05-06, EUR chr10) already ran this
+  exact experiment** and came back negative for "arbitrary implementation
+  choice": `--high-precision` routes local search through the legacy-
+  equivalent Decimal/dictionary path instead of the default float64/array
+  path, and it produced **byte-identical breakpoints** to the default path,
+  including in whatever flat regions caused chr10's divergence. Two
+  numerically distinct arithmetic implementations, given the *same* upstream
+  vector, do not disagree — so flatness alone is not enough to make the
+  boundary choice implementation-sensitive within `ldetect2`.
+- **The legacy-downstream diagnostic (2026-06-21) goes further**: running
+  the actual copied legacy scripts (not ldetect2) on the *same*
+  ldetect2-generated covariance data for EUR chr7-13 also failed to
+  reproduce the published chr8-12 reference, while agreeing closely with
+  ldetect2's own output (0.82-0.96 concordance) — far closer to each other
+  than either is to the reference. Two independently-implemented codebases,
+  given the same covariance/vector input, converge on close-to-the-same
+  wrong answer relative to the reference.
+
+Both pieces of evidence point the same way: **the ambiguity is not that two
+valid implementations could reasonably land on different minima in these
+flat regions — both implementations we have land on the same minima.** What
+differs is that our vector's minima at these positions don't match the
+reference's. That is more consistent with the vector/covariance signal
+itself being subtly different from whatever the original authors computed
+(an unidentified upstream input/provenance difference, still not found
+despite thoroughly ruling out VCF release version, sample panel, map family,
+OMNI-vs-HapMap, Ne assignment, and duplicate/cross-partition handling) than
+with "inherent, unresolvable algorithmic ambiguity." The flat-region
+correlation is still real and still useful as a *mechanism* — it explains
+**why** the divergence is localized to specific boundaries rather than
+uniform across a chromosome (small upstream signal differences only flip the
+outcome where the signal is already close to tied) — but it should not be
+read as evidence that the residual gap is unfixable-in-principle or
+provenance-independent.
+
+**Caveat**: the Decimal-precision and legacy-downstream tests above only
+cover EUR chr8-13, not AFR chr22. It remains untested whether the same
+"both implementations agree with each other but not the reference" pattern
+holds for AFR chr22 — `Snakefile.legacy_diagnostics`/`legacy_diagnostics.yaml`
+already exist and could be pointed at AFR chr22 to check directly. Until
+that's run, treat this reassessment as confirmed for EUR chr8-12 and merely
+"expected to generalize" for AFR chr22.
