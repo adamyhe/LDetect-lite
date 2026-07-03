@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import csv
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -61,7 +62,7 @@ def ensure_download(
     output: Path,
     chrom: str | None = None,
 ) -> None:
-    if output.exists():
+    if output.exists() and output.stat().st_size > 0:
         return
     cmd = [
         "uv",
@@ -80,6 +81,19 @@ def ensure_download(
     if chrom is not None:
         cmd.extend(["--chromosome", chrom])
     run(cmd)
+
+
+def check_vcf_readable(path: Path) -> None:
+    if not path.exists() or path.stat().st_size == 0:
+        raise RuntimeError(f"Missing or empty VCF: {path}")
+    result = subprocess.run(
+        ["bcftools", "view", "-h", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"Cannot read VCF header for {path}: {message}")
 
 
 def ensure_individuals(
@@ -134,24 +148,72 @@ def ensure_filtered_vcf(
 
     raw_vcf = raw_vcf_path(raw_root, dataset, chrom)
     ensure_download(diag_config, dataset, "vcf", raw_vcf, chrom)
+    check_vcf_readable(raw_vcf)
     individuals = ensure_individuals(
         base, res_root, raw_root, diag_config, dataset, population
     )
     output.parent.mkdir(parents=True, exist_ok=True)
-    type_filter = ["-v", "snps"] if variant_filter == "snps" else []
-    shell_cmd = [
-        "bash",
-        "-lc",
-        "set -euo pipefail; bcftools view -S \"$1\" -Ou \"$2\" | "
-        "bcftools view $3 -i 'MAC[0]>=1' -m2 -M2 -Oz -o \"$4\"",
-        "filter-vcf",
+
+    subset_cmd = [
+        "bcftools",
+        "view",
+        "-S",
         str(individuals),
+        "-Ou",
         str(raw_vcf),
-        " ".join(type_filter),
-        str(output),
     ]
-    run(shell_cmd)
+    filter_cmd = ["bcftools", "view"]
+    if variant_filter == "snps":
+        filter_cmd.extend(["-v", "snps"])
+    elif variant_filter != "all":
+        raise ValueError(f"Unknown variant_filter {variant_filter!r}")
+    filter_cmd.extend(
+        [
+            "-i",
+            "MAC[0]>=1",
+            "-m2",
+            "-M2",
+            "-Oz",
+            "-o",
+            str(output),
+        ]
+    )
+
+    subset = subprocess.Popen(
+        subset_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert subset.stdout is not None
+    try:
+        filtered = subprocess.run(
+            filter_cmd,
+            stdin=subset.stdout,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        subset.stdout.close()
+    subset_stderr = subset.stderr.read().decode() if subset.stderr is not None else ""
+    subset_rc = subset.wait()
+
+    if subset_rc != 0:
+        if subset_stderr:
+            print(subset_stderr, file=sys.stderr, end="")
+        raise subprocess.CalledProcessError(subset_rc, subset_cmd)
+    if filtered.returncode != 0:
+        if filtered.stdout:
+            print(filtered.stdout, file=sys.stdout, end="")
+        if filtered.stderr:
+            print(filtered.stderr, file=sys.stderr, end="")
+        raise subprocess.CalledProcessError(filtered.returncode, filter_cmd)
+
     run(["tabix", "-f", "-p", "vcf", str(output)])
+    if output.stat().st_size == 0:
+        raise RuntimeError(
+            f"Filtering produced an empty VCF for {dataset}/{variant_filter} "
+            f"{population} chr{chrom}: {output}"
+        )
     return output
 
 
