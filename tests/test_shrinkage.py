@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import math
 from io import StringIO
 from pathlib import Path
 
@@ -146,6 +147,100 @@ def test_calc_covariance_canonicalizes_duplicate_physical_positions(
         | ((rows.lo[1:] == rows.lo[:-1]) & (rows.hi[1:] > rows.hi[:-1]))
     )
     np.testing.assert_array_equal(lo_values, np.unique(rows.lo))
+
+
+def _vcf_stream_with_pos100_variant(keep: str) -> StringIO:
+    """Build a 2-locus VCF where POS=100 has 0, 1, or 2 candidate variants.
+
+    ``keep`` selects which POS=100 record(s) are present: ``"a"`` (only the
+    first-listed variant), ``"b"`` (only the second-listed variant), or
+    ``"both"`` (both, exercising calc_covariance's duplicate-position dedup).
+    The two variants have disjoint carrier haplotypes so their LD with the
+    POS=200 neighbor differs in sign, making "which duplicate survives"
+    directly observable in the output value.
+    """
+    rows_100 = {
+        "a": "1\t100\trs_a\tA\tG\t.\tPASS\t.\tGT\t1|1\t0|0",
+        "b": "1\t100\trs_b\tC\tT\t.\tPASS\t.\tGT\t0|0\t1|1",
+    }
+    body = [rows_100["a"], rows_100["b"]] if keep == "both" else [rows_100[keep]]
+    return StringIO(
+        "\n".join(
+            [
+                "##fileformat=VCFv4.2",
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+                "\tsample_a\tsample_b",
+                *body,
+                "1\t200\trs_c\tA\tG\t.\tPASS\t.\tGT\t1|0\t0|0",
+                "",
+            ]
+        )
+    )
+
+
+def _expected_shrink_ld(n11: int, n1x: int, nx1: int, n_haps: int, ne: float) -> float:
+    """Independent reimplementation of the off-diagonal shrinkage formula.
+
+    Deliberately re-derives ``ds2`` from the definition in
+    ``_pairwise_ld_impl`` rather than importing/calling it, so the expected
+    values below are an external check, not a circular one.
+    """
+    harmonic = sum(1.0 / i for i in range(1, n_haps))
+    theta = (1.0 / harmonic) / (n_haps + 1.0 / harmonic)
+    n_total = float(n_haps)
+    f11, f1, f2 = n11 / n_total, n1x / n_total, nx1 / n_total
+    d_naive = f11 - f1 * f2
+    # gpos(200) - gpos(100) == 0.001 per _write_map; n_ind == n_haps / 2.
+    ee = math.exp(-4.0 * ne * 0.001 / (2.0 * (n_haps / 2.0)))
+    return (1.0 - theta) ** 2 * d_naive * ee
+
+
+def test_calc_covariance_duplicate_position_matches_first_encountered_variant(
+    tmp_path: Path,
+) -> None:
+    """The duplicate-position dedup must behave like keeping only the first
+    VCF-encountered variant, matching the legacy reference's effective
+    first-write-wins matrix-insert semantics (see
+    notes/ldetect-original-main-pipeline-audit.md)."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    def _shrink_ld_100_200(keep: str, name: str) -> float:
+        out_path = tmp_path / f"{name}.h5"
+        calc_covariance(
+            vcf_stream=_vcf_stream_with_pos100_variant(keep),
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            output_path=out_path,
+            ne=1.0,
+            cutoff=1e-7,
+            compact_output=True,
+        )
+        with open_covariance_reader(out_path, 100, 200) as reader:
+            rows = reader.read_all()
+        mask = (rows.lo == 100) & (rows.hi == 200)
+        assert mask.sum() == 1
+        return float(rows.shrink_ld[mask][0])
+
+    # haps: rs_a=[1,1,0,0], rs_b=[0,0,1,1], rs_c=[1,0,0,0] (n_haps=4)
+    expected_first = _expected_shrink_ld(n11=1, n1x=2, nx1=1, n_haps=4, ne=1.0)
+    expected_second = _expected_shrink_ld(n11=0, n1x=2, nx1=1, n_haps=4, ne=1.0)
+    assert expected_first == pytest.approx(0.09670324838, abs=1e-10)
+    assert expected_second == pytest.approx(-0.09670324838, abs=1e-10)
+
+    first_only = _shrink_ld_100_200("a", "first")
+    second_only = _shrink_ld_100_200("b", "second")
+    dup_value = _shrink_ld_100_200("both", "dup")
+
+    assert first_only == pytest.approx(expected_first)
+    assert second_only == pytest.approx(expected_second)
+
+    # calc_covariance's dedup must reproduce "keep the first-encountered
+    # duplicate", not the second one and not some blend of the two.
+    assert dup_value == pytest.approx(first_only)
+    assert dup_value != pytest.approx(second_only)
 
 
 def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:

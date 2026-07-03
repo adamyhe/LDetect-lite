@@ -1,0 +1,366 @@
+"""Full end-to-end rerun of divergent chromosomes against alternate 1000G releases.
+
+Every "cheap" upstream-input hypothesis for why EUR chr8-12 and AFR
+chr11/chr22 fail to exactly reproduce the published Berisa & Pickrell (2016)
+LD blocks has been ruled out by sampling-based diagnostics (see
+notes/ldetect-original-main-pipeline-audit.md): VCF release-version
+provenance (both which positions are called and actual phasing-sensitive LD),
+SNP-only vs. all-variant filtering, genetic map family, and
+duplicate-position/cross-partition handling in ldetect2 itself.
+
+This workflow runs the direct, conclusive test instead of another sample-based
+diagnostic: the full `ldetect2 run` pipeline, end to end, once per (alternate
+1000G release x divergent chromosome), then compares each result against the
+same published reference BED the main pipeline uses. If any alternate release
+reproduces a chromosome that v3 doesn't, that is a direct answer rather than
+an inference from sampled positions/LD pairs.
+
+Reuses the same download/filter rules already built for
+Snakefile.provenance_diagnostics (duplicated here, not `include:`d, so this
+workflow stays independently runnable and avoids `include:`'s rule_all
+precedence pitfalls) — output paths are identical, so VCFs already
+downloaded/filtered by a prior provenance-diagnostics run are reused as-is,
+not regenerated.
+
+Pipeline steps:
+    0  Data download (alternate-release VCFs + TBI, panel annotation, genetic
+       maps, published reference BEDs) -- reused/shared with the other
+       example Snakefiles wherever already present on disk
+    1  Individual list preparation (per alternate source, since sample IDs
+       can differ slightly by release)
+    2  Population-specific VCF filtering (MAC >= 1 after sample subsetting,
+       "all" variant types, matching the production pipeline exactly)
+    3  Full ldetect2 run per (source x population x divergent chromosome)
+    4  Compare each result against the published reference BED
+    5  Combine all comparisons into one summary TSV
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -n -s Snakefile.alternate_source_rerun \
+        --configfile config.yaml provenance_diagnostics.yaml alternate_source_rerun.yaml
+    uv run snakemake --cores 8 -s Snakefile.alternate_source_rerun \
+        --configfile config.yaml provenance_diagnostics.yaml alternate_source_rerun.yaml
+
+Worker counts are left matching config.yaml's existing, already-proven-safe
+values for these exact chromosomes' v3 runs. No per-chromosome memory
+resource hints are set: the chr11 memory outlier recorded in
+notes/ldetect-original-concordance.md predates the chunked HDF5-streaming
+patches, and individual runs now use very little memory regardless of
+chromosome.
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "provenance_diagnostics.yaml"
+configfile: "alternate_source_rerun.yaml"
+
+
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+
+RAW_ROOT = RAW_DIR / "provenance"
+RES_ROOT = RES_DIR / "provenance"
+FILT_ROOT = RESULTS / "provenance_diagnostics" / "filtered_vcf"
+ALT_RESULTS = RESULTS / "alternate_source_rerun"
+
+DIVERGENT_CHROMS_BY_POP = {
+    str(pop): [str(chrom) for chrom in chroms]
+    for pop, chroms in config["divergent_chromosomes_by_population"].items()
+}
+ALT_SOURCES = [str(source) for source in config["alternate_sources"]]
+VARIANT_FILTER = str(config.get("alternate_variant_filter", "all"))
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def raw_vcf_path(dataset, chrom):
+    return str(RAW_ROOT / dataset / f"chr{chrom}.vcf.gz")
+
+
+def raw_tbi_path(dataset, chrom):
+    return str(RAW_ROOT / dataset / f"chr{chrom}.vcf.gz.tbi")
+
+
+def filtered_vcf_path(dataset, variant_filter, population, chrom):
+    return str(
+        FILT_ROOT
+        / dataset
+        / variant_filter
+        / population
+        / f"chr{chrom}.{population}.{variant_filter}.vcf.gz"
+    )
+
+
+def alt_source_bed_path(source, population, chrom):
+    return str(ALT_RESULTS / source / population / chrom / f"{chrom}-ld-blocks.bed")
+
+
+def alt_source_comparison_path(source, population, chrom):
+    return str(ALT_RESULTS / "compare" / source / population / f"{chrom}_block_comparison.tsv")
+
+
+def alt_source_bed_targets():
+    targets = []
+    for population, chroms in DIVERGENT_CHROMS_BY_POP.items():
+        for chrom in chroms:
+            for source in ALT_SOURCES:
+                targets.append(alt_source_bed_path(source, population, chrom))
+    return targets
+
+
+def alt_source_comparison_targets():
+    targets = []
+    for population, chroms in DIVERGENT_CHROMS_BY_POP.items():
+        for chrom in chroms:
+            for source in ALT_SOURCES:
+                targets.append(alt_source_comparison_path(source, population, chrom))
+    return targets
+
+
+rule all:
+    input:
+        alt_source_bed_targets(),
+        str(ALT_RESULTS / "comparison_summary.tsv"),
+
+
+# ---------------------------------------------------------------------------
+# Steps 0-2: download + filter alternate-source VCFs.
+#
+# Duplicated verbatim from Snakefile.provenance_diagnostics (not `include:`d,
+# to avoid `include:`'s rule_all precedence conflicts and keep this workflow
+# independently runnable). Output paths are byte-identical, so anything
+# already produced by a prior provenance-diagnostics run is reused as-is.
+# ---------------------------------------------------------------------------
+
+
+rule download_source_vcf:
+    output:
+        vcf=str(RAW_ROOT / "{dataset}" / "chr{chrom}.vcf.gz"),
+        tbi=str(RAW_ROOT / "{dataset}" / "chr{chrom}.vcf.gz.tbi"),
+    shell:
+        """
+        uv run python scripts/download_provenance_input.py \
+            --config provenance_diagnostics.yaml \
+            --dataset {wildcards.dataset} \
+            --kind vcf \
+            --chromosome {wildcards.chrom} \
+            --output {output.vcf}
+        uv run python scripts/download_provenance_input.py \
+            --config provenance_diagnostics.yaml \
+            --dataset {wildcards.dataset} \
+            --kind vcf-index \
+            --chromosome {wildcards.chrom} \
+            --output {output.tbi}
+        """
+
+
+rule download_source_panel:
+    output:
+        str(RES_ROOT / "{dataset}" / "panel.tsv"),
+    shell:
+        """
+        uv run python scripts/download_provenance_input.py \
+            --config provenance_diagnostics.yaml \
+            --dataset {wildcards.dataset} \
+            --kind panel \
+            --output {output}
+        """
+
+
+rule prep_source_individuals:
+    input:
+        panel=rules.download_source_panel.output[0],
+        vcf=lambda wc: raw_vcf_path(wc.dataset, 22),
+        tbi=lambda wc: raw_tbi_path(wc.dataset, 22),
+    output:
+        str(RES_ROOT / "{dataset}" / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule filter_source_vcf:
+    input:
+        vcf=lambda wc: raw_vcf_path(wc.dataset, wc.chrom),
+        tbi=lambda wc: raw_tbi_path(wc.dataset, wc.chrom),
+        individuals=str(RES_ROOT / "{dataset}" / "{population}_inds.txt"),
+    output:
+        vcf=str(
+            FILT_ROOT
+            / "{dataset}"
+            / "{variant_filter}"
+            / "{population}"
+            / "chr{chrom}.{population}.{variant_filter}.vcf.gz"
+        ),
+        tbi=str(
+            FILT_ROOT
+            / "{dataset}"
+            / "{variant_filter}"
+            / "{population}"
+            / "chr{chrom}.{population}.{variant_filter}.vcf.gz.tbi"
+        ),
+    params:
+        type_filter=lambda wc: "-v snps" if wc.variant_filter == "snps" else "",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view {params.type_filter} -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Shared, release-independent inputs.
+#
+# Duplicated verbatim from Snakefile (main pipeline). Genetic maps and
+# published reference BEDs don't depend on which VCF release is used, so
+# already-downloaded copies from the main pipeline are reused as-is.
+# ---------------------------------------------------------------------------
+
+
+rule download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule download_ref_bed:
+    output:
+        str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+    shell:
+        """
+        mkdir -p {RES_DIR}/ldetect_ref
+        wget -q -O {output} \
+            "{params.base_url}/{wildcards.population}/fourier_ls-all.bed"
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 3: full ldetect2 run per (source x population x divergent chromosome)
+# ---------------------------------------------------------------------------
+
+
+rule run_ldetect2_alt_source:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=lambda wc: filtered_vcf_path(wc.source, VARIANT_FILTER, wc.population, wc.chrom),
+        tbi=lambda wc: filtered_vcf_path(wc.source, VARIANT_FILTER, wc.population, wc.chrom)
+        + ".tbi",
+        individuals=str(RES_ROOT / "{source}" / "{population}_inds.txt"),
+    output:
+        bed=str(ALT_RESULTS / "{source}" / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
+    log:
+        run=str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.ldetect2.log"),
+        timing=str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.timing.log"),
+    benchmark:
+        str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.benchmark.tsv")
+    threads: config["cov_workers"]
+    params:
+        output_dir=str(ALT_RESULTS / "{source}" / "{population}" / "{chrom}"),
+        log_dir=str(ALT_RESULTS / "logs" / "{source}" / "{population}"),
+        ne=lambda wc: pop_ne(wc.population),
+        cutoff=config["cov_cutoff"],
+        cov_workers=config["cov_workers"],
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config["subset"],
+        local_search_workers=config.get("local_search_workers", 1),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 4: compare each alternate-source result against the published
+# reference BED, labeling each row with source/population since
+# compare_blocks.py only emits a bare "chrom" column.
+# ---------------------------------------------------------------------------
+
+
+rule compare_alt_source_blocks:
+    input:
+        ours=lambda wc: alt_source_bed_path(wc.source, wc.population, wc.chrom),
+        ref=str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+        script="scripts/compare_blocks.py",
+    output:
+        str(ALT_RESULTS / "compare" / "{source}" / "{population}" / "{chrom}_block_comparison.tsv"),
+    params:
+        tolerance=100_000,
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        tmp_bed=$(dirname {output})/{wildcards.chrom}.chr-prefixed.bed
+        tmp_tsv={output}.raw.tsv
+        sed 's/^/chr/' {input.ours} > "$tmp_bed"
+        uv run python scripts/compare_blocks.py \
+            --ours "$tmp_bed" \
+            --ref {input.ref} \
+            --output "$tmp_tsv" \
+            --tolerance {params.tolerance}
+        awk -F'\t' -v OFS='\t' -v src={wildcards.source} -v pop={wildcards.population} \
+            'NR==1{{print "source","population",$0}} NR>1{{print src,pop,$0}}' \
+            "$tmp_tsv" > {output}
+        rm -f "$tmp_bed" "$tmp_tsv"
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 5: combine all comparisons into one summary TSV
+# ---------------------------------------------------------------------------
+
+
+rule combine_alt_source_comparisons:
+    input:
+        summaries=alt_source_comparison_targets(),
+        script="scripts/combine_tsv.py",
+    output:
+        str(ALT_RESULTS / "comparison_summary.tsv"),
+    shell:
+        """
+        uv run python scripts/combine_tsv.py \
+            --input {input.summaries} \
+            --output {output}
+        """

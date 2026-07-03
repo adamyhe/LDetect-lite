@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import gzip
 from pathlib import Path
 
@@ -22,6 +23,10 @@ from ldetect2.io.covariance_hdf5 import (
 )
 from ldetect2.io.partitions import CovarianceStore
 from ldetect2.matrix_analysis import MatrixAnalysis
+from tests._partition_fixtures import (
+    divergent_overlap_partitions,
+    make_custom_partitioned_store,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -390,6 +395,66 @@ def test_matrix_to_vector_array_matches_legacy_overlapping_partitions(tmp_path):
     MatrixAnalysis("testchr", store)._calc_diag_lean_legacy(legacy_path)
 
     _assert_vectors_close(array_path, legacy_path)
+
+
+def test_matrix_to_vector_array_matches_legacy_with_divergent_overlap_pair(tmp_path):
+    """`_make_two_partition_store`'s overlapping partitions always agree on
+    shared pairs, so it never exercises actual overlap-resolution precedence.
+    This uses a fixture where the redundant pair (200, 400) has genuinely
+    different values in each partition (0.7 vs 0.2), forcing both the
+    array-path (position-window ownership) and the legacy dict-path
+    (read-order first-write-wins) to pick a specific winner."""
+    store = make_custom_partitioned_store(tmp_path, divergent_overlap_partitions())
+    array_path = tmp_path / "array.txt.gz"
+    legacy_path = tmp_path / "legacy.txt.gz"
+
+    MatrixAnalysis("chr1", store).calc_diag_array(array_path)
+    MatrixAnalysis("chr1", store)._calc_diag_lean_legacy(legacy_path)
+
+    _assert_vectors_close(array_path, legacy_path)
+
+
+def _load_compare_partition_overlap_duplicates_module():
+    """Dynamically load the example diagnostic script (not an importable package)."""
+    import importlib.util
+
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "ldetect_original"
+        / "scripts"
+        / "compare_partition_overlap_duplicates.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "compare_partition_overlap_duplicates", script_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_compare_partition_overlap_duplicates_flags_mismatch(tmp_path):
+    """Synthetic-fixture validation for the example diagnostic script, since
+    real materialized covariance partitions aren't available to test against
+    (see the script's module docstring)."""
+    module = _load_compare_partition_overlap_duplicates_module()
+    store = make_custom_partitioned_store(tmp_path, divergent_overlap_partitions())
+
+    args = argparse.Namespace(
+        population="EUR",
+        chromosome="1",
+        store_root=store.root,
+        name="chr1",
+        vcf_path=None,
+    )
+    result = module.compare(args)
+
+    assert result["n_overlapping_partition_pairs"] == "1"
+    assert int(result["n_redundant_pairs_checked"]) >= 1
+    assert result["n_redundant_pairs_mismatched"] == "1"
+    assert result["first_mismatch_lo"] == "200"
+    assert result["first_mismatch_hi"] == "400"
+    assert float(result["max_abs_shrink_diff"]) == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("compact", [True, False])

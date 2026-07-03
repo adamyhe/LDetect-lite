@@ -160,6 +160,22 @@ uv run snakemake -s Snakefile.diagnostics --cores 4 \
            population=EUR
 ```
 
+By default, each diagnostic `ldetect2 run` job claims
+`ldetect2_job_threads: 4` Snakemake cores and passes up to
+`cov_workers: 4` to `ldetect2 --workers`. Local search is defensively capped
+at one worker in this diagnostic workflow to avoid multiplying memory use.
+With `--cores 4`, chromosomes run one at a time. To run multiple chromosomes
+concurrently instead, use one internal covariance worker per chromosome and
+give Snakemake more cores:
+
+```bash
+uv run snakemake -s Snakefile.diagnostics --cores 4 \
+  --config chromosomes='[8,9,10,11,12,13]' \
+           population=EUR \
+           cov_workers=1 \
+           ldetect2_job_threads=1
+```
+
 Useful outputs:
 
 - `results/diagnostics/{POP}/input_summary.tsv`: raw/filtered VCF counts,
@@ -174,6 +190,93 @@ Useful outputs:
   files for the configured reference populations.
 - `results/diagnostics/{POP}/{chrom}/omni_summary.tsv` and
   `omni_block_comparison.tsv`: optional OMNI-map rerun summaries.
+
+## Provenance Diagnostic Workflow
+
+`Snakefile.provenance_diagnostics` runs the targeted upstream checks suggested
+by the remaining EUR and AFR divergences. It compares the current v3/all-record
+population-polymorphic VCF universe against SNP-only and archived Phase 1
+release candidates for only the divergent chromosomes:
+
+- EUR chr8-12 plus chr13 as an exact-match control.
+- AFR chr11 and chr22 plus chr13 as an exact-match control.
+
+Dry-run the provenance diagnostic:
+
+```bash
+uv run snakemake -s Snakefile.provenance_diagnostics -n
+```
+
+Run it:
+
+```bash
+uv run snakemake -s Snakefile.provenance_diagnostics --cores 1
+```
+
+The default comparison matrix is configured in
+`provenance_diagnostics.yaml`. It uses `v3/all` as the baseline and compares:
+
+- `v3/snps`, testing whether published blocks effectively used SNP-only input.
+- `v2/all` and `v2/snps`, testing the March 2012 Phase 1 v2 archive.
+- `v1/all`, testing the February 2012 Phase 1 v1 archive.
+- `old2011/all`, testing the November 2011 old Phase 1 archive.
+
+Outputs:
+
+- `results/provenance_diagnostics/position_comparison_summary.tsv`: one row per
+  population/chromosome/candidate comparison with record counts, unique
+  position counts, shared/only counts, duplicate-position counts, and position
+  Jaccard.
+- `results/provenance_diagnostics/{POP}/chr{N}/position_sets/*.tsv`: the same
+  metrics split by comparison.
+- `results/provenance_diagnostics/filtered_vcf/{source}/{filter}/{POP}/`: the
+  staged population-specific filtered VCFs used for comparison.
+
+This workflow is intentionally input-focused. If one candidate produces a
+position-set change concentrated in the divergent chromosomes, rerun that
+candidate through `Snakefile.diagnostics` or the main workflow before launching
+larger release-matrix runs.
+
+## Legacy Diagnostic Workflow
+
+`Snakefile.legacy_diagnostics` compares the modern pipeline against a minimal
+vendored copy of the original ldetect downstream scripts. It stages compact
+ldetect2 HDF5 covariance partitions into the original text format, runs legacy
+matrix-to-vector, minima, local-search, and BED extraction steps, and compares
+both outputs against the published reference BED.
+
+Dry-run the default legacy diagnostic:
+
+```bash
+uv run snakemake -s Snakefile.legacy_diagnostics -n
+```
+
+Run a memory-bounded diagnostic for one chromosome:
+
+```bash
+uv run snakemake -s Snakefile.legacy_diagnostics --cores 1 \
+  --config chromosomes='[11]'
+```
+
+`legacy_diagnostics.yaml` keeps `local_search_workers` conservative. Raising
+`cov_workers` or `local_search_workers` can spawn multiple large
+covariance/local-search processes inside a single chromosome job; raising
+`--cores` can also allow Snakemake to run multiple chromosome jobs at once
+unless `ldetect2_job_threads` claims the cores for each heavy job. Staging
+HDF5 covariance partitions into legacy `.gz` files is independent per
+partition and can be parallelized with `staging_workers`.
+
+The vendored legacy checkout intentionally excludes the original toy
+`example_data` tree and old exploratory scripts because they are not used by
+the diagnostic Snakemake workflow. To inspect or manually run those legacy toy
+examples in a local checkout, download the data on demand:
+
+```bash
+uv run python scripts/download_legacy_example_data.py
+```
+
+The downloaded files are written under
+`scripts/legacy_ldetect/ldetect/examples/example_data/` and are ignored by Git.
 
 ## Effective Population Size
 

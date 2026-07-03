@@ -10,6 +10,16 @@ examples/*/ref/
 examples/*/resources/
 examples/*/work/
 
+# Large downloaded inputs and optional legacy toy data for replication examples.
+examples/ldetect_original/**/*.vcf.gz
+examples/ldetect_original/**/*.vcf.gz.tbi
+examples/ldetect_original/**/*.interpolated_genetic_map.gz
+examples/ldetect_original/scripts/legacy_ldetect/ldetect/examples/example_data/
+
+# Downloaded copyrighted supplementary material (Berisa & Pickrell 2016) --
+# useful locally for provenance research, must not be redistributed via git.
+examples/ldetect_original/document-sup.pdf
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

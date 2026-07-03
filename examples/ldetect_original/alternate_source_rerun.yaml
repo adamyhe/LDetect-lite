@@ -1,0 +1,19 @@
+# Config for Snakefile.alternate_source_rerun.
+#
+# Chromosomes currently failing to exactly reproduce the published reference
+# (notes/ldetect-original-main-pipeline-audit.md summary table, 2026-07-02).
+# chr13 (both populations) is the exact-match control and is intentionally
+# excluded here — its v3 baseline already reproduces exactly, so there is
+# nothing to test by rerunning it.
+divergent_chromosomes_by_population:
+  EUR: [8, 9, 10, 11, 12]
+  AFR: [11, 22]
+
+# Alternate 1000G Phase 1 releases to test end-to-end, drawn from the
+# `sources` already defined in provenance_diagnostics.yaml. Excludes v3
+# (current baseline, already run by the main Snakefile) and excludes the
+# "snps" variant-type filter (not a distinct 1kGP release; the production
+# pipeline itself doesn't restrict to SNPs, so "all" is the correct
+# like-for-like filter for a fair "VCF source only" test).
+alternate_sources: [v1, v2, old2011]
+alternate_variant_filter: all

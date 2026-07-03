@@ -690,24 +690,6 @@ def _owned_bounds(
     return lower_min, lower_max, p_index == 0
 
 
-def _deduplicate_metric_pairs(
-    pair_i: np.ndarray,
-    pair_j: np.ndarray,
-    pair_s: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Sort and deduplicate metric pairs, preserving first-pair semantics."""
-    if pair_i.size <= 1:
-        return pair_i, pair_j, pair_s
-    original_order = np.arange(pair_i.size, dtype=np.int64)
-    order = np.lexsort((original_order, pair_j, pair_i))
-    pair_i = pair_i[order]
-    pair_j = pair_j[order]
-    pair_s = pair_s[order]
-    keep = np.ones(pair_i.size, dtype=bool)
-    keep[1:] = (pair_i[1:] != pair_i[:-1]) | (pair_j[1:] != pair_j[:-1])
-    return pair_i[keep], pair_j[keep], pair_s[keep]
-
-
 def _metric_n_zero(loci: np.ndarray, breakpoints: np.ndarray) -> float:
     """Return the block-area denominator used by array-backed metrics."""
     metric_loci = loci[loci <= breakpoints[-1]]

@@ -1,0 +1,61 @@
+diagnostic_populations: [EUR, AFR]
+
+chromosomes_by_population:
+  EUR: [8, 9, 10, 11, 12, 13]
+  AFR: [11, 13, 22]
+
+# v3/all is the current main-pipeline input and is used as the baseline for
+# position-set comparisons.
+baseline_source: v3
+baseline_variant_filter: all
+
+sources:
+  v3:
+    base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521"
+    filename_template: "ALL.chr{chrom}.phase1_release_v3.20101123.snps_indels_svs.genotypes.vcf.gz"
+    panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+  v2:
+    base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20120316_phase1_integrated_release_version2"
+    filename_template: "ALL.chr{chrom}.phase1_release_v2.20101123.snps_indels_svs.vcf.gz"
+    panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20120316_phase1_integrated_release_version2/phase1_integrated_calls_v2.20101123.ALL.panel"
+  v1:
+    base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20120213_phase1_integrated_release_version1"
+    filename_template: "ALL.chr{chrom}.phase1_integrated_calls.20101123.snps_indels_svs.genotypes.vcf.gz"
+    panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+  old2011:
+    base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20111111_old_phase1_release_files"
+    filename_template: "ALL.chr{chrom}.merged_beagle_mach.20101123.snps_indels_svs.genotypes.vcf.gz"
+    panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+  # Undocumented intermediate Phase 1 snapshot, chronologically between
+  # old2011 (Nov 2011) and v1 (Feb 2012). No README or panel file in its own
+  # directory (unlike v1/old2011, whose own docs point at the standard
+  # panel below, this one has no documentation at all) -- reusing the
+  # standard panel is the only available option, not a confirmed match.
+  merged_umich:
+    base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/working/20120117_new_phase1_intgrated_genotypes"
+    filename_template: "ALL.chr{chrom}.merged_umich.20101123.snps_indels_svs.vcf.gz"
+    panel_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/phase1_integrated_calls.20101123.ALL.panel"
+
+# `all` matches the main reproduction pipeline. `snps` tests whether the
+# published blocks used an effectively SNP-only universe.
+variant_filters: [all, snps]
+
+# These candidates are compared to v3/all for every configured population and
+# chromosome. Keep this list focused; downloading every old full-chromosome VCF
+# is expensive.
+comparison_candidates:
+  - {source: v3, variant_filter: snps}
+  - {source: v2, variant_filter: all}
+  - {source: v2, variant_filter: snps}
+  - {source: v1, variant_filter: all}
+  - {source: old2011, variant_filter: all}
+  - {source: merged_umich, variant_filter: all}
+
+# compare_vcf_ld.py parameters: deterministic evenly-spaced sample of nearby
+# SNP pairs (positions shared with the v3/all baseline) used to compare
+# per-release minor allele frequency and phased-haplotype r^2. This targets
+# genotype/phasing differences at shared positions that compare_vcf_positions
+# (position-set membership only) cannot see.
+ld_window_bp: 5000
+ld_max_anchors: 500
+ld_pairs_per_anchor: 5

@@ -1,0 +1,32 @@
+# EUR chr8-12 are the divergent chromosomes, chr13 is an exact-match control.
+# AFR chr22 is the other open divergence; chr21 is an exact-match control
+# (every AFR chromosome except chr22 reproduces exactly -- see
+# notes/ldetect-original-main-pipeline-audit.md).
+chromosomes_by_population:
+  EUR: [8, 9, 10, 11, 12, 13]
+  AFR: [21, 22]
+subset: fourier_ls
+tolerance: 100000
+
+# Fallback used if the primary nygcresearch Bitbucket download fails (it was
+# unavailable for a period but is reachable again as of 2026-06-20/07-03).
+# This mirror only has the EUR genome-wide fourier_ls all-BED (used by JASS);
+# no known AFR mirror exists, so AFR relies on the primary Bitbucket URL.
+ldetect_ref_fallback_urls:
+  EUR: "https://gitlab.pasteur.fr/statistical-genetics/jass/-/raw/7b88d5c53dd7418bbc5f43ad366c0a387a7ed69c/data/fourier_ls-all.bed"
+
+# The legacy diagnostic path stages HDF5 covariance into the original ldetect
+# 8-column text format, but the lean legacy code only needs position pairs and
+# shrink_ld. Keep the ldetect2 cache compact unless debugging full metadata.
+covariance_cache: compact
+
+# Keep internal ldetect2 parallelism conservative unless you are actively
+# profiling on a high-memory machine.
+cov_workers: 10
+local_search_workers: 1
+staging_workers: 10
+
+# Snakemake scheduling guard: this rule claims many threads so `--cores 8`
+# still runs only one heavy chromosome job at a time. ldetect2 itself still
+# receives cov_workers/local_search_workers above.
+ldetect2_job_threads: 10
