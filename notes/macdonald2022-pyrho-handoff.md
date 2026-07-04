@@ -1,6 +1,6 @@
 # MacDonald2022 pyrho Handoff
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 ## Goal
 
@@ -15,15 +15,27 @@ Set aside `pyrho_SAS` for now because MacDonald et al. do not appear to
 document an SAS-specific effective population size. Also set aside the deCODE
 `EUR` mismatch initially; it has a different failure mode.
 
-## Current State (2026-07-03)
+## Current State (2026-07-04)
 
 All MacDonald2022 workflow/diagnostic code referenced in this note is
 committed on the `macdonald` branch (rebased onto current `main` as of
 2026-07-03). `git status --short` should be clean; if it isn't, check what
 changed before trusting this note's file references. `results/` and most of
 `resources/`/`data/` are gitignored — cached local intermediates (BEDs, maps,
-comparison TSVs) may or may not be present in a fresh checkout. See the "chr9
-Investigation" section below for the most recent substantive findings.
+comparison TSVs) may or may not be present in a fresh checkout.
+
+A full genome-wide remote run (float64, no `--high-precision`) completed
+2026-07-04 and its `results/` output was pulled back locally — final/raw
+combined BEDs, `compare/` TSVs, and per-chromosome logs for all of
+`EUR`/`pyrho_AFR`/`pyrho_EAS`/`pyrho_EUR` are present, filling the long-
+standing genome-wide-`pyrho_EUR` gap. **The per-chromosome intermediate
+directories (`results/{block_set}/chr*/`, holding the real correlation-sum
+vectors) were not synced back** — if this checkout still has them, a
+targeted rerun to inspect Category B chromosomes' real LD signal (see step 6
+below) can skip straight to analysis; if not, that rerun still needs doing.
+
+See "Genome-wide `pyrho_EUR` results" and "Why almost nothing is exact
+anywhere" below for the most recent substantive findings.
 
 ## Pipeline Changes Already Made
 
@@ -327,6 +339,60 @@ expensive path as the parked investigation (real pipeline reruns with
 careful precision/VCF-parity comparisons), now understood to be necessary
 pervasively rather than for a couple of isolated chromosomes.
 
+## Genome-wide `pyrho_EUR` results and full three-population confirmation (2026-07-04)
+
+A full remote Snakemake run (`uv run snakemake --cores N`, default target,
+all `active_block_sets`, all 22 chromosomes, float64/no `--high-precision` —
+skipped per the precision-already-tested reasoning above) was completed and
+its `results/` output pulled back into the local checkout. **Caveat: the
+per-chromosome intermediate directories (`results/{block_set}/chr*/`, which
+would hold the actual correlation-sum vectors) were not synced back** —
+only the final/raw combined BEDs, `compare/` TSVs, and per-chromosome
+timing/benchmark logs came through. Category B (below) still cannot be
+diagnosed at the signal level without those.
+
+What this run did deliver, for the first time:
+
+- **Genome-wide `pyrho_EUR` boundary/block comparisons** (previously only a
+  chr9-targeted run existed). Overall: 16.7% non-exact (229/1375
+  boundaries) — closely matching AFR (17.5%) and EAS (21.0%). This
+  independently confirms the "pervasive, population-independent divergence"
+  finding above: `pyrho_EUR`'s `Ne` already matches legacy's, yet its
+  divergence rate is statistically indistinguishable from AFR/EAS.
+- **Genome-wide raw (pre-postprocessing) comparisons for all three pyrho
+  populations** (previously AFR/EAS raw was missing, completing old step 1
+  below). Raw non-exact rates: EUR 17.1%, AFR 17.8%, EAS 21.4% — nearly
+  identical to final (16.7%/17.5%/21.0%). **Postprocessing changes the
+  overall exact-match rate by under 1 point in every population** —
+  definitively closes old step 2/3 below: postprocessing-order hypotheses
+  do not explain the pervasive divergence; it's present in the raw
+  breakpoint placement itself.
+- **`pyrho_EUR`'s worst chromosomes, freshly verified**: chr19 (39.4%
+  exact, worst of any chromosome in any population), chr21 (70.0%), chr22
+  (75.0%), chr9 (73.8%), chr16 (74.4%) — matches the old note's
+  from-memory list exactly, now confirmed with live data.
+
+Applying the same DOI-tag-vs-`5081b31` raw-content-diff test (see above) to
+EUR's worst chromosomes extends the bifurcation to all three populations:
+
+- **Category A** (worst offset inside, or within ~1-2 Mb of the edge of, a
+  legacy-removed desert block): `chr9` (exact desert match), `chr19` (worst
+  offset 27,241,617 lands inside legacy's removed 23,058,970–28,405,898),
+  `chr22` (worst offset 18,370,479, ~1.1 Mb past legacy's removed
+  10,516,173–17,238,266 — an edge-adjacent case like AFR chr22, not a clean
+  interior hit, but clearly related).
+- **Category B** (no relation to any centromere-removed block): `chr21`
+  (worst offset 27,019,818, nowhere near legacy's removed
+  5,033,884–13,987,433) and `chr16` (worst offset 55,270,291, nowhere near
+  legacy's removed 33,520,050–46,381,684).
+
+Tally across all three pyrho populations: Category A now includes AFR
+chr18/chr22, EAS chr9/chr17/chr18, EUR chr9/chr19/chr22 (8 instances).
+Category B includes AFR chr10/chr11, EAS chr4/chr14, EUR chr21/chr16 (6
+instances) — a roughly even split, and genuinely no closer to resolved for
+Category B than before (still needs real per-locus LD signal, i.e. a
+targeted rerun that this time *keeps* the per-chromosome intermediates).
+
 ## Working Hypotheses For pyrho
 
 The pyrho results are already close enough that a wholesale algorithm problem is
@@ -401,9 +467,12 @@ Two relevant differences from the current port were found:
 
 ## Suggested Next Steps
 
-### 1. Generate raw and final boundary diagnostics for all pyrho sets
+### 1. Generate raw and final boundary diagnostics for all pyrho sets — done 2026-07-04
 
-The final files exist locally. Ensure raw boundary files also exist:
+A full remote genome-wide run produced final and raw boundary/block
+comparisons for all three pyrho populations (plus deCODE `EUR`). See
+"Genome-wide `pyrho_EUR` results" above. Original commands kept below for
+reference if these need regenerating (e.g. after a code change):
 
 ```bash
 cd examples/MacDonald2022
@@ -422,10 +491,13 @@ first check whether the expected raw combined BEDs and reference BEDs exist:
 ls -lh results/pyrho_*_raw_LD_blocks.bed resources/pyrho_*_LD_blocks.bed
 ```
 
-### 2. Compare raw vs final boundary loss/gain around centromeres
+### 2. Compare raw vs final boundary loss/gain around centromeres — done 2026-07-04, answered
 
-For each pyrho set, inspect boundaries present in raw but absent in final and
-compare them to the published reference. The key question is:
+Genome-wide raw vs. final exact-match rates differ by under 1 point in every
+population (EUR 17.1%→16.7%, AFR 17.8%→17.5%, EAS 21.4%→21.0% non-exact).
+Postprocessing is not where the pervasive divergence comes from — it's
+already present in the raw breakpoint placement. Original framing kept
+below for any future chromosome-specific (not aggregate) follow-up:
 
 - Did centromere removal delete exactly the boundaries missing from reference?
 - Or did it also delete one adjacent reference boundary on chromosomes with
@@ -480,36 +552,39 @@ deCODE `EUR` raw and final are identical, and its mismatch is not fixed by
 postprocessing changes. It likely reflects a deCODE-specific input or map
 preprocessing difference. Do not let it drive pyrho postprocessing changes.
 
-### 6. Other bad chromosomes — bifurcated 2026-07-03, half explained
+### 6. Other bad chromosomes — bifurcated across all three pyrho populations, 2026-07-03/04
 
 Resolved via the DOI-tag-vs-`5081b31` BED diff method (see "Other
-chromosomes" above, and use raw blob diffing — the commit API's `.patch`
-field truncates on these large files):
+chromosomes" and "Genome-wide `pyrho_EUR` results" above — use raw blob
+diffing, the commit API's `.patch` field truncates on these large files).
+EUR's worst chromosomes were finally checked 2026-07-04 after a genome-wide
+`pyrho_EUR` run filled the last gap:
 
-- **Same mechanism as chr9** (legacy desert, ours fragments it): AFR chr18,
-  chr22; EAS chr9, chr17, chr18. Nothing further to do here beyond what's
+- **Category A — same mechanism as chr9** (legacy desert, ours fragments
+  it, or a close edge-adjacent variant): AFR chr18, chr22; EAS chr9, chr17,
+  chr18; EUR chr9, chr19, chr22. Nothing further to do here beyond what's
   already documented — these are instances of the same parked issue, not a
   separate bug.
-- **Genuinely unexplained** ("Category B" — not near any centromere-removed
+- **Category B — genuinely unexplained** (not near any centromere-removed
   desert, no local map-density anomaly either): AFR chr10, chr11; EAS chr4,
-  chr14. If picked up again, the next diagnostic step would need real LD
-  signal (an actual covariance/correlation-sum vector for that locus, not
-  just the map), i.e. a targeted pipeline rerun for that one chromosome —
-  not attempted this session.
-- EUR chr19, chr21, chr22, chr16 were never checked at all — no genome-wide
-  `pyrho_EUR` boundary data is cached locally (only the chr9-only targeted
-  run from earlier). Would need either a genome-wide `pyrho_EUR` Snakemake
-  run (expensive) or per-chromosome targeted runs for just these four
-  (`--config chromosomes='[19,21,22,16]'`, cheaper) to get real per-chromosome
-  offsets before applying the same bifurcation test.
+  chr14; EUR chr21, chr16. The next diagnostic step needs real LD signal (an
+  actual covariance/correlation-sum vector for one of these loci, not just
+  the map) — **a targeted pipeline rerun that explicitly keeps
+  `results/{block_set}/chr{chrom}/` this time** (the 2026-07-04 full remote
+  run didn't sync those back, only the combined outputs and logs, so this
+  is still unstarted). Nothing in the config marks these `temp()`, so a
+  rerun should preserve them by default; just don't let a post-run cleanup
+  step delete them.
 
 Also see "Why almost nothing is exact anywhere" above — the pervasive,
-genome-wide ~18-21% non-exact rate (dominated by 100kb-1Mb-scale
-mismatches, not tiny jitter) means Category B chromosomes are likely not
-individually special; they're just where the same widespread, low-frequency
-"different candidate breakpoint chosen" phenomenon happened to produce an
-unusually large single worst-case offset. Postprocessing-order hypotheses
-(below) are unlikely to explain either category.
+genome-wide ~17-21% non-exact rate (confirmed now in all three pyrho
+populations, dominated by 100kb-1Mb-scale mismatches, not tiny jitter, and
+essentially unaffected by postprocessing per step 2) means Category B
+chromosomes are likely not individually special; they're just where the
+same widespread, low-frequency "different candidate breakpoint chosen"
+phenomenon happened to produce an unusually large single worst-case offset.
+Postprocessing-order hypotheses (below) are ruled out as an explanation for
+either category or the aggregate pattern.
 
 ## Validation Commands
 
