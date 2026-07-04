@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import decimal
 from pathlib import Path
 
 import numpy as np
@@ -705,3 +706,114 @@ def test_local_search_fallback_accepts_compact_partition(tmp_path: Path) -> None
 
     assert bp is None
     assert search_metric is not None
+
+
+def _set_precomputed_deltas(
+    search: LocalSearch,
+    horiz: dict[int, float],
+    vert: dict[int, float],
+) -> None:
+    """Override a LocalSearch's precomputed per-locus deltas after init_search().
+
+    Bypasses real covariance data entirely so the incremental sum/N_zero walk
+    can be driven to exact, hand-computed values -- used to deterministically
+    exercise tie-break and degenerate-N_zero edge cases that are impractical
+    to hit reliably through real covariance arithmetic.
+    """
+    if search.use_decimal:
+        for loc, h in horiz.items():
+            search.precomputed["data"][loc] = {
+                "sum_horiz": decimal.Decimal(str(h)),
+                "sum_vert": decimal.Decimal(str(vert[loc])),
+            }
+    else:
+        assert search._array_loci is not None
+        index_by_locus = {loc: i for i, loc in enumerate(search._array_loci.tolist())}
+        for loc, h in horiz.items():
+            i = index_by_locus[loc]
+            search._array_sum_horiz[i] = h
+            search._array_sum_vert[i] = vert[loc]
+
+
+def test_local_search_left_tie_prefers_closest_candidate(tmp_path: Path) -> None:
+    """A chain of exact left-side ties must resolve to the closest one.
+
+    Regression test for a bug where `min_distance_right` (the tie-break
+    distance threshold) was only ever set from a right-side win and never
+    refreshed after a left-side tie win. That let a later, farther-out left
+    tie incorrectly override an earlier, closer one, since it was still
+    compared against the stale (larger) right-side distance instead of the
+    closer left candidate's own distance.
+
+    Deltas below are hand-computed (not from real covariance data) for
+    loci=[100..700], breakpoint=400, window=[100,700]:
+      - Right walk visits 500, 600, 700 in order; only 700 beats the
+        baseline metric (2.0), winning at distance 300 from 400.
+      - Left walk visits 300, 200, 100 in order; 300 and 200 both tie
+        exactly with 700's metric (0.5), at distances 100 and 200
+        respectively -- both closer than 700's 300, so both pass the
+        tie-break's distance check against the *stale* threshold.
+      - Correct behavior: 300 (closer) wins. Buggy behavior: 200
+        (farther, visited after 300) incorrectly overrides it.
+    """
+    loci = [100, 200, 300, 400, 500, 600, 700]
+    r2 = {(a, b): 0.01 for a in loci for b in loci if a < b}
+    store = _make_store(tmp_path, loci, r2)
+    breakpoints = [400, 700]
+    total_sum, total_n = 600.0, 1000.0
+
+    horiz = {100: 95.0, 200: 0.0, 300: 0.0, 400: 0.0, 500: 0.6, 600: 1.8, 700: 102.1}
+    vert = {100: 0.0, 200: 2.5, 300: 101.5, 400: 0.0, 500: 0.0, 600: 0.0, 700: 0.0}
+
+    results = {}
+    for use_decimal in (False, True):
+        search = LocalSearch(
+            "chr1", 100, 700, 0, breakpoints, total_sum, total_n, store,
+            use_decimal=use_decimal,
+        )
+        search.init_search()
+        _set_precomputed_deltas(search, horiz, vert)
+        bp, metric = search.search()
+        results[use_decimal] = bp
+        assert metric is not None
+        assert float(metric["sum"]) / float(metric["N_zero"]) == pytest.approx(0.5)
+
+    assert results[False] == 300
+    assert results[True] == 300
+
+
+def test_local_search_skips_nonpositive_n_zero_candidates(tmp_path: Path) -> None:
+    """A candidate whose incrementally-updated N_zero is <= 0 must be skipped.
+
+    Regression test: the array-backed search (`_search_array`) already
+    guards against this (`valid = ns > 0`); the Decimal/dictionary search
+    (`search()`) did not, so a position with a nonsensical negative
+    denominator could produce a deceptively "better" (very negative) ratio
+    and incorrectly win.
+
+    Deltas below (loci=[100..700], breakpoint=400, window=[100,700],
+    total_n=5.0) make N_zero go negative at 700 (right) and at 200/100
+    (left), each paired with a numerator that would otherwise look
+    attractive. 600 (N_zero=1, metric=0.5) is the only valid improvement
+    over the baseline (metric=2.0) and must be the result on both paths.
+    """
+    loci = [100, 200, 300, 400, 500, 600, 700]
+    r2 = {(a, b): 0.01 for a in loci for b in loci if a < b}
+    store = _make_store(tmp_path, loci, r2)
+    breakpoints = [400, 700]
+    total_sum, total_n = 10.0, 5.0
+
+    horiz = {100: 0.0, 200: 0.0, 300: 0.0, 400: 0.0, 500: 2.0, 600: 7.5, 700: 0.0}
+    vert = {100: 0.0, 200: 0.0, 300: 0.0, 400: 0.0, 500: 0.0, 600: 0.0, 700: 9.5}
+
+    for use_decimal in (False, True):
+        search = LocalSearch(
+            "chr1", 100, 700, 0, breakpoints, total_sum, total_n, store,
+            use_decimal=use_decimal,
+        )
+        search.init_search()
+        _set_precomputed_deltas(search, horiz, vert)
+        bp, metric = search.search()
+        assert bp == 600
+        assert metric is not None
+        assert float(metric["sum"]) / float(metric["N_zero"]) == pytest.approx(0.5)

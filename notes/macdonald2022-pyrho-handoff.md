@@ -461,6 +461,89 @@ chr21/chr16 not yet run through `verify_local_search.py`) — but there's no
 reason to expect a different conclusion; the tooling and method are ready
 to reuse if worth confirming on the others.
 
+## Is there an algorithmic bug behind the razor-thin margins? (2026-07-04) — investigated and ruled out
+
+After the EAS chr4 finding above, a natural follow-up question is whether a
+genuine *algorithmic* issue (not just "tiny legitimate covariance
+differences") explains the razor-thin margins. Investigated four angles:
+
+1. **Window-bound computation.** Compared legacy's actual local-search
+   driver (`_reference/ldetect_original/ldetect/examples/P02_minima_pipeline.py`,
+   `run_local_search_complete`) against `src/ldetect2/pipeline.py`'s
+   `_run_local_search`/`_midpoint`. **No deviation** — both compute every
+   breakpoint's search window from the same raw, un-refined candidate list;
+   legacy's sequential Python loop never feeds a refined position back as
+   input to a later window, so it's architecturally equivalent to ldetect2's
+   independent/parallelizable task-list construction, not a materially
+   different (e.g. sequential-refinement) algorithm.
+2. **Metric formula and tie-breaking.** The `sum(r²)/N_zero` formula and
+   incremental update logic are identical to legacy and identical between
+   ldetect2's own Decimal (`search()`) and float-vectorized (`_search_array()`)
+   paths. No deadband/tolerance exists anywhere — any strictly-better
+   metric, however marginal, moves the breakpoint. This is a genuine design
+   property (zero-tolerance greedy optimization), not a bug, but it does
+   mean the algorithm is maximally sensitive to tiny input differences by
+   construction.
+3. **A real historical bug, now confirmed fixed on real data.**
+   `notes/local-search-divergence-asn22.md` (2026-04-30) documents a
+   serious past bug: an earlier array-backed local-search precompute used a
+   different effective locus list than the legacy dictionary path in
+   multi-partition windows (down to 2/19 exact matches on ASN chr22 at the
+   time). The fix then was a workaround forcing multi-partition windows
+   through the Decimal/dict path. The current code has since been rewritten
+   (`_init_search_array`'s docstring: "Precompute local-search deltas with
+   exact legacy locus semantics") to make the array path itself correct for
+   multi-partition windows — but this had never been verified against real
+   production data before. Directly ran `LocalSearch(..., use_decimal=False)`
+   and `LocalSearch(..., use_decimal=True)` against the *same real* EAS
+   chr4 HDF5 partitions (genuinely multi-partition windows, breakpoint
+   indices 38 and 39): **both paths returned identical breakpoints with
+   metrics matching to ~13 significant digits.** The historical bug is
+   fixed and does not explain current observations.
+4. **N_zero-conditioning hypothesis — investigated and ruled out.**
+   Extended `examples/MacDonald2022/scripts/verify_local_search.py` to log
+   `N_zero` alongside the metric at every point on the search curve, then
+   ran it on both EAS chr4 breakpoints. Result: `N_zero` is **essentially
+   constant across the entire search window** — varying by only ~0.02% for
+   breakpoint 39 (1.62768e11 to 1.62801e11) and ~0.013% for breakpoint 38.
+   This is because `N_zero` in `LocalSearch` is `total_n + local_delta`,
+   where `total_n` is the *whole-chromosome* aggregate cross-block pair
+   count (~1.628e11) and the local incremental adjustment from moving the
+   candidate a few Mb is utterly negligible by comparison. **The
+   denominator is not "poorly conditioned" or "sparse" in this region at
+   all — it's dominated by the global scale.** This rules out denominator
+   conditioning as the sensitivity source: the razor-thin margins come
+   entirely from the numerator (`sum`, the actual r² signal), i.e.
+   genuinely tiny real differences in the covariance values themselves
+   between candidate positions, not an artifact of how `N_zero` behaves in
+   sparse regions.
+
+Two latent code defects were found along the way, unrelated to explaining
+the current observations but real — **both fixed and covered by regression
+tests this session** (`src/ldetect2/local_search.py`,
+`tests/test_local_search.py`): (a) `search()`'s and `_search_array()`'s
+left-search tie-break logic never refreshed `min_distance_right` after a
+left-tie win, so a chain of *exact* ties could resolve to the farthest
+qualifying position instead of the closest (required exact floating-point
+ties to manifest — not shown to matter for any real float64 covariance data
+checked so far, including EAS chr4); (b) the array path guarded against
+`N_zero <= 0` per-candidate, the Decimal/legacy-compatible path didn't,
+risking a nonsensical negative-denominator "win" in a sufficiently sparse
+window. Both fixes were verified against hand-constructed fixtures that
+fail on the pre-fix code and pass after (see `test_local_search_left_tie_prefers_closest_candidate`
+and `test_local_search_skips_nonpositive_n_zero_candidates`). Neither fix
+changes any real pyrho reproduction output — they only affect exact-tie and
+degenerate-denominator edge cases that don't occur in the real covariance
+data checked this session.
+
+**Conclusion: no algorithmic bug explains the pyrho divergence.** The
+window computation, metric formula, tie-breaking (now with both latent
+defects fixed), and array/Decimal path equivalence have all been checked
+against real data and legacy's actual algorithm, and all match. The
+razor-thin-margin explanation stands as the most likely one, now with the
+denominator-conditioning alternative explicitly ruled out rather than just
+untested.
+
 ## Working Hypotheses For pyrho
 
 The pyrho results are already close enough that a wholesale algorithm problem is

@@ -122,9 +122,13 @@ def main() -> None:
     bp_ind = int(np.searchsorted(loci, fourier_loci[idx], side="right") - 1)
 
     # Full metric curve across the window, both directions from bp_ind,
-    # mirroring _search_array's cumulative-sum construction exactly.
+    # mirroring _search_array's cumulative-sum construction exactly. Also
+    # track N_zero (= n_left * n_right for a single breakpoint) at every
+    # point, to check whether divergent candidates sit in a numerically
+    # sparse (small-denominator) pocket relative to the rest of the window.
     curve_loci = []
     curve_metric = []
+    curve_n = []
 
     right_stop = int(np.searchsorted(loci, ls.snp_last, side="right"))
     if bp_ind + 1 < right_stop:
@@ -136,6 +140,7 @@ def main() -> None:
         valid = ns > 0
         curve_loci.extend(loci[right_idx[valid]].tolist())
         curve_metric.extend((sums[valid] / ns[valid]).tolist())
+        curve_n.extend(ns[valid].tolist())
 
     left_start = int(np.searchsorted(loci, ls.snp_first, side="right"))
     if left_start < bp_ind:
@@ -147,14 +152,23 @@ def main() -> None:
         valid = ns > 0
         curve_loci.extend(loci[left_idx[valid]].tolist())
         curve_metric.extend((sums[valid] / ns[valid]).tolist())
+        curve_n.extend(ns[valid].tolist())
 
     order = np.argsort(curve_loci)
     curve_loci = np.array(curve_loci)[order]
     curve_metric = np.array(curve_metric)[order]
+    curve_n = np.array(curve_n)[order]
 
     best_curve_i = int(np.argmin(curve_metric))
-    print(f"Global minimum over full search window: locus={curve_loci[best_curve_i]} "
-          f"metric={curve_metric[best_curve_i]:.10g}")
+    median_n = float(np.median(curve_n))
+    print(
+        f"Global minimum over full search window: locus={curve_loci[best_curve_i]} "
+        f"metric={curve_metric[best_curve_i]:.10g} N_zero={curve_n[best_curve_i]:.6g}"
+    )
+    print(
+        f"N_zero across window: min={curve_n.min():.6g} median={median_n:.6g} "
+        f"max={curve_n.max():.6g}"
+    )
 
     for h in args.highlight + [fourier_ls_loci[idx]]:
         i = int(np.searchsorted(curve_loci, h))
@@ -162,9 +176,12 @@ def main() -> None:
         nearest_locus = curve_loci[i]
         dist = abs(nearest_locus - h)
         metric = curve_metric[i]
+        n_zero = curve_n[i]
+        n_ratio = n_zero / median_n if median_n else float("nan")
         print(
             f"  near highlighted position {h}: nearest evaluated locus="
-            f"{nearest_locus} (dist={dist}) metric={metric:.10g}"
+            f"{nearest_locus} (dist={dist}) metric={metric:.10g} "
+            f"N_zero={n_zero:.6g} (N_zero/median={n_ratio:.4g})"
         )
 
 
