@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -33,7 +34,7 @@ class CovarianceRowChunk:
     shrink_ld: np.ndarray
 
 
-def _h5py():
+def _h5py() -> Any:
     try:
         import h5py
     except ModuleNotFoundError as exc:
@@ -369,7 +370,7 @@ def write_compact_covariance_partition_hdf5_chunks(
                 if lo.size == 0:
                     continue
                 _validate_canonical_sorted_unique(lo, hi)
-                if prev_lo is not None:
+                if prev_lo is not None and prev_hi is not None:
                     sorted_after_prev = (int(lo[0]) > prev_lo) or (
                         int(lo[0]) == prev_lo and int(hi[0]) > prev_hi
                     )
@@ -477,7 +478,7 @@ def write_compact_covariance_partition_hdf5_append(
             if lo.size == 0:
                 continue
             _validate_canonical_sorted_unique(lo, hi)
-            if prev_lo is not None:
+            if prev_lo is not None and prev_hi is not None:
                 sorted_after_prev = (int(lo[0]) > prev_lo) or (
                     int(lo[0]) == prev_lo and int(hi[0]) > prev_hi
                 )
@@ -574,13 +575,13 @@ class HDF5CovariancePartitionReader:
         self.path = path
         self.start = start
         self.end = end
-        self._h5 = None
+        self._h5: Any | None = None
 
     def __enter__(self) -> HDF5CovariancePartitionReader:
         self.open()
         return self
 
-    def __exit__(self, *exc_info) -> None:
+    def __exit__(self, *exc_info: object) -> None:
         self.close()
 
     def open(self) -> None:
@@ -594,7 +595,7 @@ class HDF5CovariancePartitionReader:
             self._h5 = None
 
     @property
-    def h5(self):
+    def h5(self) -> Any:
         self.open()
         return self._h5
 

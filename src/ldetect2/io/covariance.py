@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import csv
+import decimal
 import gzip
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,9 @@ _COL_SHRINK = 7
 # Type aliases
 Matrix = dict[int, Any]
 LocusList = list[int]
+# Breakpoint-quality metric: either all-Decimal or all-float/int at runtime
+# depending on Metric(use_decimal=...), never mixed -- see metric.py.
+MetricDict = dict[str, decimal.Decimal | float | int]
 
 _FULL_HDF5_DATASETS = (
     "covariance/naive_ld",
@@ -140,7 +144,7 @@ def _insert_full_values(
             }
 
 
-def _require_hdf5_datasets(path: Path, h5, datasets: tuple[str, ...]) -> None:
+def _require_hdf5_datasets(path: Path, h5: Any, datasets: tuple[str, ...]) -> None:
     missing = sorted(dataset for dataset in datasets if dataset not in h5)
     if not missing:
         return

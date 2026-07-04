@@ -6,9 +6,9 @@ import gzip
 import math
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import IO
+from typing import IO, Any, TypeVar
 
 import numpy as np
 
@@ -26,13 +26,18 @@ COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
 # Pairwise LD kernel (Numba-accelerated when available)
 # ---------------------------------------------------------------------------
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
 try:
     from numba import njit
 
-    _njit_fallback = njit(cache=True)
+    _numba_decorator = njit(cache=True)
+
+    def _njit_fallback(fn: _F) -> _F:
+        return _numba_decorator(fn)  # type: ignore[no-any-return]
 except ImportError:
 
-    def _njit_fallback(fn):  # type: ignore[misc]
+    def _njit_fallback(fn: _F) -> _F:
         return fn
 
 

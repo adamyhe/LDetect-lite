@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TextIO
 
@@ -18,10 +19,10 @@ def _is_compressed_path(path: Path) -> bool:
 def _open_text(path: Path, mode: str) -> TextIO:
     if _is_compressed_path(path):
         return gzip.open(path, mode)  # type: ignore[return-value]
-    return open(path, mode)
+    return open(path, mode)  # type: ignore[return-value]
 
 
-def _iter_bed_records(path: Path):
+def _iter_bed_records(path: Path) -> Iterator[tuple[str, int, int]]:
     with _open_text(path, "rt") as f:
         for line in f:
             line = line.rstrip()

@@ -5,19 +5,38 @@ from __future__ import annotations
 import csv
 import gzip
 import time
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 
-from ldetect2._util.covariance_array import ChromosomeCovariance
+from ldetect2._util.covariance_array import ChromosomeCovariance, CovariancePartition
 from ldetect2._util.logging import log_debug
 from ldetect2._util.memory import log_memory_checkpoint
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
+from ldetect2.io.covariance_hdf5 import (
+    HDF5CovariancePartitionReader,
+    open_covariance_reader,
+)
 from ldetect2.io.partitions import CovarianceStore
 
 MATRIX_TO_VECTOR_CHUNK_ROWS = 1_000_000
+
+
+class _DiagVectorProfile(TypedDict, total=False):
+    """Per-partition profiling counters; not every key is set in every path."""
+
+    checkpoint: str
+    hdf5_read_seconds: float
+    normalize_seconds: float
+    center_seconds: float
+    open_seconds: float
+    loci_seconds: float
+    diag_seconds: float
+    rows_read: int
+    rows_accumulated: int
+    chunks: int
 
 
 @dataclass(frozen=True)
@@ -38,7 +57,7 @@ class _DiagVectorPartitionResult:
     sum_values: np.ndarray
     end_locus: int
     write_cutoff: int
-    profile: dict[str, object]
+    profile: _DiagVectorProfile
 
 
 def _position_array(arr: np.ndarray) -> np.ndarray:
@@ -219,7 +238,7 @@ def _write_diag_vector_array_hdf5_parallel(
     current_locus = snp_first
     next_submit = 0
     next_emit = 0
-    pending = {}
+    pending: dict[Future[_DiagVectorPartitionResult], int] = {}
     completed: dict[int, _DiagVectorPartitionResult] = {}
     with ProcessPoolExecutor(max_workers=matrix_workers) as pool:
         while next_submit < len(task_args) and len(pending) < matrix_workers:
@@ -336,7 +355,7 @@ def _process_diag_vector_partition(
     *,
     name: str,
     store: CovarianceStore,
-    partition_arrays: tuple | None,
+    partition_arrays: tuple[CovariancePartition, ...] | None,
     p_index: int,
     start: int,
     end: int,
@@ -378,7 +397,7 @@ def _process_diag_vector_partition(
 
 def _compute_diag_vector_partition_array(
     *,
-    partition_arrays: tuple,
+    partition_arrays: tuple[CovariancePartition, ...],
     p_index: int,
     start: int,
     end: int,
@@ -538,7 +557,7 @@ def _compute_diag_vector_partition_hdf5(
 
         _log_vector_checkpoint(f"{checkpoint}_chunked_r2_accum_start")
         partition_sums = np.zeros(loci.size, dtype=np.float64)
-        profile = {
+        profile: _DiagVectorProfile = {
             "checkpoint": checkpoint,
             "hdf5_read_seconds": 0.0,
             "normalize_seconds": 0.0,
@@ -626,7 +645,9 @@ def _empty_diag_vector_partition_result(checkpoint: str) -> _DiagVectorPartition
     )
 
 
-def _chunked_owned_loci(reader, start: int, end: int) -> np.ndarray:
+def _chunked_owned_loci(
+    reader: HDF5CovariancePartitionReader, start: int, end: int
+) -> np.ndarray:
     """Return sorted unique owned loci from the compact HDF5 index."""
     loci = reader.read_loci()
     mask = (loci >= start) & (loci <= end)
@@ -644,7 +665,7 @@ def _accumulate_vector_chunk(
     center_left: int,
     center_right: int,
     partition_sums: np.ndarray,
-    profile: dict[str, float | int] | None = None,
+    profile: _DiagVectorProfile | None = None,
 ) -> None:
     """Normalize one row chunk and add center-locus sums into ``partition_sums``."""
     if row_lo.size == 0:

@@ -31,7 +31,7 @@ class CovariancePartitionSummary:
     peak_low_mb: float
     peak_high_mb: float
 
-    def as_dict(self) -> dict:
+    def as_dict(self) -> dict[str, str | int | float]:
         return {
             "name": self.name,
             "partition_start": self.partition_start,

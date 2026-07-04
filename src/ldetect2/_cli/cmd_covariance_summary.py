@@ -87,7 +87,7 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _format_tsv(rows: list[dict], columns: list[str]) -> str:
+def _format_tsv(rows: list[dict[str, str | int | float]], columns: list[str]) -> str:
     buffer = StringIO()
     writer = csv.DictWriter(buffer, fieldnames=columns, delimiter="\t")
     writer.writeheader()

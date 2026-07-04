@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from typing import cast
 
 from ldetect2 import __version__
 from ldetect2._util.logging import configure_logging
@@ -56,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(level=getattr(logging, args.verbosity.upper()))
 
-    return args.func(args)
+    return cast(int, args.func(args))
 
 
 if __name__ == "__main__":

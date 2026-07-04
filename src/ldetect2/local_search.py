@@ -9,6 +9,8 @@ from bisect import bisect_left
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 
@@ -24,6 +26,7 @@ from ldetect2._util.covariance_array import (
 )
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
+    Matrix,
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
@@ -116,7 +119,7 @@ class LocalSearchHDF5Partition:
 
     start: int
     end: int
-    path: object
+    path: Path
     source_row_count: int
     loci: np.ndarray
     diag_pos: np.ndarray
@@ -133,7 +136,7 @@ class _LocalSearchSegment:
     loci_start: int
     loci_stop: int
     active_min_lo: int
-    active_partitions: tuple
+    active_partitions: tuple[LocalSearchPartition | LocalSearchHDF5Partition, ...]
 
 
 class DenseLocalSearchAccumulator:
@@ -862,8 +865,8 @@ class LocalSearch:
         stop_search: int,
         initial_breakpoint_index: int,
         breakpoints: list[int],
-        total_sum,
-        total_n,
+        total_sum: decimal.Decimal | float | int,
+        total_n: decimal.Decimal | float | int,
         store: CovarianceStore,
         use_decimal: bool = False,
         covariance_cache: ChromosomeCovariance | None = None,
@@ -881,6 +884,8 @@ class LocalSearch:
         self.breakpoints = breakpoints
         self.use_decimal = use_decimal
 
+        self.total_sum: decimal.Decimal | float
+        self.total_n: decimal.Decimal | float
         if use_decimal:
             self.total_sum = decimal.Decimal(total_sum)
             self.total_n = decimal.Decimal(total_n)
@@ -893,11 +898,11 @@ class LocalSearch:
         self.local_search_partitions = local_search_partitions
         self.local_search_hdf5_partitions = local_search_hdf5_partitions
 
-        self.matrix: dict = {}
+        self.matrix: Matrix = {}
         self.locus_list: list[int] = []
         self.locus_list_deleted: list[int] = []
 
-        self.precomputed: dict = {
+        self.precomputed: dict[str, Any] = {
             "locus_list": [],
             "data": {},
         }
@@ -1324,7 +1329,11 @@ class LocalSearch:
                 continue
             lo_min = int(segment_loci[0])
             lo_max = int(segment_loci[-1])
-            active_partition_list = list(segment.active_partitions)
+            # This planning pass only ever builds segments from
+            # LocalSearchPartition (see the sibling HDF5-chunked pass below).
+            active_partition_list = cast(
+                "list[LocalSearchPartition]", list(segment.active_partitions)
+            )
             append_start = time.perf_counter()
             active_lo, active_hi, active_shrink = _segment_rows_from_partitions(
                 active_partition_list,
@@ -1506,7 +1515,11 @@ class LocalSearch:
             segment_loci = loci[segment.loci_start : segment.loci_stop]
             if segment_loci.size == 0:
                 continue
-            active_partition_list = list(segment.active_partitions)
+            # This planning pass only ever builds segments from
+            # LocalSearchHDF5Partition (see the sibling array-based pass above).
+            active_partition_list = cast(
+                "list[LocalSearchHDF5Partition]", list(segment.active_partitions)
+            )
             diagonal_start = time.perf_counter()
             diag_pos, diag_val = _active_diagonal_from_hdf5_partitions(
                 active_partition_list,
@@ -1539,7 +1552,9 @@ class LocalSearch:
         self.end_locus_index = end_locus_index
         return loci, accumulator.sum_vert, accumulator.sum_horiz
 
-    def _add_val(self, val, curr_locus: int, key: int) -> None:
+    def _add_val(
+        self, val: decimal.Decimal | float, curr_locus: int, key: int
+    ) -> None:
         zero = decimal.Decimal(0) if self.use_decimal else 0.0
         for loc in (curr_locus, key):
             if loc not in self.precomputed["data"]:
@@ -1557,7 +1572,7 @@ class LocalSearch:
     # Search
     # ------------------------------------------------------------------
 
-    def search(self) -> tuple[int | None, dict | None]:
+    def search(self) -> tuple[int | None, dict[str, decimal.Decimal | float] | None]:
         """Find the locally-optimal breakpoint position.
 
         Returns:
@@ -1592,13 +1607,20 @@ class LocalSearch:
         curr_sum = self.total_sum
         curr_n = self.total_n
 
+        # use_decimal keeps total_sum/total_n purely Decimal or purely float
+        # at runtime (see __init__); mypy can't see that invariant across
+        # the two branches below.
+        min_metric: decimal.Decimal | float
         if self.use_decimal:
             min_metric = decimal.Decimal(self.total_sum) / decimal.Decimal(self.total_n)
         else:
-            min_metric = self.total_sum / self.total_n
+            min_metric = self.total_sum / self.total_n  # type: ignore[operator]
 
         min_breakpoint: int | None = None
-        min_metric_details: dict = {"sum": self.total_sum, "N_zero": self.total_n}
+        min_metric_details: dict[str, decimal.Decimal | float] = {
+            "sum": self.total_sum,
+            "N_zero": self.total_n,
+        }
         min_distance_right = 0
 
         # Search RIGHT
@@ -1679,7 +1701,9 @@ class LocalSearch:
         log_debug("Search done")
         return min_breakpoint, min_metric_details
 
-    def _search_array(self) -> tuple[int | None, dict | None]:
+    def _search_array(
+        self,
+    ) -> tuple[int | None, dict[str, decimal.Decimal | float] | None]:
         log_debug("Starting local search (array)")
         loci = self._array_loci
         sum_vert = self._array_sum_vert
@@ -1712,9 +1736,14 @@ class LocalSearch:
             return self.breakpoints[self.initial_breakpoint_index], None
 
         init_bp_locus = int(loci[bp_ind])
-        min_metric = self.total_sum / self.total_n
+        # _search_array is only reached when not self.use_decimal (see
+        # search() above), so these are always float at runtime.
+        min_metric = self.total_sum / self.total_n  # type: ignore[operator]
         min_breakpoint: int | None = None
-        min_metric_details: dict = {"sum": self.total_sum, "N_zero": self.total_n}
+        min_metric_details: dict[str, decimal.Decimal | float] = {
+            "sum": self.total_sum,
+            "N_zero": self.total_n,
+        }
         min_distance_right = 0
 
         right_stop = int(np.searchsorted(loci, self.snp_last, side="right"))

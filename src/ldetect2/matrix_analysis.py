@@ -10,6 +10,7 @@ from ldetect2._util.covariance_array import ChromosomeCovariance
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2._util.vector_array import write_diag_vector_array
 from ldetect2.io.covariance import (
+    Matrix,
     delete_loci_smaller_than,
     delete_loci_smaller_than_lean,
     read_partition_into_matrix_lean,
@@ -37,7 +38,7 @@ class MatrixAnalysis:
     ) -> None:
         self.name = name
         self.store = store
-        self.matrix: dict = {}
+        self.matrix: Matrix = {}
         self.locus_list: list[int] = []
         self.vert_sum: dict[int, float] = {}
         self.vert_sum_len: dict[int, int] = {}

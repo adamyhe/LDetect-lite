@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import decimal
 import gzip
 import json
 import math
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 
 from ldetect2._util.binary_search import find_ge_ind, find_le_ind
 from ldetect2._util.covariance_array import (
     ChromosomeCovariance,
+    LocalSearchPartition,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
     metric_from_arrays,
 )
@@ -21,9 +24,23 @@ from ldetect2._util.logging import log_msg
 from ldetect2._util.memory import log_memory_checkpoint, max_rss_mib
 from ldetect2.filters import apply_filter, apply_filter_get_minima, get_minima_loc
 from ldetect2.find_minima import custom_binary_search_with_trackback
+from ldetect2.io.covariance import MetricDict
 from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
-from ldetect2.local_search import LocalSearch, local_search_hdf5_partition
+from ldetect2.local_search import (
+    LocalSearch,
+    LocalSearchHDF5Partition,
+    local_search_hdf5_partition,
+)
 from ldetect2.metric import Metric
+
+_LocalSearchDetails = dict[str, decimal.Decimal | float]
+
+
+class _LocalSearchGroupResult(TypedDict):
+    """Return shape of :func:`_run_local_search`: refined loci + per-locus metrics."""
+
+    loci: list[int]
+    metrics: list[_LocalSearchDetails | None]
 
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
@@ -333,9 +350,9 @@ def _apply_metric(
     store: CovarianceStore,
     loci: list[int],
     use_decimal: bool = False,
-    covariance_arrays=None,
+    covariance_arrays: ChromosomeCovariance | None = None,
     metric_workers: int = 1,
-) -> dict:
+) -> MetricDict:
     if covariance_arrays is not None and not use_decimal:
         return metric_from_arrays(covariance_arrays, loci)
     m = Metric(
@@ -350,13 +367,16 @@ def _apply_metric(
     return m.calc_metric()
 
 
-def _log_metric(metric_out: dict) -> None:
+def _log_metric(metric_out: MetricDict) -> None:
     n_zero = metric_out["N_zero"]
     if n_zero > 0:
+        # sum/N_zero are always both-Decimal or both-float/int at runtime
+        # (see MetricDict/Metric.use_decimal); mypy can't see that invariant.
+        metric = metric_out["sum"] / n_zero  # type: ignore[operator]
         log_msg(
             f"  sum={metric_out['sum']:.6f}  "
             f"N_zero={n_zero}  "
-            f"metric={metric_out['sum'] / n_zero:.6e}"
+            f"metric={metric:.6e}"
         )
 
 
@@ -371,15 +391,15 @@ def _local_search_worker(
     stop: int,
     idx: int,
     breakpoint_loci: list[int],
-    total_sum,
-    total_n,
+    total_sum: decimal.Decimal | float | int,
+    total_n: decimal.Decimal | float | int,
     store: CovarianceStore,
     use_decimal: bool,
     covariance_cache: ChromosomeCovariance | None = None,
-    local_search_partitions=None,
-    local_search_hdf5_partitions=None,
+    local_search_partitions: tuple[LocalSearchPartition, ...] | None = None,
+    local_search_hdf5_partitions: tuple[LocalSearchHDF5Partition, ...] | None = None,
     subset_name: str = "local_search",
-) -> tuple[int, dict | None]:
+) -> tuple[int, _LocalSearchDetails | None]:
     """Run one breakpoint refinement and emit debug timing/memory diagnostics.
 
     This function is module-level so it can be submitted to
@@ -444,12 +464,12 @@ def _run_local_search(
     snp_first: int,
     snp_last: int,
     store: CovarianceStore,
-    metric_out: dict,
+    metric_out: MetricDict,
     workers: int = 1,
     use_decimal: bool = False,
     covariance_cache: ChromosomeCovariance | None = None,
     subset_name: str = "local_search",
-) -> dict:
+) -> _LocalSearchGroupResult:
     """Refine all breakpoints for one subset and log aggregate elapsed time.
 
     Each breakpoint search is independent.  The function runs them sequentially
@@ -479,7 +499,7 @@ def _run_local_search(
             )
         )
 
-    results: dict[int, tuple[int, dict | None]] = {}
+    results: dict[int, tuple[int, _LocalSearchDetails | None]] = {}
 
     if covariance_cache is not None and not use_decimal:
         if workers > 1:
@@ -633,7 +653,7 @@ def _group_local_search_tasks(
     return [(partition_bounds, grouped[partition_bounds]) for partition_bounds in order]
 
 
-def _metric_to_json(metric_out: dict) -> dict:
+def _metric_to_json(metric_out: MetricDict) -> dict[str, str | int]:
     """Serialise a metric dict; Decimal values become strings to preserve precision."""
     return {
         "sum": str(metric_out["sum"]),

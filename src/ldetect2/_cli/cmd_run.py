@@ -181,9 +181,13 @@ def _calc_partition(
             "tabix not found. Install htslib and ensure tabix is on PATH."
         )
 
-    with tabix_proc.stdout:  # type: ignore[union-attr]
+    stdout = tabix_proc.stdout
+    if stdout is None:
+        raise RuntimeError("tabix subprocess produced no stdout stream")
+
+    with stdout:
         calc_covariance(
-            vcf_stream=tabix_proc.stdout,
+            vcf_stream=stdout,
             genetic_map_path=genetic_map_path,
             individuals_path=individuals_path,
             output_path=output_path,

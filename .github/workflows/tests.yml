@@ -1,19 +1,25 @@
-name: Publish to PyPI
+name: Tests
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v8.2.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
 
       - name: Install dependencies
@@ -28,20 +34,17 @@ jobs:
       - name: Run unit tests
         run: uv run pytest -m "not integration"
 
-  publish:
-    needs: test
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # required for trusted publishing (OIDC)
+      - name: Run integration tests
+        run: uv run pytest -m integration
 
+  build:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
 
-      - name: Build distributions
+      - name: Build sdist and wheel
         run: uv build
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1

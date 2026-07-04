@@ -57,5 +57,11 @@ select = ["E", "F", "I", "UP"]
 python_version = "3.11"
 strict = true
 
+# None of these ship inline types or stubs (numba/h5py have no py.typed
+# marker; scipy.ndimage/scipy.signal stubs are incomplete upstream).
+[[tool.mypy.overrides]]
+module = ["scipy.*", "numba.*", "h5py.*"]
+ignore_missing_imports = true
+
 [dependency-groups]
 dev = ["pytest>=9.0.2", "pytest-cov>=7.1.0"]

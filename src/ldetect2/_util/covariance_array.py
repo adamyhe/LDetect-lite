@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from ldetect2._util.logging import log_debug
+from ldetect2.io.covariance import MetricDict
 from ldetect2.io.covariance_hdf5 import open_covariance_reader
 from ldetect2.io.partitions import CovarianceStore
 
@@ -93,7 +94,7 @@ def _position_array(arr: np.ndarray) -> np.ndarray:
     return arr.astype(np.int64, copy=False)
 
 
-def _load_partition_arrays(path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_partition_arrays(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. Array-backed covariance "
@@ -111,7 +112,7 @@ def _load_partition_arrays(path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         )
 
 
-def _partition_bounds_from_path(path) -> tuple[int, int]:
+def _partition_bounds_from_path(path: Path) -> tuple[int, int]:
     try:
         parts = path.stem.split(".")
         return int(parts[-2]), int(parts[-1])
@@ -310,7 +311,7 @@ def metric_from_files(
     snp_last: int,
     breakpoints: list[int],
     workers: int = 1,
-) -> dict:
+) -> MetricDict:
     """Compute the LD block metric without materializing chromosome-wide pairs.
 
     The calculation streams covariance partitions twice: first to collect loci
@@ -482,7 +483,7 @@ def _metric_partition_results_parallel(
     ]
     results: list[_MetricPartitionResult | None] = [None] * len(task_args)
     next_submit = 0
-    pending = {}
+    pending: dict[Future[_MetricPartitionResult], int] = {}
     with ProcessPoolExecutor(
         max_workers=workers,
         initializer=_init_metric_worker,
@@ -990,7 +991,7 @@ def _metric_arrays_from_partitions(
 def metric_from_arrays(
     cov: CovarianceArrays,
     breakpoints: list[int],
-) -> dict:
+) -> MetricDict:
     """Compute the LD block metric from array-backed covariance data."""
     if cov.loci.size == 0:
         return {"sum": 0.0, "N_nonzero": 0, "N_zero": 0.0}

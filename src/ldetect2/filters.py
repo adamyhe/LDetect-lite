@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TypedDict
+
 import numpy as np
 import scipy.ndimage as ndimage
 import scipy.signal as sig
@@ -9,7 +11,17 @@ import scipy.signal as sig
 from ldetect2._util.logging import log_msg
 
 
-def apply_filter(np_init_array: np.ndarray, width: int) -> dict:
+class FilterResult(TypedDict):
+    """Output of :func:`apply_filter`."""
+
+    width: int
+    window: np.ndarray
+    filtered: np.ndarray
+    filtered_minima_ind: np.ndarray
+    filtered_minima_vals: list[float]
+
+
+def apply_filter(np_init_array: np.ndarray, width: int) -> FilterResult:
     """Apply a Hanning-window low-pass filter and find local minima.
 
     Args:
@@ -47,7 +59,7 @@ def apply_filter_get_minima_ind(np_init_array: np.ndarray, width: int) -> np.nda
     return apply_filter(np_init_array, width)["filtered_minima_ind"]
 
 
-def get_minima_loc(g: dict, np_init_array_x: np.ndarray) -> list[int]:
+def get_minima_loc(g: FilterResult, np_init_array_x: np.ndarray) -> list[int]:
     """Convert minima indices to genomic positions.
 
     Args:
@@ -65,6 +77,6 @@ def apply_filters(
     first: int,
     last: int,
     step: int,
-) -> list[dict]:
+) -> list[FilterResult]:
     """Apply filters at a range of widths and return all results."""
     return [apply_filter(np_init_array, w) for w in range(first, last + 1, step)]

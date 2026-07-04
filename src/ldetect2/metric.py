@@ -8,6 +8,8 @@ from bisect import bisect_left
 from ldetect2._util.covariance_array import metric_from_files
 from ldetect2._util.logging import log_debug, log_msg
 from ldetect2.io.covariance import (
+    Matrix,
+    MetricDict,
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
@@ -53,12 +55,12 @@ class Metric:
         self.use_decimal = use_decimal
         self.workers = max(1, int(workers))
 
-        self.matrix: dict = {}
+        self.matrix: Matrix = {}
         self.locus_list: list[int] = []
         self.locus_list_deleted: list[int] = []
 
         if use_decimal:
-            self.metric: dict = {
+            self.metric: MetricDict = {
                 "sum": decimal.Decimal("0"),
                 "N_nonzero": decimal.Decimal("0"),
                 "N_zero": decimal.Decimal("0"),
@@ -82,13 +84,13 @@ class Metric:
         self.end_locus = -1
         self.end_locus_index = -1
 
-    def calc_metric(self) -> dict:
+    def calc_metric(self) -> MetricDict:
         """Run the lean metric calculation and return the result dict."""
         if not self.use_decimal:
             return self._calc_metric_array()
         return self._calc_metric_lean()
 
-    def _calc_metric_array(self) -> dict:
+    def _calc_metric_array(self) -> MetricDict:
         log_msg("Start metric (streaming array)")
         metric = metric_from_files(
             self.name,
@@ -104,12 +106,16 @@ class Metric:
         self.calculation_complete = True
         return self.metric
 
-    def _calc_metric_lean(self) -> dict:
+    def _calc_metric_lean(self) -> MetricDict:
         if self.use_decimal:
             decimal.getcontext().prec = _PREC
 
         log_msg("Start metric (lean)")
 
+        # Below, `# type: ignore[operator]` marks arithmetic that mixes
+        # Decimal/float/int only from mypy's perspective: `use_decimal`
+        # (checked below and in __init__) keeps every accumulator and operand
+        # purely Decimal or purely float/int at runtime, never both.
         curr_breakpoint_index = 0
         block_width = 0
         total_n_snps = decimal.Decimal("0") if self.use_decimal else 0.0
@@ -206,8 +212,8 @@ class Metric:
                 # Advance breakpoint if we've passed it
                 if curr_breakpoint_index < len(self.breakpoints):
                     if curr_locus > self.breakpoints[curr_breakpoint_index]:
-                        block_height = _zero - total_n_snps
-                        self.metric["N_zero"] += block_height * block_width
+                        block_height = _zero - total_n_snps  # type: ignore[operator]
+                        self.metric["N_zero"] += block_height * block_width  # type: ignore[operator]
                         block_width_sum += block_width
                         curr_breakpoint_index += 1
                         block_width = 0
@@ -225,8 +231,8 @@ class Metric:
                                     cov = self.matrix[curr_locus][key]
                                     r2 = cov * cov / (diag_curr * diag_key)
                                     if self.use_decimal:
-                                        self.metric["sum"] += decimal.Decimal(r2)
-                                        self.metric["N_nonzero"] += _one
+                                        self.metric["sum"] += decimal.Decimal(r2)  # type: ignore[operator]
+                                        self.metric["N_nonzero"] += _one  # type: ignore[operator]
                                     else:
                                         self.metric["sum"] += r2
                                         self.metric["N_nonzero"] += 1
@@ -238,7 +244,7 @@ class Metric:
                 if curr_locus_index + 1 < len(self.locus_list):
                     curr_locus_index += 1
                     curr_locus = self.locus_list[curr_locus_index]
-                    total_n_snps += _one
+                    total_n_snps += _one  # type: ignore[operator]
                 else:
                     log_debug("curr_locus_index out of bounds")
                     break
@@ -250,7 +256,7 @@ class Metric:
         self.end_locus = end_locus
         self.end_locus_index = end_locus_index
 
-        self.metric["N_zero"] += total_n_snps * block_width_sum
+        self.metric["N_zero"] += total_n_snps * block_width_sum  # type: ignore[operator]
         log_msg(
             f"Metric done: sum={self.metric['sum']}, N_zero={self.metric['N_zero']}"
         )
