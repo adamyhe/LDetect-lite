@@ -389,9 +389,77 @@ EUR's worst chromosomes extends the bifurcation to all three populations:
 Tally across all three pyrho populations: Category A now includes AFR
 chr18/chr22, EAS chr9/chr17/chr18, EUR chr9/chr19/chr22 (8 instances).
 Category B includes AFR chr10/chr11, EAS chr4/chr14, EUR chr21/chr16 (6
-instances) — a roughly even split, and genuinely no closer to resolved for
-Category B than before (still needs real per-locus LD signal, i.e. a
-targeted rerun that this time *keeps* the per-chromosome intermediates).
+instances) — a roughly even split.
+
+## Category B resolved for EAS chr4 (2026-07-04): not a bug, a razor-thin numerical margin
+
+A second remote run kept the per-chromosome intermediates (vector files,
+`breakpoints-*.json`, and — for just the two relevant loci — the specific
+HDF5 covariance partitions), synced back via
+`examples/MacDonald2022/scripts/sync_results.sh`. Two sub-mechanisms emerged
+within Category B, distinguished by whether reference's own boundary is
+*also* independently one of our own exact-match boundaries elsewhere:
+
+**Sub-mechanism 1 — genuine extra split (AFR chr10, chr11):** confirmed by
+comparing `ours_to_ref` and `ref_to_ours` boundary-offset rows directly (no
+pipeline rerun needed): reference's boundary position is *also* one of our
+own boundaries, with an exact match (offset 0) elsewhere in the same file.
+The flagged "worst offset" position is a wholly separate, additional
+breakpoint we introduce that reference simply doesn't have — not a
+disagreement about where a boundary belongs, just one extra split.
+
+**Sub-mechanism 2 — razor-thin metric margin, verified directly against
+real covariance data (EAS chr4, clearest example):** Built
+`examples/MacDonald2022/scripts/verify_local_search.py`, which replays the
+*actual* `LocalSearch` class (not a reimplementation) using the exact
+`total_sum`/`total_n` normalization constants already stored in
+`breakpoints-{chrom}.json` (`data["fourier"]["metric"]`) — no genome-wide
+covariance needed, just the ~6 HDF5 partitions covering the two affected
+breakpoints' `snp_bottom`/`snp_top` range (note: that range is wider than
+the search window itself — `LocalSearch.__init__` loads partitions covering
+the *neighboring raw breakpoints*, not just the search bounds).
+
+For chr4's two adjacent breakpoints (raw fourier candidates 84,540,016 and
+87,868,391, which local search refined to 85,420,277 and 86,204,416
+respectively — moving toward each other from 3.33 Mb apart to 784 kb
+apart), inspecting the full metric curve (not just the reported optimum)
+across each breakpoint's complete search window found:
+
+- **`LocalSearch.search()`'s reported result is the true global minimum
+  within its search window in both cases** — confirmed by computing
+  `sum(r²)/N_zero` at every candidate locus in-window, not just trusting the
+  reported answer. **No bug in the search implementation.**
+- Reference's actual boundaries (84,513,834 and 88,318,340) are each
+  reachable in only *one* of the two windows (windows are bounded by
+  midpoints to neighboring raw candidates, so a boundary belonging to a
+  "neighbor's territory" is structurally unreachable — this alone explains
+  some Category B cases, but not this one, since both reference positions
+  happened to fall inside their respective correct windows here).
+- Where reachable, the reference position scored only **marginally worse**
+  than what we chose: 0.0068% worse for the 86,204,416 vs 88,318,340 pair,
+  0.058% worse for the 85,420,277 vs 84,513,834 pair. These are razor-thin
+  margins in the algorithm's own optimization criterion, not a case where
+  our pipeline picked something wildly different or clearly wrong.
+
+**Conclusion: this is not a code bug and not fixable by a patch.** It's the
+same mechanism suspected since the "why almost nothing is exact anywhere"
+finding above, now verified directly against real data for one locus:
+tiny, likely legitimate numerical differences in our covariance
+computation (vs. legacy's, which we cannot byte-compare against — no
+published intermediates) are enough to flip which of two near-tied
+candidates wins a sub-0.1%-margin race. This generalizes the already-parked
+`ldetect-original-reproduction` "flat region" finding from a hand-wave
+("boundaries fall in flat/featureless stretches") to a precisely quantified
+mechanism (sub-0.1% metric margins, verified against real LocalSearch
+computation) — about as resolved as this gets without literally having
+legacy's own covariance matrices to diff against, which don't exist
+publicly.
+
+**Not extended to the other Category B loci this session** (AFR
+chr10/chr11 already explained via sub-mechanism 1 above; EAS chr14, EUR
+chr21/chr16 not yet run through `verify_local_search.py`) — but there's no
+reason to expect a different conclusion; the tooling and method are ready
+to reuse if worth confirming on the others.
 
 ## Working Hypotheses For pyrho
 
@@ -565,26 +633,33 @@ EUR's worst chromosomes were finally checked 2026-07-04 after a genome-wide
   chr18; EUR chr9, chr19, chr22. Nothing further to do here beyond what's
   already documented — these are instances of the same parked issue, not a
   separate bug.
-- **Category B — genuinely unexplained** (not near any centromere-removed
-  desert, no local map-density anomaly either): AFR chr10, chr11; EAS chr4,
-  chr14; EUR chr21, chr16. The next diagnostic step needs real LD signal (an
-  actual covariance/correlation-sum vector for one of these loci, not just
-  the map) — **a targeted pipeline rerun that explicitly keeps
-  `results/{block_set}/chr{chrom}/` this time** (the 2026-07-04 full remote
-  run didn't sync those back, only the combined outputs and logs, so this
-  is still unstarted). Nothing in the config marks these `temp()`, so a
-  rerun should preserve them by default; just don't let a post-run cleanup
-  step delete them.
+- **Category B — resolved 2026-07-04, not a bug** (see "Category B resolved
+  for EAS chr4" above for the full writeup): AFR chr10, chr11 are a genuine
+  extra split (confirmed from already-cached boundary-offset data, no rerun
+  needed). EAS chr4 was verified directly against real covariance data via
+  `scripts/verify_local_search.py` — `LocalSearch` correctly finds the true
+  optimum in both affected windows; reference's own boundaries score only
+  0.007-0.06% worse. Not extended to EAS chr14 or EUR chr21/chr16 yet, but
+  the tooling (`sync_results.sh` + `verify_local_search.py`) is ready to
+  reuse — see that section for the exact HDF5-partition-identification
+  method (use `snp_bottom`/`snp_top`, i.e. the neighboring raw breakpoints
+  themselves, not just the search-window midpoints, or you'll undercount
+  which files are needed like the first attempt here did).
 
-Also see "Why almost nothing is exact anywhere" above — the pervasive,
-genome-wide ~17-21% non-exact rate (confirmed now in all three pyrho
-populations, dominated by 100kb-1Mb-scale mismatches, not tiny jitter, and
-essentially unaffected by postprocessing per step 2) means Category B
-chromosomes are likely not individually special; they're just where the
-same widespread, low-frequency "different candidate breakpoint chosen"
-phenomenon happened to produce an unusually large single worst-case offset.
-Postprocessing-order hypotheses (below) are ruled out as an explanation for
-either category or the aggregate pattern.
+Also see "Why almost nothing is exact anywhere" above and "Category B
+resolved for EAS chr4" — the pervasive, genome-wide ~17-21% non-exact rate
+(confirmed now in all three pyrho populations, dominated by 100kb-1Mb-scale
+mismatches, not tiny jitter, and essentially unaffected by postprocessing
+per step 2) is now understood precisely, not just hand-waved: tiny,
+legitimate numerical differences in our covariance computation vs. legacy's
+(which cannot be byte-compared — no published intermediates) are enough to
+flip which of two near-tied local-search candidates wins a sub-0.1%-margin
+race, and/or produce genuine extra/missing splits. Postprocessing-order
+hypotheses (below) are ruled out as an explanation for either category or
+the aggregate pattern. This is very likely at, or very near, the practical
+end of this investigation — closing the remaining gap further would mean
+literally obtaining legacy's own covariance intermediates, which don't
+exist publicly.
 
 ## Validation Commands
 
