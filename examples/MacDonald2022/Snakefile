@@ -11,7 +11,13 @@ Pipeline steps:
     2a-2c deCODE map conversion/interpolation -- diagnostic only (regression-
        checks our own ldetect2 interpolate-maps against MacDonald's published
        maps via validate_maps/compare_maps); the EUR block set itself uses
-       MacDonald's published deCODE_interpolated_maps directly, same as pyrho
+       MacDonald's published deCODE_interpolated_maps directly, same as pyrho.
+       compare_maps/compare_maps_point_mode together are an interpolation
+       equivalence test: ldetect2 interpolate-maps --mode interval is a
+       direct port of MacDonald's R interpolation scripts and should match
+       their published maps almost exactly, while --mode point (the prior
+       default) reproduces the interval-shift bug those scripts fixed -- see
+       notes/macdonald2022-interpolation-port.md
     3  LD block detection per chromosome (ldetect2 run)
     4  Post-processing: centromere removal + small block merging
     5  Genome-wide BED assembly (cat all chromosomes)
@@ -158,6 +164,7 @@ rule all:
         ),
         str(RESULTS / "compare" / "map_summary.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
+        str(RESULTS / "compare" / "map_ref_comparison_point_mode.tsv"),
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +367,30 @@ rule interpolate_map:
         uv run ldetect2 interpolate-maps \
             --snp-file {input.snps} \
             --genetic-map {input.map} \
-            --output {output}
+            --output {output} \
+            --mode interval
+        """
+
+
+# Point-mode counterpart of interpolate_map, kept only so compare_maps_point
+# can quantify the interpolation bug --mode interval fixed: feeding
+# convert_decode_map.py's interval-rate rows into point-based interpolation
+# uses the *next* interval's rate for SNPs in the *current* interval. See
+# notes/macdonald2022-interpolation-port.md.
+rule interpolate_map_point:
+    input:
+        snps=rules.extract_snp_positions.output[0],
+        map=rules.convert_decode_map.output[0],
+    output:
+        str(MAPS_DIR / "interpolated_point" / "chr{chrom}.tab.gz"),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}/interpolated_point
+        uv run ldetect2 interpolate-maps \
+            --snp-file {input.snps} \
+            --genetic-map {input.map} \
+            --output {output} \
+            --mode point
         """
 
 
@@ -526,6 +556,33 @@ rule compare_maps:
         ),
     output:
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
+    params:
+        ref_dir=str(RES_DIR / "macdonalds_maps"),
+    shell:
+        """
+        uv run python scripts/compare_maps.py \
+            --ours {input} \
+            --ref-dir {params.ref_dir} \
+            --output {output}
+        """
+
+
+# Equivalence check: --mode interval (interpolate_map) is a direct port of
+# MacDonald's R interpolation scripts, so it should match their published
+# deCODE_interpolated_maps almost exactly (near-zero MAE). This rule reruns
+# the same comparison against interpolate_map_point's --mode point output so
+# the two map_ref_comparison*.tsv files can be diffed directly: interval
+# mode's MAE should collapse to ~0 while point mode reproduces the
+# previously measured 0.0013-0.0026 cM error. See
+# notes/macdonald2022-interpolation-port.md.
+rule compare_maps_point_mode:
+    input:
+        expand(
+            str(MAPS_DIR / "interpolated_point" / "chr{chrom}.tab.gz"),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "compare" / "map_ref_comparison_point_mode.tsv"),
     params:
         ref_dir=str(RES_DIR / "macdonalds_maps"),
     shell:
