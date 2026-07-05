@@ -86,6 +86,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--shrink-ld-precision",
+        choices=("float64", "float32"),
+        default="float64",
+        help=(
+            "Precision for shrink_ld values. 'float32' rounds values before "
+            "writing (still stored as float64, no schema change) to improve "
+            "compressibility; not yet validated against real breakpoints, "
+            "so it defaults off (default: float64)."
+        ),
+    )
+    p.add_argument(
         "--n-snps-bw-bpoints",
         type=int,
         default=10_000,
@@ -173,6 +184,7 @@ def _calc_partition(
     cutoff: float,
     compact_output: bool,
     compression: str,
+    shrink_ld_precision: str,
 ) -> None:
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
@@ -206,6 +218,7 @@ def _calc_partition(
             cutoff=cutoff,
             compact_output=compact_output,
             compression=compression,
+            shrink_ld_precision=shrink_ld_precision,
         )
     tabix_proc.wait()
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
@@ -259,7 +272,8 @@ def _run(args: argparse.Namespace) -> int:
     log_msg(
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache}, "
-        f"compression={args.covariance_compression})"
+        f"compression={args.covariance_compression}, "
+        f"shrink_ld_precision={args.shrink_ld_precision})"
     )
     log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
@@ -298,6 +312,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.cov_cutoff,
                 compact_output,
                 args.covariance_compression,
+                args.shrink_ld_precision,
             ): (start, end)
             for start, end in pending
         }

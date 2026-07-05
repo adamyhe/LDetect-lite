@@ -513,6 +513,18 @@ def partition_chromosome(
 # ---------------------------------------------------------------------------
 
 
+def _maybe_truncate_shrink_ld(values: np.ndarray, precision: str) -> np.ndarray:
+    """Round to float32 precision (still returned as float64) when requested.
+
+    A no-op for ``"float64"``. This only reduces mantissa precision to
+    improve HDF5 compressibility; the returned dtype is always float64, so
+    every downstream writer/reader is unaffected.
+    """
+    if precision == "float32":
+        return values.astype(np.float32).astype(np.float64)
+    return values
+
+
 def calc_covariance(
     vcf_stream: IO[str],
     genetic_map_path: Path,
@@ -523,6 +535,7 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
+    shrink_ld_precision: str = "float64",
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -551,6 +564,13 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect2.io.covariance_hdf5._dataset_compression_kwargs``.
+        shrink_ld_precision: ``"float64"`` (default, no change) or
+            ``"float32"``. When ``"float32"``, every ``shrink_ld``/diagonal
+            value is rounded to float32 precision before being written, while
+            the on-disk dtype and every reader stay float64 (no schema
+            change) -- this only reduces the value's mantissa precision to
+            improve compressibility. Lossy: not yet validated against real
+            breakpoints, so it defaults off.
     """
     from ldetect2._util.logging import log_debug
     from ldetect2._util.memory import log_memory_checkpoint
@@ -696,17 +716,26 @@ def calc_covariance(
             n_pairs = write_compact_covariance_partition_hdf5_append(
                 output_path,
                 positions=pos_arr,
-                row_chunks=_compact_pair_chunks_single_pass(
-                    hap_mat,
-                    gpos_arr,
-                    hap_sums,
-                    j_stop_by_i,
-                    pos_arr,
-                    ne,
-                    float(n_ind),
-                    theta,
-                    cutoff,
-                    compact_chunk_rows,
+                row_chunks=(
+                    CovarianceRowChunk(
+                        lo=chunk.lo,
+                        hi=chunk.hi,
+                        shrink_ld=_maybe_truncate_shrink_ld(
+                            chunk.shrink_ld, shrink_ld_precision
+                        ),
+                    )
+                    for chunk in _compact_pair_chunks_single_pass(
+                        hap_mat,
+                        gpos_arr,
+                        hap_sums,
+                        j_stop_by_i,
+                        pos_arr,
+                        ne,
+                        float(n_ind),
+                        theta,
+                        cutoff,
+                        compact_chunk_rows,
+                    )
                 ),
                 chunk_rows=compact_chunk_rows,
                 compression=compression,
@@ -754,18 +783,27 @@ def calc_covariance(
             output_path,
             positions=pos_arr,
             row_counts=row_counts,
-            row_chunks=_compact_pair_chunks(
-                hap_mat,
-                gpos_arr,
-                hap_sums,
-                j_stop_by_i,
-                pos_arr,
-                row_counts,
-                ne,
-                float(n_ind),
-                theta,
-                cutoff,
-                compact_chunk_rows,
+            row_chunks=(
+                CovarianceRowChunk(
+                    lo=chunk.lo,
+                    hi=chunk.hi,
+                    shrink_ld=_maybe_truncate_shrink_ld(
+                        chunk.shrink_ld, shrink_ld_precision
+                    ),
+                )
+                for chunk in _compact_pair_chunks(
+                    hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    row_counts,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                )
             ),
             chunk_rows=compact_chunk_rows,
             compression=compression,
@@ -808,7 +846,7 @@ def calc_covariance(
             output_path,
             i_pos=i_pos,
             j_pos=j_pos,
-            shrink_ld=ds2_arr,
+            shrink_ld=_maybe_truncate_shrink_ld(ds2_arr, shrink_ld_precision),
             assume_canonical_sorted_unique=assume_sorted_unique_rows,
             compression=compression,
         )
@@ -828,7 +866,7 @@ def calc_covariance(
         output_path,
         i_pos=i_pos,
         j_pos=j_pos,
-        shrink_ld=ds2_arr,
+        shrink_ld=_maybe_truncate_shrink_ld(ds2_arr, shrink_ld_precision),
         i_gpos=gpos_flat[ii],
         j_gpos=gpos_flat[jj],
         naive_ld=d_naive_arr,

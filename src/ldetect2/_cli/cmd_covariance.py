@@ -57,6 +57,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "(default: zstd)."
         ),
     )
+    p.add_argument(
+        "--shrink-ld-precision",
+        choices=("float64", "float32"),
+        default="float64",
+        help=(
+            "Precision for shrink_ld values. 'float32' rounds values before "
+            "writing (still stored as float64, no schema change) to improve "
+            "compressibility; not yet validated against real breakpoints, "
+            "so it defaults off (default: float64)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -71,5 +82,6 @@ def _run(args: argparse.Namespace) -> int:
         ne=args.ne,
         cutoff=args.cutoff,
         compression=args.covariance_compression,
+        shrink_ld_precision=args.shrink_ld_precision,
     )
     return 0

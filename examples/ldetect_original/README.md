@@ -281,18 +281,29 @@ The downloaded files are written under
 ## Compression Diagnostic Workflow
 
 `Snakefile.compression_diagnostics` measures the performance, exactness, and
-**covariance cache size** of the `--covariance-compression` codec choice
-against this pipeline's real 1000G data. For each configured chromosome x
-population, it runs `ldetect2 run` twice on identical filtered input — once
-with `--covariance-compression lzf` (the prior default) and once with
-`--covariance-compression zstd` (the new default) — then compares the two
-runs':
+**covariance cache size** of the `--covariance-compression` codec choice and
+the `--shrink-ld-precision` value against this pipeline's real 1000G data.
+For each configured chromosome x population, it runs `ldetect2 run` three
+times on identical filtered input:
+
+- `baseline`: `--covariance-compression lzf` (the prior default);
+- `zstd`: `--covariance-compression zstd` (the new default — lossless, no
+  accuracy risk);
+- `zstd_f32`: `--covariance-compression zstd --shrink-ld-precision float32`
+  (an additional, larger storage lever — `shrink_ld` values are rounded to
+  float32 precision before writing, still stored as float64 on disk. This is
+  **lossy** and not yet validated against real breakpoints — that is exactly
+  what this diagnostic is for).
+
+Each of `zstd`/`zstd_f32` is then compared against `baseline`, producing one
+comparison row per (population, chromosome, candidate) triple:
 
 - **vector/breakpoints/BED**: row count, sha256 digest, exact loci match, and
-  BED boundary recall/precision/Jaccard at `tolerance` bp (default `0`).
-  Compression is lossless, so these are expected to match exactly — any
-  divergence here indicates a real bug, not floating-point noise from a
-  different computation order;
+  BED boundary recall/precision/Jaccard at `tolerance` bp (default `0`). For
+  `zstd` (lossless) these are expected to match exactly — any divergence
+  there indicates a real bug, not floating-point noise. For `zstd_f32`
+  (lossy) divergence is possible; the question this diagnostic answers is
+  whether it ever shifts a real breakpoint;
 - **covariance directory size**: total bytes of every `.h5` partition under
   each mode's covariance directory, plus the size ratio and percent
   reduction — this is the actual point of this diagnostic;
@@ -324,16 +335,17 @@ uv run snakemake -s Snakefile.compression_diagnostics --cores 4 \
 
 Outputs:
 
-- `results/compression_diagnostics/{population}/{chrom}/{baseline,zstd}/` —
+- `results/compression_diagnostics/{population}/{chrom}/{baseline,zstd,zstd_f32}/` —
   each mode's full `ldetect2 run` output directory, including its covariance
   partitions under `{mode}/{chrom}/`.
 - `results/compression_diagnostics/{population}/{chrom}/logs/{mode}.benchmark.tsv` —
   Snakemake's wall-clock/peak-memory record for that mode.
-- `results/compression_diagnostics/{population}/{chrom}/compare/compression_vs_baseline.tsv` —
-  one row combining the exactness, size, and performance comparison for that
-  chromosome x population.
+- `results/compression_diagnostics/{population}/{chrom}/compare/compression_vs_baseline.{candidate}.tsv` —
+  one row per candidate (`zstd`, `zstd_f32`) combining the exactness, size,
+  and performance comparison against baseline for that chromosome x
+  population.
 - `results/compression_diagnostics/summary.tsv` — all comparison rows
-  concatenated.
+  concatenated (both candidates, all chromosomes, all populations).
 
 ## Effective Population Size
 

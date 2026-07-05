@@ -32,3 +32,12 @@ def test_covariance_compression_defaults_to_zstd() -> None:
 def test_covariance_compression_accepts_lzf() -> None:
     args = _parse_args(["--covariance-compression", "lzf"])
     assert args.covariance_compression == "lzf"
+
+
+def test_shrink_ld_precision_defaults_to_float64() -> None:
+    assert _parse_args([]).shrink_ld_precision == "float64"
+
+
+def test_shrink_ld_precision_accepts_float32() -> None:
+    args = _parse_args(["--shrink-ld-precision", "float32"])
+    assert args.shrink_ld_precision == "float32"

@@ -1,15 +1,22 @@
-"""Diagnose the covariance-compression codec's performance and exactness on
-real data, at full-genome scale.
+"""Diagnose the covariance-compression codec's and shrink_ld precision's
+performance and exactness on real data, at full-genome scale.
 
-Runs `ldetect2 run` twice per chromosome x population on identical filtered
-1000G input -- once with `--covariance-compression lzf` (the prior default)
-and once with `--covariance-compression zstd` (the new default: smaller and
-faster to read/write at equal precision, see
-notes/covariance-streaming-cache-implementation-note.md) -- then compares the
-two runs' vectors, breakpoints, and BEDs for exactness (compression is
-lossless, so these should match exactly), each mode's covariance directory
-size on disk, and their Snakemake `benchmark:` records for wall-clock/peak-
-memory performance.
+Runs `ldetect2 run` three times per chromosome x population on identical
+filtered 1000G input:
+  - baseline: --covariance-compression lzf (the prior default)
+  - zstd: --covariance-compression zstd (the new default: smaller and
+    faster to read/write at equal precision, see
+    notes/covariance-streaming-cache-implementation-note.md)
+  - zstd_f32: --covariance-compression zstd --shrink-ld-precision float32
+    (an additional, larger storage lever -- shrink_ld values are rounded to
+    float32 precision before writing, still stored as float64 on disk. This
+    is lossy and NOT yet validated against real breakpoints, unlike the
+    other two lossless modes -- that is exactly what this diagnostic is for)
+
+For each of the two non-baseline modes, compares against baseline: vectors,
+breakpoints, and BEDs for exactness (lossless for zstd, expected-but-not-yet-
+confirmed for zstd_f32), that mode's covariance directory size on disk, and
+Snakemake `benchmark:` records for wall-clock/peak-memory performance.
 
 Population-generic like Snakefile.signal_cache_diagnostics:
 `chromosomes_by_population` in compression_diagnostics.yaml maps each
@@ -53,10 +60,16 @@ FILT_VCF = str(
 )
 COMPRESSION_ROOT = RESULTS / "compression_diagnostics"
 
-MODE_COMPRESSION_FLAG = {"baseline": "lzf", "zstd": "zstd"}
+MODE_PARAMS = {
+    "baseline": {"compression": "lzf", "precision": "float64"},
+    "zstd": {"compression": "zstd", "precision": "float64"},
+    "zstd_f32": {"compression": "zstd", "precision": "float32"},
+}
+CANDIDATE_MODES = ["zstd", "zstd_f32"]
 
 wildcard_constraints:
-    mode="baseline|zstd",
+    mode="baseline|zstd|zstd_f32",
+    candidate="zstd|zstd_f32",
 
 
 def pop_ne(population):
@@ -67,17 +80,22 @@ def pop_subpops(population):
     return config["populations"][population]["subpops"]
 
 
-def compression_targets(suffix):
+def compression_targets(suffix_template):
     targets = []
     for population, chroms in CHROMS_BY_POP.items():
         for chrom in chroms:
-            targets.append(str(COMPRESSION_ROOT / population / chrom / suffix))
+            for candidate in CANDIDATE_MODES:
+                targets.append(
+                    str(COMPRESSION_ROOT / population / chrom / "compare")
+                    + "/"
+                    + suffix_template.format(candidate=candidate)
+                )
     return targets
 
 
 rule all:
     input:
-        compression_targets("compare/compression_vs_baseline.tsv"),
+        compression_targets("compression_vs_baseline.{candidate}.tsv"),
         str(COMPRESSION_ROOT / "summary.tsv"),
 
 
@@ -155,7 +173,7 @@ rule compression_filter_vcf:
 
 
 # ---------------------------------------------------------------------------
-# Dual-mode ldetect2 run: identical input, --covariance-compression lzf vs zstd
+# Triple-mode ldetect2 run: identical input, baseline vs zstd vs zstd_f32
 # ---------------------------------------------------------------------------
 
 
@@ -192,7 +210,8 @@ rule compression_run_ldetect2:
             config.get("local_search_workers", 1),
             threads,
         ),
-        compression=lambda wc: MODE_COMPRESSION_FLAG[wc.mode],
+        compression=lambda wc: MODE_PARAMS[wc.mode]["compression"],
+        precision=lambda wc: MODE_PARAMS[wc.mode]["precision"],
     shell:
         """
         mkdir -p {params.log_dir}
@@ -207,6 +226,7 @@ rule compression_run_ldetect2:
             --cov-cutoff {params.cutoff} \
             --covariance-cache {params.covariance_cache} \
             --covariance-compression {params.compression} \
+            --shrink-ld-precision {params.precision} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.cov_workers} \
@@ -216,8 +236,11 @@ rule compression_run_ldetect2:
 
 
 # ---------------------------------------------------------------------------
-# Compare the two modes: exactness (vector/breakpoints/BED) + covariance
-# directory size + performance (Snakemake benchmark: wall-clock, peak RSS)
+# Compare each candidate mode (zstd, zstd_f32) against baseline: exactness
+# (vector/breakpoints/BED) + covariance directory size + performance
+# (Snakemake benchmark: wall-clock, peak RSS). One comparison row per
+# (population, chrom, candidate) triple, sharing a uniform schema so
+# compression_summary's concatenation works regardless of candidate count.
 # ---------------------------------------------------------------------------
 
 
@@ -226,54 +249,61 @@ rule compare_compression:
         baseline_vector=str(
             COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "vector-{chrom}.txt.gz"
         ),
-        zstd_vector=str(
-            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "vector-{chrom}.txt.gz"
+        candidate_vector=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "{candidate}" / "vector-{chrom}.txt.gz"
         ),
         baseline_breakpoints=str(
             COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
         ),
-        zstd_breakpoints=str(
-            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "breakpoints-{chrom}.json"
+        candidate_breakpoints=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "{candidate}" / "breakpoints-{chrom}.json"
         ),
         baseline_bed=str(
             COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"
         ),
-        zstd_bed=str(
-            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "{chrom}-ld-blocks.bed"
+        candidate_bed=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "{candidate}" / "{chrom}-ld-blocks.bed"
         ),
         baseline_benchmark=str(
             COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "baseline.benchmark.tsv"
         ),
-        zstd_benchmark=str(
-            COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "zstd.benchmark.tsv"
+        candidate_benchmark=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{candidate}.benchmark.tsv"
         ),
         script="scripts/compare_compression.py",
     output:
-        str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "compare" / "compression_vs_baseline.tsv"),
+        str(
+            COMPRESSION_ROOT
+            / "{population}"
+            / "{chrom}"
+            / "compare"
+            / "compression_vs_baseline.{candidate}.tsv"
+        ),
     params:
         subset=config.get("subset", "fourier_ls"),
         tolerance=config.get("tolerance", 0),
         baseline_covariance_dir=str(
             COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}"
         ),
-        zstd_covariance_dir=str(
-            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "{chrom}"
+        candidate_covariance_dir=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "{candidate}" / "{chrom}"
         ),
     shell:
         """
         uv run python scripts/compare_compression.py \
             --population {wildcards.population} \
             --chromosome {wildcards.chrom} \
+            --candidate-mode {wildcards.candidate} \
             --baseline-vector {input.baseline_vector} \
-            --zstd-vector {input.zstd_vector} \
+            --candidate-vector {input.candidate_vector} \
             --baseline-breakpoints {input.baseline_breakpoints} \
-            --zstd-breakpoints {input.zstd_breakpoints} \
+            --candidate-breakpoints {input.candidate_breakpoints} \
             --baseline-bed {input.baseline_bed} \
-            --zstd-bed {input.zstd_bed} \
+            --candidate-bed {input.candidate_bed} \
             --baseline-covariance-dir {params.baseline_covariance_dir} \
-            --zstd-covariance-dir {params.zstd_covariance_dir} \
+            --candidate-covariance-dir {params.candidate_covariance_dir} \
             --baseline-benchmark {input.baseline_benchmark} \
-            --zstd-benchmark {input.zstd_benchmark} \
+            --candidate-benchmark {input.candidate_benchmark} \
             --subset {params.subset} \
             --tolerance {params.tolerance} \
             --output {output}
@@ -287,7 +317,7 @@ rule compare_compression:
 
 rule compression_summary:
     input:
-        compression_targets("compare/compression_vs_baseline.tsv"),
+        compression_targets("compression_vs_baseline.{candidate}.tsv"),
     output:
         str(COMPRESSION_ROOT / "summary.tsv"),
     run:

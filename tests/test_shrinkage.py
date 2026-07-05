@@ -410,6 +410,88 @@ def test_calc_covariance_lzf_override_matches_zstd_default(tmp_path: Path) -> No
     np.testing.assert_allclose(zstd_rows.shrink_ld, lzf_rows.shrink_ld)
 
 
+def test_calc_covariance_default_precision_is_unchanged(tmp_path: Path) -> None:
+    """No shrink_ld_precision argument must produce bit-identical output to
+    an explicit "float64" request -- the new parameter is purely additive."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    default_path = tmp_path / "default.h5"
+    explicit_f64_path = tmp_path / "explicit_f64.h5"
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=default_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=explicit_f64_path,
+        cutoff=1e-7,
+        compact_output=True,
+        shrink_ld_precision="float64",
+    )
+
+    with open_covariance_reader(default_path, 100, 300) as reader:
+        default_rows = reader.read_all()
+    with open_covariance_reader(explicit_f64_path, 100, 300) as reader:
+        explicit_rows = reader.read_all()
+
+    np.testing.assert_array_equal(default_rows.shrink_ld, explicit_rows.shrink_ld)
+
+
+def test_calc_covariance_float32_precision_matches_expected_rounding(
+    tmp_path: Path,
+) -> None:
+    """shrink_ld_precision="float32" must equal the reference value rounded
+    through float32 and back, while staying stored as float64 on disk."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    f64_path = tmp_path / "f64.h5"
+    f32_path = tmp_path / "f32.h5"
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=f64_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=f32_path,
+        cutoff=1e-7,
+        compact_output=True,
+        shrink_ld_precision="float32",
+    )
+
+    with open_covariance_reader(f64_path, 100, 300) as reader:
+        f64_rows = reader.read_all()
+    with open_covariance_reader(f32_path, 100, 300) as reader:
+        f32_rows = reader.read_all()
+
+    np.testing.assert_array_equal(f32_rows.lo, f64_rows.lo)
+    np.testing.assert_array_equal(f32_rows.hi, f64_rows.hi)
+    expected = f64_rows.shrink_ld.astype(np.float32).astype(np.float64)
+    np.testing.assert_array_equal(f32_rows.shrink_ld, expected)
+
+    import h5py
+
+    with h5py.File(f32_path, "r") as h5:
+        assert h5["covariance/shrink_ld"].dtype == np.float64
+
+
 def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
     hap_mat = np.array(
         [
