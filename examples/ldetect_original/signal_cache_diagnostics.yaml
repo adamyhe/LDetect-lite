@@ -1,0 +1,30 @@
+# Chromosomes to diagnose per population. Default: a chr22 smoke test across
+# all three populations, mirroring legacy_diagnostics.yaml's convention of
+# scoping diagnostics to a small default set rather than the full genome.
+# Override with e.g. `--config chromosomes_by_population='{EUR: [11, 22]}'`.
+chromosomes_by_population:
+  EUR: [22]
+  AFR: [22]
+  ASN: [22]
+
+subset: fourier_ls
+
+# Boundary-match tolerance (bp) for the baseline-vs-signal-cache BED
+# comparison. Unlike the tolerance used to compare against the *published*
+# ldetect blocks (100000 bp, to absorb real reproduction divergence), this
+# compares two of our own runs against each other on identical input data, so
+# 0 checks for exact breakpoint agreement rather than approximate agreement.
+tolerance: 0
+
+# Keep internal ldetect2 parallelism conservative unless actively profiling
+# on a high-memory machine; this only affects Step 2/Step 4 parallelism
+# inside each mode's `ldetect2 run` invocation, not which modes run
+# concurrently (see ldetect2_job_threads below).
+covariance_cache: compact
+cov_workers: 4
+local_search_workers: 1
+
+# Snakemake scheduling guard: this rule claims many threads so `--cores 8`
+# still runs only one heavy chromosome x mode job at a time. ldetect2 itself
+# still receives cov_workers/local_search_workers above.
+ldetect2_job_threads: 4

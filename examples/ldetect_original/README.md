@@ -278,6 +278,63 @@ uv run python scripts/download_legacy_example_data.py
 The downloaded files are written under
 `scripts/legacy_ldetect/ldetect/examples/example_data/` and are ignored by Git.
 
+## Signal-Cache Diagnostic Workflow
+
+`Snakefile.signal_cache_diagnostics` measures the performance and exactness of
+the optional signal-cache feature (see `notes/covariance-streaming-cache-implementation-note.md`)
+against this pipeline's real 1000G data. For each configured chromosome x
+population, it runs `ldetect2 run` twice on identical filtered input — once
+with `--signal-cache off` (baseline: Step 3 reads and renormalizes pair-level
+covariance rows) and once with `--signal-cache auto` (Step 2 also writes a
+per-partition signal sidecar; Step 3 assembles the vector purely from
+sidecars) — then compares the two runs':
+
+- **vector**: row count, sha256 digest, and (if the digest differs) a
+  numeric max/mean absolute-difference breakdown over shared positions;
+- **breakpoints**: whether the requested subset's loci are exactly identical;
+- **BED**: boundary recall/precision/Jaccard between the two BEDs at
+  `tolerance` bp (default `0` — these are two of *our own* runs on identical
+  input, so exact agreement is expected, unlike the 100000 bp slack used
+  elsewhere to absorb real divergence from the *published* reference);
+- **performance**: wall-clock seconds and peak RSS from each mode's
+  Snakemake `benchmark:` record, plus the speedup/reduction ratios.
+
+Dry-run the default diagnostic (a chr22 smoke test across EUR/AFR/ASN):
+
+```bash
+uv run snakemake -s Snakefile.signal_cache_diagnostics -n
+```
+
+Run it for real:
+
+```bash
+uv run snakemake -s Snakefile.signal_cache_diagnostics --cores 4
+```
+
+Diagnose a different chromosome, or a specific population only:
+
+```bash
+uv run snakemake -s Snakefile.signal_cache_diagnostics --cores 4 \
+  --config chromosomes_by_population='{EUR: [11, 22]}'
+```
+
+Outputs:
+
+- `results/signal_cache_diagnostics/{population}/{chrom}/{baseline,signal_cache}/` —
+  each mode's full `ldetect2 run` output directory.
+- `results/signal_cache_diagnostics/{population}/{chrom}/logs/{mode}.benchmark.tsv` —
+  Snakemake's wall-clock/peak-memory record for that mode.
+- `results/signal_cache_diagnostics/{population}/{chrom}/compare/signal_cache_vs_baseline.tsv` —
+  one row combining the exactness and performance comparison for that
+  chromosome x population.
+- `results/signal_cache_diagnostics/summary.tsv` — all comparison rows
+  concatenated.
+
+As with the other diagnostic Snakefiles, `ldetect2_job_threads` claims enough
+cores per job that `--cores N` still runs jobs one chromosome-and-mode at a
+time unless raised; `cov_workers`/`local_search_workers` control parallelism
+*inside* each `ldetect2 run` invocation.
+
 ## Effective Population Size
 
 The covariance shrinkage step uses an effective population size (`Ne`). The

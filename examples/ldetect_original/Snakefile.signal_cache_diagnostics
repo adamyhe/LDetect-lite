@@ -1,0 +1,297 @@
+"""Diagnose the signal-cache feature's performance and exactness on real data.
+
+Runs `ldetect2 run` twice per chromosome x population on identical filtered
+1000G input — once with `--signal-cache off` (baseline: Step 3 reads and
+renormalizes pair-level covariance rows) and once with `--signal-cache auto`
+(Step 2 also writes a per-partition signal sidecar; Step 3 assembles the
+vector purely from sidecars) — then compares the two runs' vectors,
+breakpoints, and BEDs for exactness and their Snakemake `benchmark:` records
+for wall-clock/peak-memory performance.
+
+Population-generic like Snakefile.legacy_diagnostics:
+`chromosomes_by_population` in signal_cache_diagnostics.yaml maps each
+population to the chromosomes to diagnose for it, so a single invocation can
+cover multiple populations/chromosomes together. Outputs are namespaced under
+`results/signal_cache_diagnostics/{population}/{chrom}/...`.
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -s Snakefile.signal_cache_diagnostics -n
+    uv run snakemake -s Snakefile.signal_cache_diagnostics --cores 4
+    uv run snakemake -s Snakefile.signal_cache_diagnostics --cores 4 \
+        --config chromosomes_by_population='{EUR: [11, 22]}'
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "signal_cache_diagnostics.yaml"
+
+
+CHROMS_BY_POP = {
+    str(pop): [str(chrom) for chrom in chroms]
+    for pop, chroms in config["chromosomes_by_population"].items()
+}
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = RESULTS / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+SIGCACHE_ROOT = RESULTS / "signal_cache_diagnostics"
+
+MODE_SIGNAL_CACHE_FLAG = {"baseline": "off", "signal_cache": "auto"}
+
+wildcard_constraints:
+    mode="baseline|signal_cache",
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def signal_cache_targets(suffix):
+    targets = []
+    for population, chroms in CHROMS_BY_POP.items():
+        for chrom in chroms:
+            targets.append(str(SIGCACHE_ROOT / population / chrom / suffix))
+    return targets
+
+
+rule all:
+    input:
+        signal_cache_targets("compare/signal_cache_vs_baseline.tsv"),
+        str(SIGCACHE_ROOT / "summary.tsv"),
+
+
+rule signal_cache_download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule signal_cache_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule signal_cache_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule signal_cache_prep_individuals:
+    input:
+        panel=rules.signal_cache_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule signal_cache_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Dual-mode ldetect2 run: identical input, --signal-cache off vs auto
+# ---------------------------------------------------------------------------
+
+
+rule signal_cache_run_ldetect2:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(SIGCACHE_ROOT / "{population}" / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "{mode}" / "breakpoints-{chrom}.json"
+        ),
+        vector=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "{mode}" / "vector-{chrom}.txt.gz"
+        ),
+    log:
+        run=str(SIGCACHE_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.log"),
+        timing=str(SIGCACHE_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
+    benchmark:
+        str(SIGCACHE_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
+    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    params:
+        output_dir=lambda wc: str(SIGCACHE_ROOT / wc.population / wc.chrom / wc.mode),
+        log_dir=str(SIGCACHE_ROOT / "{population}" / "{chrom}" / "logs"),
+        ne=lambda wildcards: pop_ne(wildcards.population),
+        cutoff=config["cov_cutoff"],
+        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        local_search_workers=lambda wildcards, threads: min(
+            config.get("local_search_workers", 1),
+            threads,
+        ),
+        signal_cache=lambda wc: MODE_SIGNAL_CACHE_FLAG[wc.mode],
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --signal-cache {params.signal_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Compare the two modes: exactness (vector/breakpoints/BED) + performance
+# (Snakemake benchmark: wall-clock, peak RSS)
+# ---------------------------------------------------------------------------
+
+
+rule compare_signal_cache:
+    input:
+        baseline_vector=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "baseline" / "vector-{chrom}.txt.gz"
+        ),
+        signal_cache_vector=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "signal_cache" / "vector-{chrom}.txt.gz"
+        ),
+        baseline_breakpoints=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
+        ),
+        signal_cache_breakpoints=str(
+            SIGCACHE_ROOT
+            / "{population}"
+            / "{chrom}"
+            / "signal_cache"
+            / "breakpoints-{chrom}.json"
+        ),
+        baseline_bed=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"
+        ),
+        signal_cache_bed=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "signal_cache" / "{chrom}-ld-blocks.bed"
+        ),
+        baseline_benchmark=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "logs" / "baseline.benchmark.tsv"
+        ),
+        signal_cache_benchmark=str(
+            SIGCACHE_ROOT / "{population}" / "{chrom}" / "logs" / "signal_cache.benchmark.tsv"
+        ),
+        script="scripts/compare_signal_cache.py",
+    output:
+        str(SIGCACHE_ROOT / "{population}" / "{chrom}" / "compare" / "signal_cache_vs_baseline.tsv"),
+    params:
+        subset=config.get("subset", "fourier_ls"),
+        tolerance=config.get("tolerance", 0),
+    shell:
+        """
+        uv run python scripts/compare_signal_cache.py \
+            --population {wildcards.population} \
+            --chromosome {wildcards.chrom} \
+            --baseline-vector {input.baseline_vector} \
+            --signal-cache-vector {input.signal_cache_vector} \
+            --baseline-breakpoints {input.baseline_breakpoints} \
+            --signal-cache-breakpoints {input.signal_cache_breakpoints} \
+            --baseline-bed {input.baseline_bed} \
+            --signal-cache-bed {input.signal_cache_bed} \
+            --baseline-benchmark {input.baseline_benchmark} \
+            --signal-cache-benchmark {input.signal_cache_benchmark} \
+            --subset {params.subset} \
+            --tolerance {params.tolerance} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Genome-wide summary: concatenate all per-chromosome comparison rows
+# ---------------------------------------------------------------------------
+
+
+rule signal_cache_summary:
+    input:
+        signal_cache_targets("compare/signal_cache_vs_baseline.tsv"),
+    output:
+        str(SIGCACHE_ROOT / "summary.tsv"),
+    run:
+        import csv
+
+        rows = []
+        fieldnames = None
+        for path in input:
+            with open(path) as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                if fieldnames is None:
+                    fieldnames = reader.fieldnames
+                rows.extend(reader)
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)

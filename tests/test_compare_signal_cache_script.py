@@ -1,0 +1,278 @@
+"""Synthetic-fixture tests for the compare_signal_cache.py example script.
+
+Mirrors tests/test_covariance_io.py's dynamic-load pattern for
+compare_partition_overlap_duplicates.py: this diagnostic script is meant to
+run against a real Snakemake-produced dual-mode `ldetect2 run` (baseline vs
+--signal-cache auto), which isn't available in a fresh checkout, so it is
+unit-tested here against hand-built fixtures shaped like real output instead.
+"""
+
+from __future__ import annotations
+
+import csv
+import gzip
+import json
+import sys
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+
+from ldetect2.io.bed import write_bed
+
+_SCRIPT_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "ldetect_original"
+    / "scripts"
+)
+
+_BENCHMARK_FIELDS = [
+    "s",
+    "h:m:s",
+    "max_rss",
+    "max_vms",
+    "max_uss",
+    "max_pss",
+    "io_in",
+    "io_out",
+    "mean_load",
+    "cpu_time",
+]
+
+
+def _load_compare_signal_cache_module() -> ModuleType:
+    """Dynamically load the example diagnostic script (not an importable package)."""
+    import importlib.util
+
+    script_path = _SCRIPT_DIR / "compare_signal_cache.py"
+    # The script does `from compare_blocks import compare_chrom`, which only
+    # resolves when the scripts/ directory is on sys.path (true when run as
+    # `python scripts/compare_signal_cache.py`, not automatic for exec_module).
+    if str(_SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(_SCRIPT_DIR))
+    spec = importlib.util.spec_from_file_location("compare_signal_cache", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_vector(path: Path, rows: list[tuple[int, float]]) -> None:
+    with gzip.open(path, "wt") as f:
+        writer = csv.writer(f, delimiter="\t")
+        for locus, value in rows:
+            writer.writerow([locus, value])
+
+
+def _write_breakpoints(path: Path, subset: str, loci: list[int]) -> None:
+    path.write_text(json.dumps({subset: {"loci": loci}}))
+
+
+def _write_benchmark(path: Path, seconds: float, max_rss: float) -> None:
+    with path.open("w", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(_BENCHMARK_FIELDS)
+        writer.writerow(
+            [
+                seconds,
+                "0:00:00",
+                max_rss,
+                max_rss * 2,
+                max_rss,
+                max_rss,
+                0,
+                0,
+                100,
+                seconds,
+            ]
+        )
+
+
+def _run_compare(module: ModuleType, argv: list[str]) -> None:
+    old_argv = sys.argv
+    sys.argv = ["compare_signal_cache.py", *argv]
+    try:
+        module.main()
+    finally:
+        sys.argv = old_argv
+
+
+def _read_tsv_row(path: Path) -> dict[str, str]:
+    with path.open() as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        return next(reader)
+
+
+def test_compare_signal_cache_reports_exact_match(tmp_path: Path) -> None:
+    module = _load_compare_signal_cache_module()
+    rows = [(100, 1.0), (200, 2.5), (300, 0.0)]
+    loci = [200, 300]
+
+    baseline_vector = tmp_path / "baseline-vector.txt.gz"
+    signal_vector = tmp_path / "signal-vector.txt.gz"
+    _write_vector(baseline_vector, rows)
+    _write_vector(signal_vector, rows)
+
+    baseline_bpoints = tmp_path / "baseline-bpoints.json"
+    signal_bpoints = tmp_path / "signal-bpoints.json"
+    _write_breakpoints(baseline_bpoints, "fourier_ls", loci)
+    _write_breakpoints(signal_bpoints, "fourier_ls", loci)
+
+    baseline_bed = tmp_path / "baseline.bed"
+    signal_bed = tmp_path / "signal.bed"
+    write_bed(name="22", loci=loci, snp_first=100, snp_last=300, output=baseline_bed)
+    write_bed(name="22", loci=loci, snp_first=100, snp_last=300, output=signal_bed)
+
+    baseline_bench = tmp_path / "baseline.benchmark.tsv"
+    signal_bench = tmp_path / "signal.benchmark.tsv"
+    _write_benchmark(baseline_bench, seconds=100.0, max_rss=500.0)
+    _write_benchmark(signal_bench, seconds=25.0, max_rss=100.0)
+
+    output = tmp_path / "compare.tsv"
+    _run_compare(
+        module,
+        [
+            "--population",
+            "EUR",
+            "--chromosome",
+            "22",
+            "--baseline-vector",
+            str(baseline_vector),
+            "--signal-cache-vector",
+            str(signal_vector),
+            "--baseline-breakpoints",
+            str(baseline_bpoints),
+            "--signal-cache-breakpoints",
+            str(signal_bpoints),
+            "--baseline-bed",
+            str(baseline_bed),
+            "--signal-cache-bed",
+            str(signal_bed),
+            "--baseline-benchmark",
+            str(baseline_bench),
+            "--signal-cache-benchmark",
+            str(signal_bench),
+            "--tolerance",
+            "0",
+            "--output",
+            str(output),
+        ],
+    )
+
+    row = _read_tsv_row(output)
+    assert row["vector_rows_equal"] == "True"
+    assert row["vector_sha256_equal"] == "True"
+    assert float(row["vector_max_abs_diff"]) == 0.0
+    assert int(row["vector_exact_matches"]) == len(rows)
+    assert row["loci_exact_match"] == "True"
+    assert float(row["bed_recall"]) == 1.0
+    assert float(row["bed_precision"]) == 1.0
+    assert float(row["bed_jaccard"]) == 1.0
+    assert float(row["speedup"]) == pytest.approx(4.0)
+    assert float(row["max_rss_ratio"]) == pytest.approx(5.0)
+
+
+def test_compare_signal_cache_reports_numeric_divergence(tmp_path: Path) -> None:
+    module = _load_compare_signal_cache_module()
+    loci = [200]
+
+    baseline_vector = tmp_path / "baseline-vector.txt.gz"
+    signal_vector = tmp_path / "signal-vector.txt.gz"
+    _write_vector(baseline_vector, [(100, 1.0), (200, 2.5)])
+    _write_vector(signal_vector, [(100, 1.0), (200, 2.500001)])
+
+    baseline_bpoints = tmp_path / "baseline-bpoints.json"
+    signal_bpoints = tmp_path / "signal-bpoints.json"
+    _write_breakpoints(baseline_bpoints, "fourier_ls", loci)
+    _write_breakpoints(signal_bpoints, "fourier_ls", loci)
+
+    baseline_bed = tmp_path / "baseline.bed"
+    signal_bed = tmp_path / "signal.bed"
+    write_bed(name="22", loci=loci, snp_first=100, snp_last=300, output=baseline_bed)
+    write_bed(name="22", loci=loci, snp_first=100, snp_last=300, output=signal_bed)
+
+    output = tmp_path / "compare.tsv"
+    _run_compare(
+        module,
+        [
+            "--population",
+            "EUR",
+            "--chromosome",
+            "22",
+            "--baseline-vector",
+            str(baseline_vector),
+            "--signal-cache-vector",
+            str(signal_vector),
+            "--baseline-breakpoints",
+            str(baseline_bpoints),
+            "--signal-cache-breakpoints",
+            str(signal_bpoints),
+            "--baseline-bed",
+            str(baseline_bed),
+            "--signal-cache-bed",
+            str(signal_bed),
+            "--tolerance",
+            "0",
+            "--output",
+            str(output),
+        ],
+    )
+
+    row = _read_tsv_row(output)
+    assert row["vector_sha256_equal"] == "False"
+    assert float(row["vector_max_abs_diff"]) == pytest.approx(0.000001, abs=1e-9)
+    assert int(row["vector_exact_matches"]) == 1
+    assert row["speedup"] == ""
+    assert row["max_rss_ratio"] == ""
+
+
+def test_compare_signal_cache_flags_loci_mismatch(tmp_path: Path) -> None:
+    module = _load_compare_signal_cache_module()
+
+    baseline_vector = tmp_path / "baseline-vector.txt.gz"
+    signal_vector = tmp_path / "signal-vector.txt.gz"
+    _write_vector(baseline_vector, [(100, 1.0)])
+    _write_vector(signal_vector, [(100, 1.0)])
+
+    baseline_bpoints = tmp_path / "baseline-bpoints.json"
+    signal_bpoints = tmp_path / "signal-bpoints.json"
+    _write_breakpoints(baseline_bpoints, "fourier_ls", [200])
+    _write_breakpoints(signal_bpoints, "fourier_ls", [201])
+
+    baseline_bed = tmp_path / "baseline.bed"
+    signal_bed = tmp_path / "signal.bed"
+    write_bed(name="22", loci=[200], snp_first=100, snp_last=300, output=baseline_bed)
+    write_bed(name="22", loci=[201], snp_first=100, snp_last=300, output=signal_bed)
+
+    output = tmp_path / "compare.tsv"
+    _run_compare(
+        module,
+        [
+            "--population",
+            "EUR",
+            "--chromosome",
+            "22",
+            "--baseline-vector",
+            str(baseline_vector),
+            "--signal-cache-vector",
+            str(signal_vector),
+            "--baseline-breakpoints",
+            str(baseline_bpoints),
+            "--signal-cache-breakpoints",
+            str(signal_bpoints),
+            "--baseline-bed",
+            str(baseline_bed),
+            "--signal-cache-bed",
+            str(signal_bed),
+            "--tolerance",
+            "0",
+            "--output",
+            str(output),
+        ],
+    )
+
+    row = _read_tsv_row(output)
+    assert row["loci_exact_match"] == "False"
+    # snp_first/snp_last endpoints are shared, so only the single moved
+    # boundary (200 vs 201) fails to match at tolerance=0.
+    assert float(row["bed_recall"]) == pytest.approx(2 / 3, abs=1e-4)
