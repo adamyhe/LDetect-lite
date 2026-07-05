@@ -47,6 +47,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         metavar="FLOAT",
         help="LD cutoff; pairs below this are not written (default: 1e-7).",
     )
+    p.add_argument(
+        "--signal-output",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Optional path to also write a per-partition signal sidecar, "
+            "letting `matrix-to-vector --prefer-signal-cache` skip rereading "
+            "and renormalizing this partition's covariance rows."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -60,5 +71,6 @@ def _run(args: argparse.Namespace) -> int:
         output_path=args.output,
         ne=args.ne,
         cutoff=args.cutoff,
+        signal_output_path=args.signal_output,
     )
     return 0

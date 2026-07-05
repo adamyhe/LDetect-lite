@@ -63,6 +63,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "(default: 1)."
         ),
     )
+    p.add_argument(
+        "--prefer-signal-cache",
+        action="store_true",
+        help=(
+            "Assemble the vector purely from precomputed signal sidecars "
+            "(written by `calc-covariance --signal-output`), skipping the "
+            "pair-level covariance read-and-renormalize pass. Every "
+            "partition must have a sidecar; incompatible with "
+            "--generate-heatmap."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -80,9 +91,16 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.mode == "diag":
         if args.generate_heatmap:
+            if args.prefer_signal_cache:
+                raise ValueError(
+                    "--prefer-signal-cache cannot be combined with "
+                    "--generate-heatmap, which requires the full matrix"
+                )
             # Full matrix needed for heatmap — use non-lean path
             analysis.calc_diag()
             analysis.write_output_to_file(args.output)
+        elif args.prefer_signal_cache:
+            analysis.calc_diag_signal(args.output)
         else:
             analysis.calc_diag_lean(args.output, matrix_workers=args.matrix_workers)
     else:

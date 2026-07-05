@@ -9,6 +9,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from ldetect2.io.covariance_hdf5 import validate_covariance_hdf5
+from ldetect2.io.partitions import CovarianceStore
+from ldetect2.io.signal_hdf5 import validate_signal_hdf5
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
 
@@ -73,6 +75,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "Covariance partition cache schema for this run. 'compact' writes "
             "only i_pos, j_pos, and shrink_ld; 'full' writes the archival "
             "debug schema (default: compact)."
+        ),
+    )
+    p.add_argument(
+        "--signal-cache",
+        choices=("off", "auto"),
+        default="off",
+        help=(
+            "Signal-vector sidecar mode. 'off' keeps the current behavior: "
+            "Step 3 reads and renormalizes pair-level covariance rows. "
+            "'auto' writes a per-partition signal sidecar alongside each "
+            "covariance partition in Step 2 and uses it in Step 3 instead, "
+            "skipping that read-and-renormalize pass entirely (default: off)."
         ),
     )
     p.add_argument(
@@ -162,6 +176,7 @@ def _calc_partition(
     ne: float,
     cutoff: float,
     compact_output: bool,
+    signal_output_path: Path | None,
 ) -> None:
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
@@ -194,9 +209,33 @@ def _calc_partition(
             ne=ne,
             cutoff=cutoff,
             compact_output=compact_output,
+            signal_output_path=signal_output_path,
         )
     tabix_proc.wait()
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
+
+
+def _regenerate_signal_sidecar(
+    store: CovarianceStore, chrom: str, start: int, end: int
+) -> None:
+    """Rebuild a signal sidecar from an already-valid covariance partition.
+
+    Used for restart: the covariance HDF5 may already be valid from a prior
+    run while only its sidecar is missing or stale, in which case there is no
+    need to rerun tabix/calc_covariance — the sidecar is cheap to recompute
+    directly from the existing partition.
+    """
+    from ldetect2._util.vector_array import compute_partition_signal
+    from ldetect2.io.covariance_hdf5 import open_covariance_reader
+    from ldetect2.io.signal_hdf5 import write_signal_partition_hdf5
+
+    with open_covariance_reader(
+        store.partition_path(chrom, start, end), start, end
+    ) as reader:
+        loci, sum_r2 = compute_partition_signal(reader, start, end)
+    write_signal_partition_hdf5(
+        store.signal_path(chrom, start, end), loci=loci, sum_r2=sum_r2
+    )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -206,7 +245,7 @@ def _run(args: argparse.Namespace) -> int:
     from ldetect2._util.logging import log_msg
     from ldetect2._util.memory import log_memory_checkpoint
     from ldetect2.io.bed import write_bed
-    from ldetect2.io.partitions import CovarianceStore, read_partitions
+    from ldetect2.io.partitions import read_partitions
     from ldetect2.matrix_analysis import MatrixAnalysis
     from ldetect2.pipeline import find_breakpoints
     from ldetect2.shrinkage import partition_chromosome
@@ -244,14 +283,17 @@ def _run(args: argparse.Namespace) -> int:
     # Step 2: Calculate covariance for each partition                     #
     # ------------------------------------------------------------------ #
     compact_output = args.covariance_cache == "compact"
+    signal_cache_enabled = args.signal_cache == "auto"
     log_msg(
         "Step 2: Calculating covariance matrices "
-        f"(workers={args.workers}, cache={args.covariance_cache})"
+        f"(workers={args.workers}, cache={args.covariance_cache}, "
+        f"signal_cache={args.signal_cache})"
     )
     log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
 
     pending = []
+    pending_signal_only = []
     invalid = 0
     for start, end in partitions:
         partition_path = store.partition_path(chrom, start, end)
@@ -264,7 +306,12 @@ def _run(args: argparse.Namespace) -> int:
             invalid += 1
             partition_path.unlink()
             pending.append((start, end))
-    skipped = len(partitions) - len(pending)
+            continue
+        if signal_cache_enabled and not validate_signal_hdf5(
+            store.signal_path(chrom, start, end)
+        ):
+            pending_signal_only.append((start, end))
+    skipped = len(partitions) - len(pending) - len(pending_signal_only)
     if skipped:
         log_msg(f"  Skipping {skipped} already-completed partition(s)")
     if invalid:
@@ -284,6 +331,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.ne,
                 args.cov_cutoff,
                 compact_output,
+                store.signal_path(chrom, start, end) if signal_cache_enabled else None,
             ): (start, end)
             for start, end in pending
         }
@@ -295,6 +343,14 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             log_msg(f"  Partition {start}-{end} done")
+
+    if pending_signal_only:
+        log_msg(
+            f"  Rebuilding {len(pending_signal_only)} missing signal "
+            "sidecar(s) from existing covariance partitions"
+        )
+        for start, end in pending_signal_only:
+            _regenerate_signal_sidecar(store, chrom, start, end)
     log_memory_checkpoint("step2_end")
 
     snp_first = partitions[0][0]
@@ -304,10 +360,16 @@ def _run(args: argparse.Namespace) -> int:
     # Step 3: Matrix → vector                                             #
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
-    log_msg("Step 3: Converting matrix to vector")
+    log_msg(
+        "Step 3: Converting matrix to vector "
+        f"(signal_cache={args.signal_cache})"
+    )
     log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
-    analysis.calc_diag_lean(vector_path, matrix_workers=args.matrix_workers)
+    if signal_cache_enabled:
+        analysis.calc_diag_signal(vector_path)
+    else:
+        analysis.calc_diag_lean(vector_path, matrix_workers=args.matrix_workers)
     log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #
