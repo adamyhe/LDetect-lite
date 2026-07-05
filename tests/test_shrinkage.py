@@ -372,6 +372,44 @@ def test_calc_covariance_compact_chunked_writer_matches_full_rows(
         )
 
 
+def test_calc_covariance_lzf_override_matches_zstd_default(tmp_path: Path) -> None:
+    """compression="lzf" must thread through to identical values as the
+    zstd default -- compression is lossless, so only the codec differs."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    zstd_path = tmp_path / "zstd.h5"
+    lzf_path = tmp_path / "lzf.h5"
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=zstd_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=lzf_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compression="lzf",
+    )
+
+    with open_covariance_reader(zstd_path, 100, 300) as reader:
+        zstd_rows = reader.read_all()
+    with open_covariance_reader(lzf_path, 100, 300) as reader:
+        lzf_rows = reader.read_all()
+
+    np.testing.assert_array_equal(zstd_rows.lo, lzf_rows.lo)
+    np.testing.assert_array_equal(zstd_rows.hi, lzf_rows.hi)
+    np.testing.assert_allclose(zstd_rows.shrink_ld, lzf_rows.shrink_ld)
+
+
 def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
     hap_mat = np.array(
         [

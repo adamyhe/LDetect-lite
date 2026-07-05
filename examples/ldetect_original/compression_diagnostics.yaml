@@ -1,0 +1,30 @@
+# Chromosomes to diagnose per population. Default: the FULL 22-chromosome,
+# 3-population 1000G dataset (unlike signal_cache_diagnostics.yaml's chr22
+# smoke test) -- this diagnostic's real purpose is a comprehensive
+# storage-size comparison, which is only meaningful at full-genome scale.
+# Intended for remote/cluster execution given the compute cost; override with
+# e.g. `--config chromosomes_by_population='{EUR: [11, 22]}'` for a smoke test.
+chromosomes_by_population:
+  EUR: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  AFR: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  ASN: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+subset: fourier_ls
+
+# Boundary-match tolerance (bp) for the baseline-vs-zstd BED comparison.
+# Compression is lossless, so this compares two of our own runs against each
+# other on identical input data -- 0 checks for exact breakpoint agreement.
+tolerance: 0
+
+# Keep internal ldetect2 parallelism conservative unless actively profiling
+# on a high-memory machine; this only affects Step 2/Step 4 parallelism
+# inside each mode's `ldetect2 run` invocation, not which modes run
+# concurrently (see ldetect2_job_threads below).
+covariance_cache: compact
+cov_workers: 4
+local_search_workers: 1
+
+# Snakemake scheduling guard: this rule claims many threads so `--cores 8`
+# still runs only one heavy chromosome x mode job at a time. ldetect2 itself
+# still receives cov_workers/local_search_workers above.
+ldetect2_job_threads: 4
