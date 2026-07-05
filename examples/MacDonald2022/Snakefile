@@ -84,6 +84,21 @@ def block_set_remove_centromeres(block_set):
     )
 
 
+def block_set_maf_filter(block_set):
+    """'nref' (default, matches MacDonald's literal bcftools command) or
+    'minor' (true minor-allele-frequency filtering, matching MacDonald's
+    README prose rather than their script -- see
+    notes/macdonald2022-pyrho-handoff.md for why this is worth testing).
+    """
+    return config["block_sets"][block_set].get("maf_filter", "nref")
+
+
+def block_set_filtered_vcf(wc):
+    if block_set_maf_filter(wc.block_set) == "minor":
+        return str(FILT_DIR / "minor" / f"chr{wc.chrom}.vcf.gz")
+    return str(FILT_DIR / f"chr{wc.chrom}.vcf.gz")
+
+
 def block_set_genetic_map(wc):
     block_config = config["block_sets"][wc.block_set]
     if block_config["map_source"] == "decode":
@@ -223,6 +238,31 @@ rule filter_vcf:
         """
 
 
+# Experimental variant: MacDonald's README says they filter by "MAF>0.01",
+# but their actual subsetVcf.sh runs plain `--min-af 0.01` with no `:minor`
+# suffix, which bcftools defaults to non-reference (nref, effectively ALT)
+# allele frequency, not minor allele frequency. This rule tests the prose's
+# literal meaning instead. Kept as a fully separate output path (not a
+# parameterized version of filter_vcf above) so it never invalidates or
+# forces recomputation of the already-validated default-filtered pipeline --
+# opt-in only via a block_set with `maf_filter: minor` in config.yaml, never
+# part of `active_block_sets`. `:minor` and `:nonmajor` are numerically
+# identical for this biallelic-SNV 1000G release, so only one is needed.
+rule filter_vcf_minor:
+    input:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    output:
+        vcf=str(FILT_DIR / "minor" / "chr{chrom}.vcf.gz"),
+        tbi=str(FILT_DIR / "minor" / "chr{chrom}.vcf.gz.tbi"),
+    shell:
+        """
+        mkdir -p {FILT_DIR}/minor
+        bcftools view --min-af 0.01:minor --types snps -Oz -o {output.vcf} {input.vcf}
+        bcftools index --tbi {output.vcf}
+        """
+
+
 # ---------------------------------------------------------------------------
 # Step 2: Individual list
 # ---------------------------------------------------------------------------
@@ -319,7 +359,7 @@ rule interpolate_map:
 rule run_ldetect2:
     input:
         genetic_map=block_set_genetic_map,
-        vcf=str(FILT_DIR / "chr{chrom}.vcf.gz"),
+        vcf=block_set_filtered_vcf,
         individuals=lambda wc: str(
             RES_DIR / f"{block_set_population(wc.block_set)}_inds.txt"
         ),
@@ -367,7 +407,7 @@ rule run_ldetect2:
 rule postprocess:
     input:
         bed=rules.run_ldetect2.output.bed,
-        vcf=str(FILT_DIR / "chr{chrom}.vcf.gz"),
+        vcf=block_set_filtered_vcf,
         centromeres=rules.download_centromeres.output[0],
     output:
         str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.final.bed"),

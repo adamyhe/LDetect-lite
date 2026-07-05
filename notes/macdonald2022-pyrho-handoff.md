@@ -544,6 +544,67 @@ razor-thin-margin explanation stands as the most likely one, now with the
 denominator-conditioning alternative explicitly ruled out rather than just
 untested.
 
+## MAF-filter type experiment: `nref` vs. true minor-allele-frequency (2026-07-04, in progress)
+
+Following on from "what could cause the r² drift" (the razor-thin-margin
+explanation above still leaves open *why* our covariance values differ
+slightly from legacy's): MacDonald's README says "we first subsetted the
+VCF files... to only include SNPs with a **MAF**>0.01" — but their actual
+`subsetVcf.sh` runs plain `bcftools view --min-af 0.01 --types snps`, no
+`:minor` suffix. Confirmed via bcftools' documented semantics: `--min-af`
+without a suffix defaults to **non-reference (nref)** allele frequency, not
+minor allele frequency. `nref` and `minor` only disagree at sites where the
+ALT allele is the *majority* allele (AF > 0.5) — such sites pass the
+current filter almost by construction even when the true minor (REF)
+allele frequency is < 0.01, i.e. near-fixed/near-monomorphic sites get
+kept under `nref` that would be dropped under true MAF filtering. (`:minor`
+and `:nonmajor` are numerically identical for this biallelic-SNV 1000G
+release — no need to test both.)
+
+Quantified directly from the already-cached raw chr9 VCF (no bcftools
+needed — parsed the VCF's own pre-computed `AF`/`VT` INFO fields): **0.28%
+of currently-kept SNPs genome-wide** (1,889 of ~669k on chr9 alone) would
+flip from kept to dropped under true `:minor` filtering. Restricting to the
+EAS chr4 82–92 Mb window already deeply characterized above: **177 flip
+sites** (0.32% locally), including one just **4,488 bp** from reference's
+actual boundary at 84,513,834, and two more within ~17–42 kb of reference's
+other boundary (88,318,340) — fetched via `tabix -h <url> chr4:82000000-92000000`
+(range request, no full 872 MB chromosome download needed). Suggestive,
+not conclusive on its own (177 sites across 10 Mb averages ~56 kb spacing,
+so a couple of coincidental near-hits isn't shocking) — the real test is
+whether refiltering actually moves the computed breakpoint toward
+reference.
+
+**Wired up, not yet run**: added `filter_vcf_minor` (`Snakefile`) as a
+fully separate, additive rule — output path `data/filtered/minor/chr{chrom}.vcf.gz`,
+deliberately *not* replacing or reparameterizing the existing `filter_vcf`
+rule's output path, so the already-validated default pipeline's cached
+results (all four active block sets) are never invalidated or
+recomputed by this change (verified via `snakemake -n` dry-run: identical
+job list before/after the change, aside from the new opt-in target).
+Added `pyrho_EAS_minormaf` block set (`config.yaml`) — identical to
+`pyrho_EAS` except `maf_filter: minor` — not in `active_block_sets`, so it
+never runs unless explicitly requested:
+
+```bash
+cd examples/MacDonald2022
+uv run snakemake --cores N \
+  results/pyrho_EAS_minormaf_LD_blocks.bed \
+  results/compare/pyrho_EAS_minormaf_block_comparison.tsv \
+  results/compare/boundaries/pyrho_EAS_minormaf_boundary_offsets.tsv \
+  results/compare/raw/pyrho_EAS_minormaf_block_comparison.tsv \
+  results/compare/raw/pyrho_EAS_minormaf_boundary_offsets.tsv
+```
+
+This reruns the full pipeline genome-wide for EAS only (chosen since chr4
+is already deeply characterized) — a real remote covariance computation,
+not a cheap diagnostic. Compare the resulting `pyrho_EAS_minormaf`
+boundary-offset stats against the existing `pyrho_EAS` ones once done: does
+the overall non-exact rate drop, and does EAS chr4's boundary move toward
+`84,513,834`/`88,318,340`? To test a different population, copy the
+`pyrho_EAS_minormaf` block-set stanza and change `population`/`map_pop` to
+match (e.g. `AFR`/`GWD`).
+
 ## Working Hypotheses For pyrho
 
 The pyrho results are already close enough that a wholesale algorithm problem is

@@ -55,11 +55,31 @@ block_sets:
     map_pop: GIH
     reference_bed: pyrho_SAS_LD_blocks.bed
     remove_centromere_blocks: true
+  # Experimental: same as pyrho_EAS, but the VCF is filtered with true
+  # minor-allele-frequency (--min-af 0.01:minor) instead of bcftools'
+  # nref-frequency default -- testing whether MacDonald's README prose
+  # ("MAF>0.01") was the intended filter, even though their actual script
+  # doesn't specify :minor. See notes/macdonald2022-pyrho-handoff.md.
+  # Deliberately not in active_block_sets -- request explicitly, e.g.:
+  #   uv run snakemake --cores N \
+  #     results/pyrho_EAS_minormaf_LD_blocks.bed \
+  #     results/compare/pyrho_EAS_minormaf_block_comparison.tsv \
+  #     results/compare/boundaries/pyrho_EAS_minormaf_boundary_offsets.tsv \
+  #     results/compare/raw/pyrho_EAS_minormaf_block_comparison.tsv \
+  #     results/compare/raw/pyrho_EAS_minormaf_boundary_offsets.tsv
+  pyrho_EAS_minormaf:
+    population: EAS
+    map_source: pyrho
+    map_pop: CHB
+    reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
+    maf_filter: minor
 
 # Default targets for rule all. SAS is kept as an available block set above,
 # but is excluded from the default reproduction target because MacDonald et al.
 # do not document an SAS-specific effective population size and the current
-# CEU fallback gives poor concordance.
+# CEU fallback gives poor concordance. pyrho_EAS_minormaf is an opt-in
+# experimental variant (see above) and is also deliberately excluded.
 active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
 
 # Directories (relative to the analysis/ directory)
