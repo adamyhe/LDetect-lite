@@ -544,7 +544,7 @@ razor-thin-margin explanation stands as the most likely one, now with the
 denominator-conditioning alternative explicitly ruled out rather than just
 untested.
 
-## MAF-filter type experiment: `nref` vs. true minor-allele-frequency (2026-07-04, in progress)
+## MAF-filter type experiment: `nref` vs. true minor-allele-frequency (2026-07-04, resolved — refuted)
 
 Following on from "what could cause the r² drift" (the razor-thin-margin
 explanation above still leaves open *why* our covariance values differ
@@ -604,6 +604,43 @@ the overall non-exact rate drop, and does EAS chr4's boundary move toward
 `84,513,834`/`88,318,340`? To test a different population, copy the
 `pyrho_EAS_minormaf` block-set stanza and change `population`/`map_pop` to
 match (e.g. `AFR`/`GWD`).
+
+**Run genome-wide (EAS), result: refuted.** True `:minor` MAF filtering
+makes concordance with the reference *worse*, not better, across almost
+every metric and almost every chromosome:
+
+| metric | baseline (`nref`) | `:minor` |
+|---|---|---|
+| mean recall (22 chr) | 0.822 | 0.774 |
+| mean precision | 0.818 | 0.770 |
+| mean Jaccard | 0.722 | 0.649 |
+| final-BED exact boundary rate (genome-wide) | 79.0% (916/1159) | 70.9% (821/1158) |
+| raw-BED exact boundary rate | 78.6% (917/1167) | 70.5% (822/1166) |
+
+Per-chromosome recall dropped in 15/22 chromosomes (worst: chr5 −0.156,
+chr18 −0.152, chr12 −0.145), was unchanged in 3 (chr9, chr20, chr21), and
+improved in only 4 (chr17 +0.243, chr14 +0.081, chr22 +0.059, chr10 +0.017)
+— no consistent pattern suggesting `:minor` is the "hidden correct" filter
+for a subset of populations/chromosomes; it reads as net noise, tilted
+negative.
+
+Even on the specific EAS chr4 locus that motivated this experiment (the
+177-flip-site window with the 4,488 bp near-hit), the `:minor` filter
+*lost* an exact match relative to baseline (37/84 → 35/84 exact chr4
+boundaries) despite gaining two new exact matches elsewhere on the
+chromosome (106,580,372 and 166,932,715 became exact) — a wash at best, not
+the hoped-for convergence toward reference's 84,513,834/88,318,340
+boundaries (both remained non-exact, at the same offsets, under both
+filters).
+
+**Conclusion: MacDonald's actual script (`bcftools --min-af 0.01`, `nref`
+default) is empirically the better match to their published reference
+output than their README's literal "MAF>0.01" prose would imply — the
+prose is imprecise, not the script.** This closes the MAF-filter-type
+hypothesis as a driver of the pyrho divergence; no further action planned
+on this thread. The experimental `filter_vcf_minor` rule and
+`pyrho_EAS_minormaf` block set are left in place (harmless, opt-in,
+additive) as a documented negative result rather than reverted.
 
 ## Working Hypotheses For pyrho
 
