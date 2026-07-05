@@ -65,6 +65,35 @@ out (see below) short of the original authors' own internal processing logs.
   position/LD diagnostics (see below); statistically indistinguishable from
   `v2`, so not worth a full-pipeline rerun. This closes out VCF
   release/provenance as a category.
+- **Legacy `.gz` text-serialization precision (2026-07-05).** The original
+  `P00_01_calc_covariance.py`/`flat_file.py` write covariance values via bare
+  `str()` (no `%.Nf`/`round()`/`np.savetxt(fmt=...)` anywhere in
+  `_reference/ldetect_original`). A commented-out line
+  (`# print >> outfile, ...`) shows this was ported from Python 2, where
+  `str(float)` truncates to ~12 significant digits (not round-trip-safe,
+  unlike `repr()`); Python 3 unifies `str()`/`repr()` to the lossless
+  shortest-round-trip form. Ruled out as the source of the EUR chr8-12/AFR
+  chr22 divergence for two reasons: (1) **scale mismatch** — a 12-sig-fig
+  truncation is a ~1e-12 relative perturbation, while the observed divergence
+  is 100-264 kb median offsets and 0.29-0.46 recall (vs. 1.0 on exact
+  chromosomes) — far too large an effect for this magnitude of numerical
+  noise to produce; and (2) **already empirically tested** — the 2026-06-21
+  legacy-downstream-diagnostic rerun (see main audit log) exercised the real
+  `.gz` serialize/deserialize round-trip via the actual copied legacy scripts
+  (`legacy_hdf5_to_gz.py`, `run_legacy_ldetect.py`), and that round-trip runs
+  under Python 3 in this repo (confirmed: `_reference/ldetect_original`'s
+  `print(x, file=outfile)` syntax and `csv.writer` both only work under
+  Python 3, and both are lossless there) — yet the result still didn't
+  reproduce the reference; it landed close to `ldetect2`'s own in-memory
+  output instead (0.82-0.96 concordance), same as `ldetect2`-vs-reference.
+  If serialization precision were the mechanism, exercising the real
+  round-trip should have recovered the reference; instead both
+  reimplementations agree with each other and disagree with the reference,
+  reinforcing the existing upstream-provenance conclusion rather than an
+  output-precision one. (Caveat: the *original* 2014-era Pickrell run may
+  genuinely have used Python 2, so the published reference itself could
+  reflect that lossy computation — but the effect-size mismatch in (1) means
+  this still isn't a plausible primary driver even granting that.)
 
 ## Resolved: AFR chr11 was never a real divergence
 
