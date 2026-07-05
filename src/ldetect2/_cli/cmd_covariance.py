@@ -58,6 +58,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "and renormalizing this partition's covariance rows."
         ),
     )
+    p.add_argument(
+        "--covariance-compression",
+        choices=("lzf", "zstd"),
+        default="zstd",
+        help=(
+            "HDF5 compression codec for the covariance partition. 'zstd' is "
+            "smaller and faster to read/write than 'lzf' at equal precision "
+            "(default: zstd)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -72,5 +82,6 @@ def _run(args: argparse.Namespace) -> int:
         ne=args.ne,
         cutoff=args.cutoff,
         signal_output_path=args.signal_output,
+        compression=args.covariance_compression,
     )
     return 0

@@ -19,7 +19,10 @@ from ldetect2.io.covariance import (
     read_partition_into_matrix_lean,
 )
 from ldetect2.io.covariance_hdf5 import (
+    CovarianceRowChunk,
     open_covariance_reader,
+    write_compact_covariance_partition_hdf5_append,
+    write_compact_covariance_partition_hdf5_chunks,
     write_covariance_partition_hdf5,
 )
 from ldetect2.io.partitions import CovarianceStore
@@ -757,3 +760,126 @@ def test_delete_with_deleted_list(tmp_path):
     delete_loci_smaller_than(250, matrix, locus_list, locus_list_deleted)
     assert locus_list_deleted == [100, 200]
     assert locus_list == [300]
+
+
+# ---------------------------------------------------------------------------
+# zstd compression codec
+# ---------------------------------------------------------------------------
+
+
+def test_zstd_compression_round_trips_full_schema(tmp_path: Path) -> None:
+    i_pos = np.array([100, 100, 200, 200, 300], dtype=np.int32)
+    j_pos = np.array([100, 200, 200, 300, 300], dtype=np.int32)
+    shrink_ld = np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64)
+    path = tmp_path / "zstd.h5"
+
+    write_covariance_partition_hdf5(
+        path,
+        i_pos=i_pos,
+        j_pos=j_pos,
+        shrink_ld=shrink_ld,
+        i_id=np.array(["snpA", "snpA", "snpB", "snpB", "snpC"]),
+        j_id=np.array(["snpA", "snpB", "snpB", "snpC", "snpC"]),
+        compression="zstd",
+    )
+
+    with open_covariance_reader(path, 100, 300) as reader:
+        chunk = reader.read_all()
+    np.testing.assert_array_equal(np.sort(chunk.lo), [100, 100, 200, 200, 300])
+    np.testing.assert_allclose(np.sort(chunk.shrink_ld), np.sort(shrink_ld))
+
+    import h5py
+
+    with h5py.File(path, "r") as h5:
+        i_id = h5["metadata/i_id"][:]
+        assert {v.decode() for v in i_id} == {"snpA", "snpB", "snpC"}
+
+
+def test_compact_chunks_writer_supports_zstd(tmp_path: Path) -> None:
+    positions = np.array([100, 200, 300], dtype=np.int32)
+    row_counts = np.array([2, 2, 1], dtype=np.int64)
+    chunk = CovarianceRowChunk(
+        lo=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        hi=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64),
+    )
+    path = tmp_path / "compact_chunks_zstd.h5"
+
+    write_compact_covariance_partition_hdf5_chunks(
+        path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([chunk]),
+        compression="zstd",
+    )
+
+    with open_covariance_reader(path, 100, 300) as reader:
+        read_back = reader.read_all()
+    np.testing.assert_array_equal(read_back.lo, chunk.lo)
+    np.testing.assert_array_equal(read_back.hi, chunk.hi)
+    np.testing.assert_allclose(read_back.shrink_ld, chunk.shrink_ld)
+
+
+def test_compact_append_writer_supports_zstd(tmp_path: Path) -> None:
+    positions = np.array([100, 200, 300], dtype=np.int32)
+    chunk = CovarianceRowChunk(
+        lo=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        hi=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64),
+    )
+    path = tmp_path / "compact_append_zstd.h5"
+
+    write_compact_covariance_partition_hdf5_append(
+        path,
+        positions=positions,
+        row_chunks=iter([chunk]),
+        compression="zstd",
+    )
+
+    with open_covariance_reader(path, 100, 300) as reader:
+        read_back = reader.read_all()
+    np.testing.assert_array_equal(read_back.lo, chunk.lo)
+    np.testing.assert_array_equal(read_back.hi, chunk.hi)
+    np.testing.assert_allclose(read_back.shrink_ld, chunk.shrink_ld)
+
+
+def test_zstd_output_smaller_than_lzf_for_same_data(tmp_path: Path) -> None:
+    rng = np.random.default_rng(11)
+    n_positions = 500
+    rows_per_position = 10
+    positions = np.sort(
+        rng.choice(1_000_000, size=n_positions, replace=False)
+    ).astype(np.int32)
+
+    lo_parts = []
+    hi_parts = []
+    for pos in positions:
+        offsets = np.sort(
+            rng.choice(1_000_000, size=rows_per_position, replace=False)
+        ).astype(np.int32)
+        lo_parts.append(np.full(rows_per_position, pos, dtype=np.int32))
+        hi_parts.append(pos + offsets)
+    lo = np.concatenate(lo_parts)
+    hi = np.concatenate(hi_parts)
+    shrink_ld = rng.normal(0, 0.05, size=lo.size)
+    chunk = CovarianceRowChunk(lo=lo, hi=hi, shrink_ld=shrink_ld)
+    row_counts = np.full(n_positions, rows_per_position, dtype=np.int64)
+
+    lzf_path = tmp_path / "lzf.h5"
+    zstd_path = tmp_path / "zstd.h5"
+    write_compact_covariance_partition_hdf5_chunks(
+        lzf_path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([chunk]),
+        compression="lzf",
+    )
+    write_compact_covariance_partition_hdf5_chunks(
+        zstd_path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([chunk]),
+        compression="zstd",
+    )
+
+    assert zstd_path.stat().st_size < lzf_path.stat().st_size

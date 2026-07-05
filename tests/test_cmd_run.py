@@ -102,6 +102,15 @@ def test_signal_cache_accepts_auto() -> None:
     assert _parse_run_args(["--signal-cache", "auto"]).signal_cache == "auto"
 
 
+def test_covariance_compression_defaults_to_zstd() -> None:
+    assert _parse_run_args([]).covariance_compression == "zstd"
+
+
+def test_covariance_compression_accepts_lzf() -> None:
+    args = _parse_run_args(["--covariance-compression", "lzf"])
+    assert args.covariance_compression == "lzf"
+
+
 def test_regenerate_signal_sidecar_matches_direct_computation(tmp_path: Path) -> None:
     root = tmp_path / "cov"
     chrom_dir = root / "chr1"

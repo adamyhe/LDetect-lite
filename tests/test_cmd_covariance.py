@@ -41,6 +41,15 @@ def test_signal_output_accepts_path() -> None:
     assert args.signal_output == Path("out.signal.h5")
 
 
+def test_covariance_compression_defaults_to_zstd() -> None:
+    assert _parse_args([]).covariance_compression == "zstd"
+
+
+def test_covariance_compression_accepts_lzf() -> None:
+    args = _parse_args(["--covariance-compression", "lzf"])
+    assert args.covariance_compression == "lzf"
+
+
 def test_run_writes_signal_sidecar_when_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -523,6 +523,7 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     signal_output_path: Path | None = None,
+    compression: str | None = "zstd",
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -553,6 +554,9 @@ def calc_covariance(
             correlation-sum contributions matrix-to-vector would otherwise
             have to recompute by rereading and renormalizing this partition's
             covariance rows.
+        compression: HDF5 compression codec for the covariance partition
+            (``"zstd"`` or ``"lzf"``). See
+            ``ldetect2.io.covariance_hdf5._dataset_compression_kwargs``.
     """
     from ldetect2._util.logging import log_debug
     from ldetect2._util.memory import log_memory_checkpoint
@@ -713,6 +717,7 @@ def calc_covariance(
                     compact_chunk_rows,
                 ),
                 chunk_rows=compact_chunk_rows,
+                compression=compression,
             )
             dataset_chunk_rows = HDF5_DATASET_CHUNK_ROWS if n_pairs else 0
             log_debug(
@@ -775,6 +780,7 @@ def calc_covariance(
                 compact_chunk_rows,
             ),
             chunk_rows=compact_chunk_rows,
+            compression=compression,
         )
         log_debug(
             "calc_covariance compact_hdf5_written "
@@ -820,6 +826,7 @@ def calc_covariance(
             j_pos=j_pos,
             shrink_ld=ds2_arr,
             assume_canonical_sorted_unique=assume_sorted_unique_rows,
+            compression=compression,
         )
         log_debug(
             "calc_covariance compact_hdf5_written_fallback "
@@ -851,6 +858,7 @@ def calc_covariance(
         i_id=rs_arr[ii],
         j_id=rs_arr[jj],
         assume_canonical_sorted_unique=assume_sorted_unique_rows,
+        compression=compression,
     )
     log_debug(
         "calc_covariance full_hdf5_written "

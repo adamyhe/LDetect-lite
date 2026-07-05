@@ -335,6 +335,64 @@ cores per job that `--cores N` still runs jobs one chromosome-and-mode at a
 time unless raised; `cov_workers`/`local_search_workers` control parallelism
 *inside* each `ldetect2 run` invocation.
 
+## Compression Diagnostic Workflow
+
+`Snakefile.compression_diagnostics` measures the performance, exactness, and
+**covariance cache size** of the `--covariance-compression` codec choice (see
+`notes/covariance-streaming-cache-implementation-note.md`) against this
+pipeline's real 1000G data. For each configured chromosome x population, it
+runs `ldetect2 run` twice on identical filtered input — once with
+`--covariance-compression lzf` (the prior default) and once with
+`--covariance-compression zstd` (the new default) — then compares the two
+runs':
+
+- **vector/breakpoints/BED**: same exactness comparison as the signal-cache
+  diagnostic above. Compression is lossless, so these are expected to match
+  exactly — any divergence here indicates a real bug, not floating-point
+  noise from a different computation order;
+- **covariance directory size**: total bytes of every `.h5` partition under
+  each mode's covariance directory, plus the size ratio and percent
+  reduction — this is the actual point of this diagnostic;
+- **performance**: wall-clock seconds and peak RSS from each mode's
+  Snakemake `benchmark:` record, plus the speedup/reduction ratios.
+
+Unlike the signal-cache diagnostic's chr22 smoke test, this one defaults to
+the **full 22-chromosome, 3-population dataset**, since a comprehensive
+storage-size comparison is only meaningful at full-genome scale — run it on
+a remote server/cluster given the compute cost.
+
+Dry-run the default (full-genome) diagnostic:
+
+```bash
+uv run snakemake -s Snakefile.compression_diagnostics -n
+```
+
+Run it for real:
+
+```bash
+uv run snakemake -s Snakefile.compression_diagnostics --cores 8
+```
+
+Smoke-test a smaller subset instead of the full genome:
+
+```bash
+uv run snakemake -s Snakefile.compression_diagnostics --cores 4 \
+  --config chromosomes_by_population='{EUR: [11, 22]}'
+```
+
+Outputs:
+
+- `results/compression_diagnostics/{population}/{chrom}/{baseline,zstd}/` —
+  each mode's full `ldetect2 run` output directory, including its covariance
+  partitions under `{mode}/{chrom}/`.
+- `results/compression_diagnostics/{population}/{chrom}/logs/{mode}.benchmark.tsv` —
+  Snakemake's wall-clock/peak-memory record for that mode.
+- `results/compression_diagnostics/{population}/{chrom}/compare/compression_vs_baseline.tsv` —
+  one row combining the exactness, size, and performance comparison for that
+  chromosome x population.
+- `results/compression_diagnostics/summary.tsv` — all comparison rows
+  concatenated.
+
 ## Effective Population Size
 
 The covariance shrinkage step uses an effective population size (`Ne`). The
