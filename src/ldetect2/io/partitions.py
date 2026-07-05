@@ -33,6 +33,10 @@ class CovarianceStore:
     def partition_path(self, name: str, start: int, end: int) -> Path:
         return self.root / name / f"{name}.{start}.{end}.h5"
 
+    def signal_path(self, name: str, start: int, end: int) -> Path:
+        """Path to the optional per-partition signal sidecar (see io/signal_hdf5.py)."""
+        return self.root / name / f"{name}.{start}.{end}.signal.h5"
+
 
 def read_partitions(name: str, store: CovarianceStore) -> list[tuple[int, int]]:
     """Return all (start, end) partition tuples for *name*."""

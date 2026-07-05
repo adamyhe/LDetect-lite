@@ -20,6 +20,7 @@ from ldetect2.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect2.io.partitions import CovarianceStore
+from ldetect2.io.signal_hdf5 import read_signal_partition_hdf5
 
 MATRIX_TO_VECTOR_CHUNK_ROWS = 1_000_000
 
@@ -163,6 +164,63 @@ def write_diag_vector_array(
         f"worker_wait_seconds={parent_profile['worker_wait_seconds']:.6f}"
     )
     _log_vector_checkpoint("matrix_to_vector_array_end")
+
+
+def write_diag_vector_signal(
+    *,
+    name: str,
+    signal_store: CovarianceStore,
+    partitions: list[tuple[int, int]],
+    snp_first: int,
+    snp_last: int,
+    out_path: Path,
+) -> None:
+    """Write the diagonal correlation-sum vector from precomputed signal sidecars.
+
+    Unlike :func:`write_diag_vector_array`, this never reads or renormalizes
+    pair-level covariance rows: it only merges the already-normalized
+    per-locus sums written by ``calc_covariance``'s optional signal sidecar
+    (see ``ldetect2.io.signal_hdf5``), using the exact same partition plan
+    and boundary bookkeeping as the direct HDF5 vector path.
+    """
+    out_path.unlink(missing_ok=True)
+    pending_sums: dict[int, float] = {}
+    current_locus = snp_first
+    plans = _plan_diag_vector_partitions(partitions, snp_first, snp_last)
+    parent_profile: dict[str, float | int] = {
+        "merge_seconds": 0.0,
+        "flush_seconds": 0.0,
+        "worker_wait_seconds": 0.0,
+        "partitions": 0,
+    }
+    for plan in plans:
+        result = _compute_diag_vector_partition_signal(
+            name=name,
+            signal_store=signal_store,
+            start=plan.start,
+            end=plan.end,
+            next_start=plan.next_start,
+            snp_first=snp_first,
+            snp_last=snp_last,
+            center_lower_bound=plan.center_lower_bound,
+            center_lower_inclusive=plan.center_lower_inclusive,
+            checkpoint=plan.checkpoint,
+        )
+        current_locus = _merge_diag_vector_partition_result(
+            result=result,
+            snp_first=snp_first,
+            snp_last=snp_last,
+            current_locus=current_locus,
+            pending_sums=pending_sums,
+            out_path=out_path,
+            parent_profile=parent_profile,
+        )
+    log_debug(
+        "matrix_to_vector_signal profile "
+        f"partitions={int(parent_profile['partitions'])} "
+        f"merge_seconds={parent_profile['merge_seconds']:.6f} "
+        f"flush_seconds={parent_profile['flush_seconds']:.6f}"
+    )
 
 
 def _plan_diag_vector_partitions(
@@ -630,6 +688,112 @@ def _compute_diag_vector_partition_hdf5(
         write_cutoff=write_cutoff,
         profile=profile,
     )
+
+
+def _compute_diag_vector_partition_signal(
+    *,
+    name: str,
+    signal_store: CovarianceStore,
+    start: int,
+    end: int,
+    next_start: int | None,
+    snp_first: int,
+    snp_last: int,
+    center_lower_bound: int,
+    center_lower_inclusive: bool,
+    checkpoint: str,
+) -> _DiagVectorPartitionResult:
+    """Process one partition from its precomputed signal sidecar.
+
+    Mirrors the boundary bookkeeping in :func:`_compute_diag_vector_partition_hdf5`
+    exactly, but the per-locus sums come from the sidecar instead of a fresh
+    read-and-renormalize pass over covariance rows.
+    """
+    path = signal_store.signal_path(name, start, end)
+    loci, partition_sums = read_signal_partition_hdf5(path)
+    in_bounds = (loci >= start) & (loci <= end)
+    loci = loci[in_bounds]
+    partition_sums = partition_sums[in_bounds]
+    if loci.size == 0:
+        return _empty_diag_vector_partition_result(checkpoint)
+
+    if next_start is not None:
+        end_locus = int((end + next_start) / 2)
+        write_cutoff = next_start
+    else:
+        in_requested_range = loci[loci <= snp_last]
+        if in_requested_range.size == 0:
+            return _empty_diag_vector_partition_result(checkpoint)
+        end_locus = int(in_requested_range[-1])
+        write_cutoff = end_locus
+
+    center_hi = min(end_locus, snp_last)
+    center_left = int(
+        np.searchsorted(
+            loci,
+            center_lower_bound,
+            side="left" if center_lower_inclusive else "right",
+        )
+    )
+    center_right = int(np.searchsorted(loci, center_hi, side="right"))
+    in_window = np.zeros(loci.size, dtype=bool)
+    if center_left < center_right:
+        in_window[center_left:center_right] = True
+    nonzero = in_window & (partition_sums > 0.0)
+    return _DiagVectorPartitionResult(
+        loci=loci,
+        sum_loci=loci[nonzero],
+        sum_values=partition_sums[nonzero],
+        end_locus=end_locus,
+        write_cutoff=write_cutoff,
+        profile={"checkpoint": checkpoint},
+    )
+
+
+def compute_partition_signal(
+    reader: HDF5CovariancePartitionReader,
+    start: int,
+    end: int,
+    chunk_rows: int = MATRIX_TO_VECTOR_CHUNK_ROWS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute partition-local correlation-sum contributions for one partition.
+
+    Returns ``(loci, sum_r2)`` covering every locus discovered in the
+    partition's compact HDF5 index within ``[start, end]`` (not just loci
+    with a nonzero sum), with no cross-partition ownership trimming applied
+    — that trimming happens later, in
+    :func:`_compute_diag_vector_partition_signal`, using the same partition
+    plan as the direct HDF5 vector path. This is otherwise the same
+    computation as :func:`_compute_diag_vector_partition_hdf5`, just without
+    the ownership window, so it can run once (e.g. right after
+    ``calc_covariance`` writes a partition) instead of once per
+    matrix-to-vector run.
+    """
+    loci = _chunked_owned_loci(reader, start, end)
+    partition_sums = np.zeros(loci.size, dtype=np.float64)
+    if loci.size == 0:
+        return loci, partition_sums
+
+    diag_pos, diag_val = reader.read_diagonal()
+    diag_mask = (diag_pos >= start) & (diag_pos <= end)
+    diag_pos = diag_pos[diag_mask]
+    diag_val = diag_val[diag_mask]
+    if diag_pos.size == 0:
+        return loci, partition_sums
+
+    for chunk in reader.iter_owned_rows(start, end, start, end, chunk_rows):
+        _accumulate_vector_chunk(
+            loci=loci,
+            diag_pos=diag_pos,
+            diag_val=diag_val,
+            row_lo=chunk.lo,
+            row_hi=chunk.hi,
+            row_shrink=chunk.shrink_ld,
+            center_left=0,
+            center_right=loci.size,
+            partition_sums=partition_sums,
+        )
+    return loci, partition_sums
 
 
 def _empty_diag_vector_partition_result(checkpoint: str) -> _DiagVectorPartitionResult:

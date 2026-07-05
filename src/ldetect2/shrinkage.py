@@ -522,6 +522,7 @@ def calc_covariance(
     cutoff: float = 1e-7,
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
+    signal_output_path: Path | None = None,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -547,6 +548,11 @@ def calc_covariance(
             ``ldetect2 run``.
         compact_chunk_rows: Approximate maximum compact HDF5 rows to hold while
             filling one bounded output chunk.
+        signal_output_path: When set, also write a per-partition signal
+            sidecar (see ``ldetect2.io.signal_hdf5``) holding the
+            correlation-sum contributions matrix-to-vector would otherwise
+            have to recompute by rereading and renormalizing this partition's
+            covariance rows.
     """
     from ldetect2._util.logging import log_debug
     from ldetect2._util.memory import log_memory_checkpoint
@@ -662,6 +668,8 @@ def calc_covariance(
         )
 
     if not all_pos:
+        if signal_output_path is not None:
+            _write_empty_signal_sidecar(signal_output_path)
         log_debug(
             "calc_covariance empty_partition "
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
@@ -717,6 +725,10 @@ def calc_covariance(
                 f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
             )
             log_memory_checkpoint("calc_covariance_compact_written", debug=True)
+            if signal_output_path is not None:
+                _write_signal_sidecar(
+                    output_path, signal_output_path, int(pos_arr[0]), int(pos_arr[-1])
+                )
             return
         except Exception:
             output_path.unlink(missing_ok=True)
@@ -774,6 +786,10 @@ def calc_covariance(
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
         )
         log_memory_checkpoint("calc_covariance_compact_written", debug=True)
+        if signal_output_path is not None:
+            _write_signal_sidecar(
+                output_path, signal_output_path, int(pos_arr[0]), int(pos_arr[-1])
+            )
         return
 
     # --- compute pairwise LD (Numba-accelerated when available) ---
@@ -812,6 +828,13 @@ def calc_covariance(
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
         )
         log_memory_checkpoint("calc_covariance_compact_written_fallback", debug=True)
+        if signal_output_path is not None:
+            _write_signal_sidecar(
+                output_path,
+                signal_output_path,
+                int(pos_arr.min()),
+                int(pos_arr.max()),
+            )
         return
 
     gpos_flat = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)
@@ -836,3 +859,34 @@ def calc_covariance(
         f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
     )
     log_memory_checkpoint("calc_covariance_full_written", debug=True)
+    if signal_output_path is not None:
+        _write_signal_sidecar(
+            output_path, signal_output_path, int(pos_arr.min()), int(pos_arr.max())
+        )
+
+
+def _write_signal_sidecar(
+    covariance_path: Path,
+    signal_output_path: Path,
+    start: int,
+    end: int,
+) -> None:
+    """Compute and write the signal sidecar for a just-written HDF5 partition."""
+    from ldetect2._util.vector_array import compute_partition_signal
+    from ldetect2.io.covariance_hdf5 import open_covariance_reader
+    from ldetect2.io.signal_hdf5 import write_signal_partition_hdf5
+
+    with open_covariance_reader(covariance_path, start, end) as reader:
+        loci, sum_r2 = compute_partition_signal(reader, start, end)
+    write_signal_partition_hdf5(signal_output_path, loci=loci, sum_r2=sum_r2)
+
+
+def _write_empty_signal_sidecar(signal_output_path: Path) -> None:
+    """Write a valid, empty signal sidecar for an empty covariance partition."""
+    from ldetect2.io.signal_hdf5 import write_signal_partition_hdf5
+
+    write_signal_partition_hdf5(
+        signal_output_path,
+        loci=np.array([], dtype=np.int32),
+        sum_r2=np.array([], dtype=np.float64),
+    )

@@ -73,6 +73,51 @@ def test_matrix_to_vector_values(example_data_dir, example_store, tmp_path):
     )
 
 
+def test_matrix_to_vector_signal_cache_matches_reference(
+    example_data_dir, example_store, tmp_path
+):
+    """The signal-sidecar path (calc_diag_signal) must agree with the same
+    reference vector as calc_diag_lean, built from a real (not synthetic)
+    covariance partition copied into an isolated store."""
+    from ldetect2._util.vector_array import compute_partition_signal
+    from ldetect2.io.covariance_hdf5 import open_covariance_reader
+    from ldetect2.io.partitions import CovarianceStore, read_partitions
+    from ldetect2.io.signal_hdf5 import write_signal_partition_hdf5
+    from ldetect2.matrix_analysis import MatrixAnalysis
+
+    store_root = tmp_path / "cov_matrix"
+    chrom_dir = store_root / "chr2"
+    chrom_dir.mkdir(parents=True)
+    partitions = read_partitions("chr2", example_store)
+    (store_root / "chr2_partitions.txt").write_text(
+        "\n".join(f"{start} {end}" for start, end in partitions) + "\n"
+    )
+    store = CovarianceStore(root=store_root)
+    for start, end in partitions:
+        cov_path = example_store.partition_path("chr2", start, end)
+        (chrom_dir / cov_path.name).write_bytes(cov_path.read_bytes())
+        with open_covariance_reader(
+            store.partition_path("chr2", start, end), start, end
+        ) as reader:
+            loci, sum_r2 = compute_partition_signal(reader, start, end)
+        write_signal_partition_hdf5(
+            store.signal_path("chr2", start, end), loci=loci, sum_r2=sum_r2
+        )
+
+    out_path = tmp_path / "signal-vector.txt.gz"
+    MatrixAnalysis("chr2", store).calc_diag_signal(out_path)
+
+    ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
+    ref = _read_vector_gz(ref_vector)
+    out = _read_vector_gz(out_path)
+
+    assert set(out.keys()) == set(ref.keys())
+    mismatches = [pos for pos in ref if abs(out.get(pos, 0.0) - ref[pos]) > 1e-8]
+    assert not mismatches, (
+        f"{len(mismatches)} positions differ by more than 1e-8: {mismatches[:5]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Steps 4–5: find-breakpoints → BED
 # ---------------------------------------------------------------------------

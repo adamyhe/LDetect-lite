@@ -8,7 +8,10 @@ from pathlib import Path
 
 from ldetect2._util.covariance_array import ChromosomeCovariance
 from ldetect2._util.logging import log_debug, log_msg
-from ldetect2._util.vector_array import write_diag_vector_array
+from ldetect2._util.vector_array import (
+    write_diag_vector_array,
+    write_diag_vector_signal,
+)
 from ldetect2.io.covariance import (
     Matrix,
     delete_loci_smaller_than,
@@ -120,6 +123,30 @@ class MatrixAnalysis:
             out_path=out_path,
             covariance_cache=covariance_cache,
             matrix_workers=matrix_workers,
+        )
+        self.calculation_complete = True
+
+    def calc_diag_signal(
+        self,
+        out_path: Path,
+        signal_store: CovarianceStore | None = None,
+    ) -> None:
+        """Compute the diagonal correlation-sum vector from signal sidecars only.
+
+        Requires every partition to have a signal sidecar written by
+        ``calc_covariance(..., signal_output_path=...)``. Unlike
+        :meth:`calc_diag_array`, this never reads or renormalizes pair-level
+        covariance rows.
+        """
+        self.dynamic_delete = True
+        log_msg("calc_diag_signal: start")
+        write_diag_vector_signal(
+            name=self.name,
+            signal_store=signal_store if signal_store is not None else self.store,
+            partitions=self.partitions,
+            snp_first=self.snp_first,
+            snp_last=self.snp_last,
+            out_path=out_path,
         )
         self.calculation_complete = True
 

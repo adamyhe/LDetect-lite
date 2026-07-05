@@ -14,12 +14,33 @@ from ldetect2.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     open_covariance_reader,
 )
+from ldetect2.io.partitions import CovarianceStore
+from ldetect2.io.signal_hdf5 import read_signal_partition_hdf5, validate_signal_hdf5
+from ldetect2.matrix_analysis import MatrixAnalysis
 from ldetect2.shrinkage import (
     _count_pairwise_ld_by_i_impl,
     _genetic_stop_bounds_impl,
     calc_covariance,
     partition_chromosome,
 )
+
+
+def _read_vector(path: Path) -> dict[int, float]:
+    data: dict[int, float] = {}
+    with gzip.open(path, "rt") as f:
+        for raw in f:
+            row = raw.strip().split()
+            if row:
+                data[int(row[0])] = float(row[1])
+    return data
+
+
+def _assert_vectors_close(left: Path, right: Path) -> None:
+    left_data = _read_vector(left)
+    right_data = _read_vector(right)
+    assert left_data.keys() == right_data.keys()
+    for locus, value in left_data.items():
+        assert value == pytest.approx(right_data[locus])
 
 _FULL_HDF5_DATASETS = {
     "covariance/lo",
@@ -370,6 +391,113 @@ def test_calc_covariance_compact_chunked_writer_matches_full_rows(
                 )
             ),
         )
+
+
+def test_calc_covariance_signal_sidecar_matches_array_vector(tmp_path: Path) -> None:
+    """End-to-end: a sidecar written alongside real calc_covariance() output
+    must assemble into the same vector as the existing HDF5 array path."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "cov"
+    chrom_dir = root / "chr1"
+    chrom_dir.mkdir(parents=True)
+    (root / "chr1_partitions.txt").write_text("100 300\n")
+    cov_path = chrom_dir / "chr1.100.300.h5"
+    signal_path = chrom_dir / "chr1.100.300.signal.h5"
+
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=cov_path,
+        cutoff=1e-7,
+        compact_output=True,
+        signal_output_path=signal_path,
+    )
+
+    assert validate_signal_hdf5(signal_path)
+
+    store = CovarianceStore(root=root)
+    signal_out = tmp_path / "signal.txt.gz"
+    array_out = tmp_path / "array.txt.gz"
+    MatrixAnalysis("chr1", store).calc_diag_signal(signal_out)
+    MatrixAnalysis("chr1", store).calc_diag_array(array_out)
+
+    _assert_vectors_close(signal_out, array_out)
+
+
+def test_calc_covariance_signal_sidecar_matches_single_pass_and_fallback(
+    tmp_path: Path,
+) -> None:
+    """Both the single-pass and counting-pass compact writers must produce
+    sidecars that assemble to the same vector (compact_chunk_rows=2 forces
+    the fallback writer's row_counts pass on this fixture's few pairs)."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    root = tmp_path / "cov"
+    chrom_dir = root / "chr1"
+    chrom_dir.mkdir(parents=True)
+    (root / "chr1_partitions.txt").write_text("100 300\n")
+    cov_path = chrom_dir / "chr1.100.300.h5"
+    signal_path = chrom_dir / "chr1.100.300.signal.h5"
+
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=cov_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compact_chunk_rows=2,
+        signal_output_path=signal_path,
+    )
+
+    assert validate_signal_hdf5(signal_path)
+
+    store = CovarianceStore(root=root)
+    signal_out = tmp_path / "signal.txt.gz"
+    array_out = tmp_path / "array.txt.gz"
+    MatrixAnalysis("chr1", store).calc_diag_signal(signal_out)
+    MatrixAnalysis("chr1", store).calc_diag_array(array_out)
+
+    _assert_vectors_close(signal_out, array_out)
+
+
+def test_calc_covariance_writes_empty_signal_sidecar_for_empty_partition(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    empty_vcf = StringIO(
+        "##fileformat=VCFv4.2\n"
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
+        "\tsample_a\tsample_b\n"
+    )
+    signal_path = tmp_path / "empty.signal.h5"
+
+    calc_covariance(
+        vcf_stream=empty_vcf,
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=tmp_path / "empty.h5",
+        cutoff=1e-7,
+        compact_output=True,
+        signal_output_path=signal_path,
+    )
+
+    assert validate_signal_hdf5(signal_path)
+    loci, sum_r2 = read_signal_partition_hdf5(signal_path)
+    assert loci.size == 0
+    assert sum_r2.size == 0
 
 
 def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:

@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from ldetect2._util.covariance_array import load_chromosome_covariance
+from ldetect2._util.vector_array import compute_partition_signal
 from ldetect2.io.covariance import (
     delete_loci_smaller_than,
     delete_loci_smaller_than_leanest,
@@ -22,6 +23,7 @@ from ldetect2.io.covariance_hdf5 import (
     write_covariance_partition_hdf5,
 )
 from ldetect2.io.partitions import CovarianceStore
+from ldetect2.io.signal_hdf5 import write_signal_partition_hdf5
 from ldetect2.matrix_analysis import MatrixAnalysis
 from tests._partition_fixtures import (
     divergent_overlap_partitions,
@@ -257,6 +259,20 @@ def _assert_vectors_close(left: Path, right: Path) -> None:
         assert value == pytest.approx(right_data[locus])
 
 
+def _write_signal_sidecars(
+    store: CovarianceStore, name: str, partitions: list[tuple[int, int]]
+) -> None:
+    """Populate a signal sidecar for each partition in an existing covariance store."""
+    for start, end in partitions:
+        with open_covariance_reader(
+            store.partition_path(name, start, end), start, end
+        ) as reader:
+            loci, sum_r2 = compute_partition_signal(reader, start, end)
+        write_signal_partition_hdf5(
+            store.signal_path(name, start, end), loci=loci, sum_r2=sum_r2
+        )
+
+
 # ---------------------------------------------------------------------------
 # insert_into_matrix_lean
 # ---------------------------------------------------------------------------
@@ -412,6 +428,118 @@ def test_matrix_to_vector_array_matches_legacy_with_divergent_overlap_pair(tmp_p
     MatrixAnalysis("chr1", store)._calc_diag_lean_legacy(legacy_path)
 
     _assert_vectors_close(array_path, legacy_path)
+
+
+# ---------------------------------------------------------------------------
+# Signal sidecar (calc_diag_signal) — matches calc_diag_array/legacy exactly
+# ---------------------------------------------------------------------------
+
+
+def test_compute_partition_signal_skips_first_locus_odd_pair(tmp_path):
+    """Direct antidiagonal accumulator edge case: a pair whose lower endpoint
+    is the first active locus and whose index distance is odd is never
+    visited by the legacy outward scan, even though floor((lo+hi)/2) exists."""
+    root = tmp_path / "cov"
+    chrom_dir = root / "chr1"
+    chrom_dir.mkdir(parents=True)
+    write_covariance_partition_hdf5(
+        chrom_dir / "chr1.100.200.h5",
+        i_pos=np.array([100, 100, 200], dtype=np.int32),
+        j_pos=np.array([100, 200, 200], dtype=np.int32),
+        shrink_ld=np.array([1.0, 0.5, 1.0], dtype=np.float64),
+    )
+
+    with open_covariance_reader(chrom_dir / "chr1.100.200.h5", 100, 200) as reader:
+        loci, sum_r2 = compute_partition_signal(reader, 100, 200)
+
+    np.testing.assert_array_equal(loci, np.array([100, 200]))
+    # Only the two diagonal rows contribute (r2=1 each); pair (100, 200) is
+    # excluded because lo_idx == 0 and hi_idx - lo_idx == 1 (odd).
+    np.testing.assert_allclose(sum_r2, np.array([1.0, 1.0]))
+
+
+def test_matrix_to_vector_signal_matches_legacy_single_partition(tmp_path):
+    store, partitions = _make_compact_store(tmp_path)
+    _write_signal_sidecars(store, "testchr", partitions)
+    signal_path = tmp_path / "signal.txt.gz"
+    legacy_path = tmp_path / "legacy.txt.gz"
+
+    MatrixAnalysis("testchr", store).calc_diag_signal(signal_path)
+    MatrixAnalysis("testchr", store)._calc_diag_lean_legacy(legacy_path)
+
+    _assert_vectors_close(signal_path, legacy_path)
+
+
+def test_matrix_to_vector_signal_matches_legacy_overlapping_partitions(tmp_path):
+    store, partitions = _make_two_partition_store(tmp_path)
+    _write_signal_sidecars(store, "testchr", partitions)
+    signal_path = tmp_path / "signal.txt.gz"
+    legacy_path = tmp_path / "legacy.txt.gz"
+
+    MatrixAnalysis("testchr", store).calc_diag_signal(signal_path)
+    MatrixAnalysis("testchr", store)._calc_diag_lean_legacy(legacy_path)
+
+    _assert_vectors_close(signal_path, legacy_path)
+
+
+def test_matrix_to_vector_signal_matches_legacy_with_divergent_overlap_pair(tmp_path):
+    """Same divergent cross-partition-duplicate scenario as the array-path
+    test above: the signal-sidecar path must resolve ownership the same way,
+    even though each sidecar only ever sees its own partition's rows."""
+    fixture_partitions = divergent_overlap_partitions()
+    store = make_custom_partitioned_store(tmp_path, fixture_partitions)
+    _write_signal_sidecars(store, "chr1", list(fixture_partitions))
+    signal_path = tmp_path / "signal.txt.gz"
+    legacy_path = tmp_path / "legacy.txt.gz"
+
+    MatrixAnalysis("chr1", store).calc_diag_signal(signal_path)
+    MatrixAnalysis("chr1", store)._calc_diag_lean_legacy(legacy_path)
+
+    _assert_vectors_close(signal_path, legacy_path)
+
+
+def test_matrix_to_vector_signal_matches_array_with_explicit_snp_range(tmp_path):
+    store, partitions = _make_two_partition_store(tmp_path)
+    _write_signal_sidecars(store, "testchr", partitions)
+    signal_path = tmp_path / "signal.txt.gz"
+    array_path = tmp_path / "array.txt.gz"
+
+    MatrixAnalysis("testchr", store, snp_first=400, snp_last=800).calc_diag_signal(
+        signal_path
+    )
+    MatrixAnalysis("testchr", store, snp_first=400, snp_last=800).calc_diag_array(
+        array_path
+    )
+
+    _assert_vectors_close(signal_path, array_path)
+    assert min(_read_vector(signal_path)) >= 400
+
+
+def test_matrix_to_vector_signal_skips_rows_without_positive_diagonal(tmp_path):
+    root = tmp_path / "cov"
+    chrom_dir = root / "testchr"
+    chrom_dir.mkdir(parents=True)
+    (root / "testchr_partitions.txt").write_text("100 300\n")
+    write_covariance_partition_hdf5(
+        chrom_dir / "testchr.100.300.h5",
+        i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([1.0, 0.5, 0.0, 0.2, 1.0], dtype=np.float64),
+    )
+    store = CovarianceStore(root=root)
+    _write_signal_sidecars(store, "testchr", [(100, 300)])
+    output_path = tmp_path / "signal.txt.gz"
+
+    MatrixAnalysis("testchr", store).calc_diag_signal(output_path)
+
+    assert _read_vector(output_path) == {100: pytest.approx(1.0)}
+
+
+def test_matrix_to_vector_signal_requires_sidecar(tmp_path):
+    store, _ = _make_compact_store(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="Signal partition"):
+        MatrixAnalysis("testchr", store).calc_diag_signal(tmp_path / "out.txt.gz")
 
 
 def _load_compare_partition_overlap_duplicates_module():
