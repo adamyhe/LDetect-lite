@@ -33,28 +33,8 @@ def interpolate(
             The first header line is skipped automatically.
         output: Gzipped output file with columns ``rs_id  position  genetic_pos``.
     """
-    # Read SNP positions from BED
-    snp_positions: list[int] = []
-    snp_ids: list[str] = []
-    with gzip.open(snp_file, "rt") if _is_gz(snp_file) else open(snp_file) as f:
-        for line in f:
-            parts = line.strip().split()
-            if not parts:
-                continue
-            snp_positions.append(int(parts[2]))  # BED end coord = physical position
-            snp_ids.append(parts[3])
-
-    # Read reference recombination map
-    map_positions: list[int] = []
-    map_gpos: list[float] = []
-    with gzip.open(genetic_map, "rt") as f:
-        next(f)  # skip header
-        for line in f:
-            parts = line.strip().split()
-            if not parts:
-                continue
-            map_positions.append(int(parts[0]))
-            map_gpos.append(float(parts[2]))
+    snp_positions, snp_ids = _read_snp_bed(snp_file)
+    map_positions, _rates, map_gpos = _read_map_rows(genetic_map)
 
     # Interpolate
     with gzip.open(output, "wt") as out:
@@ -84,6 +64,101 @@ def interpolate(
                 gp = map_gpos[-1]
 
             out.write(f"{rs} {pos} {gp}\n")
+
+
+def interpolate_intervals(
+    snp_file: Path,
+    genetic_map: Path,
+    output: Path,
+) -> None:
+    """Assign genetic positions to SNPs using interval-rate interpolation.
+
+    Direct port of MacDonald et al.'s R interpolation scripts
+    (https://github.com/jmacdon/LDblocks_GRCh38/blob/master/scripts/interpolate.R
+    and
+    https://github.com/jmacdon/LDblocks_GRCh38/blob/master/scripts/interpolate_pyhro.R),
+    which is the algorithm that actually produced the published deCODE/pyrho
+    reference maps. Unlike :func:`interpolate`,
+    which treats the map as discrete points and interpolates *between* two
+    bracketing points, this treats each map row as the start of a
+    genomic interval with its own recombination rate: for a SNP falling in
+    interval ``i`` (``Begin[i] <= pos``, and ``pos < Begin[i+1]`` when a next
+    row exists), the genetic position is
+
+        cM = (0 if i == 0 else cM[i-1]) + (pos - Begin[i]) * rate[i] / 1e6
+
+    i.e. anchored at the *previous* interval's cumulative endpoint and
+    advanced using *this* interval's own rate — not derived from the
+    difference between two map rows' cM values (which is what
+    :func:`interpolate` does, and which is incorrect for this data: the
+    map's ``cM`` column is the cumulative genetic position at each
+    interval's *end*, not at its start, so bracketing between rows ``i``
+    and ``i+1`` uses interval ``i+1``'s rate for a SNP physically located
+    in interval ``i``).
+
+    **Boundary behaviour**:
+    - Positions before the first interval's start receive genetic position 0
+      (matches :func:`interpolate` and the R script's own convention).
+    - Positions at or past the last interval's start continue extrapolating
+      with that interval's own rate (matches the R script, which extends
+      the last interval's end past the last SNP rather than clamping) —
+      this differs from :func:`interpolate`'s clamp-to-last-value behavior.
+
+    Args:
+        snp_file: BED file with columns ``chrom start end rs_id ...``.
+            Physical position is taken from column 2 (0-based, half-open end).
+        genetic_map: Gzipped interval-rate recombination map, as produced by
+            ``convert_decode_map.py``. Columns: ``position(=Begin)
+            rate_cM_Mb  genetic_position_cM(=cumulative cM at End)``.
+            The first header line is skipped automatically.
+        output: Gzipped output file with columns ``rs_id  position  genetic_pos``.
+    """
+    snp_positions, snp_ids = _read_snp_bed(snp_file)
+    begins, rates, cum_cm = _read_map_rows(genetic_map)
+    n = len(begins)
+
+    with gzip.open(output, "wt") as out:
+        idx = 0
+        for pos, rs in zip(snp_positions, snp_ids):
+            while idx < n - 1 and begins[idx + 1] <= pos:
+                idx += 1
+
+            if pos < begins[0]:
+                gp = 0.0
+            else:
+                startcm = 0.0 if idx == 0 else cum_cm[idx - 1]
+                gp = startcm + (pos - begins[idx]) * rates[idx] / 1e6
+
+            out.write(f"{rs} {pos} {gp}\n")
+
+
+def _read_snp_bed(snp_file: Path) -> tuple[list[int], list[str]]:
+    positions: list[int] = []
+    ids: list[str] = []
+    with gzip.open(snp_file, "rt") if _is_gz(snp_file) else open(snp_file) as f:
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            positions.append(int(parts[2]))  # BED end coord = physical position
+            ids.append(parts[3])
+    return positions, ids
+
+
+def _read_map_rows(genetic_map: Path) -> tuple[list[int], list[float], list[float]]:
+    positions: list[int] = []
+    rates: list[float] = []
+    gpos: list[float] = []
+    with gzip.open(genetic_map, "rt") as f:
+        next(f)  # skip header
+        for line in f:
+            parts = line.strip().split()
+            if not parts:
+                continue
+            positions.append(int(parts[0]))
+            rates.append(float(parts[1]))
+            gpos.append(float(parts[2]))
+    return positions, rates, gpos
 
 
 def _is_gz(path: Path) -> bool:

@@ -32,13 +32,28 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         metavar="PATH",
         help="Gzipped output file (rs_id, position, genetic_position).",
     )
+    p.add_argument(
+        "--mode",
+        choices=("point", "interval"),
+        default="point",
+        help=(
+            "Interpolation algorithm. 'point' (default) treats the map as "
+            "discrete points and interpolates between the two bracketing "
+            "points. 'interval' treats each map row as the start of a "
+            "genomic interval with its own recombination rate, matching "
+            "MacDonald et al.'s R interpolation scripts — use this for "
+            "interval-rate maps such as the deCODE map converted by "
+            "convert_decode_map.py."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.interpolate_maps import interpolate
+    from ldetect2.interpolate_maps import interpolate, interpolate_intervals
 
-    interpolate(
+    fn = interpolate if args.mode == "point" else interpolate_intervals
+    fn(
         snp_file=args.snp_file,
         genetic_map=args.genetic_map,
         output=args.output,
