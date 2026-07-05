@@ -1638,16 +1638,19 @@ class LocalSearch:
                 vert_n = snp_top_ind - curr_loc_ind
                 curr_n = curr_n - horiz_n + vert_n
 
-                if self.use_decimal:
-                    curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(curr_n)
-                else:
-                    curr_metric = curr_sum / curr_n
+                if curr_n > 0:
+                    if self.use_decimal:
+                        curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(
+                            curr_n
+                        )
+                    else:
+                        curr_metric = curr_sum / curr_n
 
-                if curr_metric < min_metric:
-                    min_metric = curr_metric
-                    min_breakpoint = curr_loc
-                    min_metric_details = {"sum": curr_sum, "N_zero": curr_n}
-                    min_distance_right = curr_loc - init_bp_locus
+                    if curr_metric < min_metric:
+                        min_metric = curr_metric
+                        min_breakpoint = curr_loc
+                        min_metric_details = {"sum": curr_sum, "N_zero": curr_n}
+                        min_distance_right = curr_loc - init_bp_locus
 
                 if curr_loc_ind + 1 < len(locus_list):
                     curr_loc_ind += 1
@@ -1676,18 +1679,22 @@ class LocalSearch:
                 vert_n = snp_top_ind - curr_loc_ind
                 curr_n = curr_n + horiz_n - vert_n
 
-                if self.use_decimal:
-                    curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(curr_n)
-                else:
-                    curr_metric = curr_sum / curr_n
+                if curr_n > 0:
+                    if self.use_decimal:
+                        curr_metric = decimal.Decimal(curr_sum) / decimal.Decimal(
+                            curr_n
+                        )
+                    else:
+                        curr_metric = curr_sum / curr_n
 
-                left_dist = init_bp_locus - curr_loc
-                if curr_metric < min_metric or (
-                    curr_metric == min_metric and left_dist < min_distance_right
-                ):
-                    min_metric = curr_metric
-                    min_breakpoint = curr_loc
-                    min_metric_details = {"sum": curr_sum, "N_zero": curr_n}
+                    left_dist = init_bp_locus - curr_loc
+                    if curr_metric < min_metric or (
+                        curr_metric == min_metric and left_dist < min_distance_right
+                    ):
+                        min_metric = curr_metric
+                        min_breakpoint = curr_loc
+                        min_metric_details = {"sum": curr_sum, "N_zero": curr_n}
+                        min_distance_right = left_dist
 
                 if curr_loc_ind - 1 >= 0:
                     curr_loc_ind -= 1
@@ -1805,6 +1812,7 @@ class LocalSearch:
                         "sum": float(curr_sum),
                         "N_zero": float(curr_n),
                     }
+                    min_distance_right = left_dist
         else:
             log_msg("Warning: no loci to the left of initial breakpoint")
 

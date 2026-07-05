@@ -1,7 +1,7 @@
-"""Post-process ldetect2 BED output: remove centromere blocks and merge small blocks.
+"""Post-process ldetect2 BED output for MacDonald2022 replication.
 
-Two operations matching MacDonald et al. (2022):
-  1. Centromere removal — drop any block that overlaps a centromeric region.
+Operations:
+  1. Optional centromere removal — drop blocks overlapping a centromeric region.
   2. Small block merging — merge any block with fewer than *min_snps* SNPs
      (counted from a filtered VCF) into its left neighbour.
 
@@ -10,6 +10,7 @@ Usage:
         --bed results/EUR/chr2/chr2-ld-blocks.bed \
         --vcf data/filtered/chr2.vcf.gz \
         --centromeres resources/hg38_centromeres.txt.gz \
+        [--remove-centromeres] \
         --min-snps 100 \
         --output results/EUR/chr2/chr2-ld-blocks.postprocessed.bed
 """
@@ -130,6 +131,15 @@ def main() -> None:
     parser.add_argument("--bed", required=True, type=Path)
     parser.add_argument("--vcf", required=True, type=Path)
     parser.add_argument("--centromeres", required=True, type=Path)
+    parser.add_argument(
+        "--remove-centromeres",
+        action="store_true",
+        help=(
+            "Drop blocks overlapping supplied centromere intervals. Disabled by "
+            "default because the published MacDonald BEDs retain several "
+            "centromere-spanning blocks relative to current UCSC intervals."
+        ),
+    )
     parser.add_argument("--min-snps", type=int, default=100)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
@@ -138,14 +148,19 @@ def main() -> None:
     n_raw = len(blocks)
     print(f"Input: {n_raw} blocks on {chrom}")
 
-    # Step 1: centromere removal
-    centromeres = load_centromeres(args.centromeres, chrom)
-    if centromeres:
-        blocks = remove_centromere_blocks(blocks, centromeres)
-        print(f"After centromere removal: {len(blocks)} blocks "
-              f"({n_raw - len(blocks)} removed)")
+    # Step 1: optional centromere removal
+    if args.remove_centromeres:
+        centromeres = load_centromeres(args.centromeres, chrom)
+        if centromeres:
+            blocks = remove_centromere_blocks(blocks, centromeres)
+            print(
+                f"After centromere removal: {len(blocks)} blocks "
+                f"({n_raw - len(blocks)} removed)"
+            )
+        else:
+            print(f"  No centromere intervals found for {chrom}; skipping")
     else:
-        print(f"  No centromere intervals found for {chrom}; skipping")
+        print("Centromere removal disabled")
 
     # Step 2: small block merging
     print(f"Counting SNPs per block (min_snps={args.min_snps})...")

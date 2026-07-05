@@ -29,7 +29,10 @@ from ldetect2._util.intervals import (
     block_sizes,
     boundaries,
     boundary_jaccard,
+    bp_jaccard,
     match_rate,
+    nearest_offsets,
+    offset_stats,
     size_stats,
 )
 from ldetect2.io.bed import read_genome_bed
@@ -67,6 +70,12 @@ def compare_chrom(
     recall = match_rate(our_bounds, ref_bounds, tol)
     precision = match_rate(ref_bounds, our_bounds, tol)
     jac = boundary_jaccard(our_bounds, ref_bounds, tol)
+    our_median_offset, our_p90_offset = offset_stats(
+        nearest_offsets(our_bounds, ref_bounds)
+    )
+    ref_median_offset, ref_p90_offset = offset_stats(
+        nearest_offsets(ref_bounds, our_bounds)
+    )
 
     return {
         "chrom": chrom,
@@ -79,6 +88,11 @@ def compare_chrom(
         "recall": round(recall, 4) if recall == recall else "nan",
         "precision": round(precision, 4) if precision == precision else "nan",
         "jaccard": round(jac, 4) if jac == jac else "nan",
+        "our_median_offset_kb": our_median_offset,
+        "our_p90_offset_kb": our_p90_offset,
+        "ref_median_offset_kb": ref_median_offset,
+        "ref_p90_offset_kb": ref_p90_offset,
+        "bp_jaccard": bp_jaccard(ours, ref),
     }
 
 
@@ -120,6 +134,11 @@ def main() -> None:
         "recall",
         "precision",
         "jaccard",
+        "our_median_offset_kb",
+        "our_p90_offset_kb",
+        "ref_median_offset_kb",
+        "ref_p90_offset_kb",
+        "bp_jaccard",
     ]
 
     rows: list[dict] = []

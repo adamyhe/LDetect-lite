@@ -30,26 +30,57 @@ block_sets:
     population: EUR
     map_source: decode
     reference_bed: deCODE_EUR_LD_blocks.bed
+    remove_centromere_blocks: false
   pyrho_AFR:
     population: AFR
     map_source: pyrho
     map_pop: GWD
     reference_bed: pyrho_AFR_LD_blocks.bed
+    remove_centromere_blocks: true
   pyrho_EAS:
     population: EAS
     map_source: pyrho
     map_pop: CHB
     reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
   pyrho_EUR:
     population: EUR
     map_source: pyrho
     map_pop: IBS
     reference_bed: pyrho_EUR_LD_blocks.bed
+    remove_centromere_blocks: true
   pyrho_SAS:
     population: SAS
     map_source: pyrho
     map_pop: GIH
     reference_bed: pyrho_SAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  # Experimental: same as pyrho_EAS, but the VCF is filtered with true
+  # minor-allele-frequency (--min-af 0.01:minor) instead of bcftools'
+  # nref-frequency default -- testing whether MacDonald's README prose
+  # ("MAF>0.01") was the intended filter, even though their actual script
+  # doesn't specify :minor. See notes/macdonald2022-pyrho-handoff.md.
+  # Deliberately not in active_block_sets -- request explicitly, e.g.:
+  #   uv run snakemake --cores N \
+  #     results/pyrho_EAS_minormaf_LD_blocks.bed \
+  #     results/compare/pyrho_EAS_minormaf_block_comparison.tsv \
+  #     results/compare/boundaries/pyrho_EAS_minormaf_boundary_offsets.tsv \
+  #     results/compare/raw/pyrho_EAS_minormaf_block_comparison.tsv \
+  #     results/compare/raw/pyrho_EAS_minormaf_boundary_offsets.tsv
+  pyrho_EAS_minormaf:
+    population: EAS
+    map_source: pyrho
+    map_pop: CHB
+    reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
+    maf_filter: minor
+
+# Default targets for rule all. SAS is kept as an available block set above,
+# but is excluded from the default reproduction target because MacDonald et al.
+# do not document an SAS-specific effective population size and the current
+# CEU fallback gives poor concordance. pyrho_EAS_minormaf is an opt-in
+# experimental variant (see above) and is also deliberately excluded.
+active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
 
 # Directories (relative to the analysis/ directory)
 raw_vcf_dir: data/raw
@@ -73,6 +104,8 @@ cov_workers: 16
 
 # Post-processing
 min_snps_per_block: 100
+# Default centromere-removal behavior for block sets that do not override it.
+remove_centromere_blocks: false
 centromere_bed: resources/hg38_centromeres.bed
 
 # 1000G reference panel (GRCh38, Dec 2018 biallelic SNV release)
@@ -83,14 +116,20 @@ vcf_filename_template: "ALL.chr{chrom}.shapeit2_integrated_v1a.GRCh38.20181129.p
 # eurinds.txt, followed by intersection with a filtered VCF header.
 sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000_genomes_project/data"
 
-# deCODE recombination map (Halldorsson et al. 2019, Science)
+# deCODE recombination map (Halldorsson et al. 2019, Science).
 # NOTE: requires journal access; download manually if behind paywall and place at
-#       data/maps/decode_raw/aau1043_datas3.gz
+#       data/maps/decode_raw/aau1043_datas3.gz. Only used by the diagnostic
+#       convert_decode_map/interpolate_map/compare_maps rules (regression-checks
+#       our own ldetect2 interpolate-maps against MacDonald's published output
+#       below) -- the EUR block set itself uses decode_interpolated_map_base_url.
 decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
 
-# MacDonald et al. published already-interpolated pyrho maps in the reference
-# repository. These are in the chr/position/cM format accepted by ldetect2 run.
+# MacDonald et al. published already-interpolated pyrho AND deCODE maps in the
+# reference repository. These are in the chr/position/cM format accepted by
+# ldetect2 run, used directly (no local interpolation) for both the pyrho and
+# EUR/deCODE block sets.
 pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
+decode_interpolated_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps"
 reference_bed_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data"
 
 # UCSC GRCh38 centromere coordinates
