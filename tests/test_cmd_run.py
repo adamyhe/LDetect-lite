@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,7 @@ import numpy as np
 from ldetect2._cli.cmd_run import (
     _breakpoint_subsets_for_run,
     _is_valid_covariance_partition,
+    register,
 )
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
 
@@ -61,3 +63,34 @@ def test_run_subset_requests_only_final_breakpoint_subset() -> None:
 
 def test_run_all_breakpoint_subsets_preserves_full_output() -> None:
     assert _breakpoint_subsets_for_run("fourier_ls", True) is None
+
+
+def _parse_run_args(extra: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers()
+    register(subparsers)
+    return parser.parse_args(
+        [
+            "run",
+            "--genetic-map",
+            "map.gz",
+            "--reference-panel",
+            "panel.vcf.gz",
+            "--individuals",
+            "inds.txt",
+            "--chromosome",
+            "chr1",
+            "--output-dir",
+            "out",
+            *extra,
+        ]
+    )
+
+
+def test_covariance_compression_defaults_to_zstd() -> None:
+    assert _parse_run_args([]).covariance_compression == "zstd"
+
+
+def test_covariance_compression_accepts_lzf() -> None:
+    args = _parse_run_args(["--covariance-compression", "lzf"])
+    assert args.covariance_compression == "lzf"

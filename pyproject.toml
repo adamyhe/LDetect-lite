@@ -20,7 +20,13 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-dependencies = ["numpy>=1.24", "scipy>=1.10", "numba>=0.57", "h5py>=3.10"]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "numba>=0.57",
+    "h5py>=3.10",
+    "hdf5plugin>=4.4",
+]
 
 [project.optional-dependencies]
 heatmap = ["matplotlib>=3.7"]
@@ -57,10 +63,10 @@ select = ["E", "F", "I", "UP"]
 python_version = "3.11"
 strict = true
 
-# None of these ship inline types or stubs (numba/h5py have no py.typed
-# marker; scipy.ndimage/scipy.signal stubs are incomplete upstream).
+# None of these ship inline types or stubs (numba/h5py/hdf5plugin have no
+# py.typed marker; scipy.ndimage/scipy.signal stubs are incomplete upstream).
 [[tool.mypy.overrides]]
-module = ["scipy.*", "numba.*", "h5py.*"]
+module = ["scipy.*", "numba.*", "h5py.*", "hdf5plugin.*"]
 ignore_missing_imports = true
 
 [dependency-groups]
