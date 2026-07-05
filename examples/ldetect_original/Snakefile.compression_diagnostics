@@ -1,0 +1,307 @@
+"""Diagnose the covariance-compression codec's performance and exactness on
+real data, at full-genome scale.
+
+Runs `ldetect2 run` twice per chromosome x population on identical filtered
+1000G input -- once with `--covariance-compression lzf` (the prior default)
+and once with `--covariance-compression zstd` (the new default: smaller and
+faster to read/write at equal precision, see
+notes/covariance-streaming-cache-implementation-note.md) -- then compares the
+two runs' vectors, breakpoints, and BEDs for exactness (compression is
+lossless, so these should match exactly), each mode's covariance directory
+size on disk, and their Snakemake `benchmark:` records for wall-clock/peak-
+memory performance.
+
+Population-generic like Snakefile.signal_cache_diagnostics:
+`chromosomes_by_population` in compression_diagnostics.yaml maps each
+population to the chromosomes to diagnose for it. Unlike the chr21/22 smoke
+test used for the signal-cache diagnostic, this defaults to the FULL
+22-chromosome x 3-population dataset, since a comprehensive storage-size
+comparison is the actual point of this diagnostic -- run it on a remote
+server/cluster given the compute cost. Outputs are namespaced under
+`results/compression_diagnostics/{population}/{chrom}/...`.
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -s Snakefile.compression_diagnostics -n
+    uv run snakemake -s Snakefile.compression_diagnostics --cores 8
+    uv run snakemake -s Snakefile.compression_diagnostics --cores 8 \
+        --config chromosomes_by_population='{EUR: [11, 22]}'
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "compression_diagnostics.yaml"
+
+
+CHROMS_BY_POP = {
+    str(pop): [str(chrom) for chrom in chroms]
+    for pop, chroms in config["chromosomes_by_population"].items()
+}
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = RESULTS / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+COMPRESSION_ROOT = RESULTS / "compression_diagnostics"
+
+MODE_COMPRESSION_FLAG = {"baseline": "lzf", "zstd": "zstd"}
+
+wildcard_constraints:
+    mode="baseline|zstd",
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def compression_targets(suffix):
+    targets = []
+    for population, chroms in CHROMS_BY_POP.items():
+        for chrom in chroms:
+            targets.append(str(COMPRESSION_ROOT / population / chrom / suffix))
+    return targets
+
+
+rule all:
+    input:
+        compression_targets("compare/compression_vs_baseline.tsv"),
+        str(COMPRESSION_ROOT / "summary.tsv"),
+
+
+rule compression_download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule compression_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule compression_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule compression_prep_individuals:
+    input:
+        panel=rules.compression_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule compression_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Dual-mode ldetect2 run: identical input, --covariance-compression lzf vs zstd
+# ---------------------------------------------------------------------------
+
+
+rule compression_run_ldetect2:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "{mode}" / "breakpoints-{chrom}.json"
+        ),
+        vector=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "{mode}" / "vector-{chrom}.txt.gz"
+        ),
+    log:
+        run=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.log"),
+        timing=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
+    benchmark:
+        str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
+    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    params:
+        output_dir=lambda wc: str(COMPRESSION_ROOT / wc.population / wc.chrom / wc.mode),
+        log_dir=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs"),
+        ne=lambda wildcards: pop_ne(wildcards.population),
+        cutoff=config["cov_cutoff"],
+        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        local_search_workers=lambda wildcards, threads: min(
+            config.get("local_search_workers", 1),
+            threads,
+        ),
+        compression=lambda wc: MODE_COMPRESSION_FLAG[wc.mode],
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect2 run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --covariance-compression {params.compression} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.cov_workers} \
+            --local-search-workers {params.local_search_workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Compare the two modes: exactness (vector/breakpoints/BED) + covariance
+# directory size + performance (Snakemake benchmark: wall-clock, peak RSS)
+# ---------------------------------------------------------------------------
+
+
+rule compare_compression:
+    input:
+        baseline_vector=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "vector-{chrom}.txt.gz"
+        ),
+        zstd_vector=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "vector-{chrom}.txt.gz"
+        ),
+        baseline_breakpoints=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
+        ),
+        zstd_breakpoints=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "breakpoints-{chrom}.json"
+        ),
+        baseline_bed=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"
+        ),
+        zstd_bed=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "{chrom}-ld-blocks.bed"
+        ),
+        baseline_benchmark=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "baseline.benchmark.tsv"
+        ),
+        zstd_benchmark=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "zstd.benchmark.tsv"
+        ),
+        script="scripts/compare_compression.py",
+    output:
+        str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "compare" / "compression_vs_baseline.tsv"),
+    params:
+        subset=config.get("subset", "fourier_ls"),
+        tolerance=config.get("tolerance", 0),
+        baseline_covariance_dir=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}"
+        ),
+        zstd_covariance_dir=str(
+            COMPRESSION_ROOT / "{population}" / "{chrom}" / "zstd" / "{chrom}"
+        ),
+    shell:
+        """
+        uv run python scripts/compare_compression.py \
+            --population {wildcards.population} \
+            --chromosome {wildcards.chrom} \
+            --baseline-vector {input.baseline_vector} \
+            --zstd-vector {input.zstd_vector} \
+            --baseline-breakpoints {input.baseline_breakpoints} \
+            --zstd-breakpoints {input.zstd_breakpoints} \
+            --baseline-bed {input.baseline_bed} \
+            --zstd-bed {input.zstd_bed} \
+            --baseline-covariance-dir {params.baseline_covariance_dir} \
+            --zstd-covariance-dir {params.zstd_covariance_dir} \
+            --baseline-benchmark {input.baseline_benchmark} \
+            --zstd-benchmark {input.zstd_benchmark} \
+            --subset {params.subset} \
+            --tolerance {params.tolerance} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Genome-wide summary: concatenate all per-chromosome comparison rows
+# ---------------------------------------------------------------------------
+
+
+rule compression_summary:
+    input:
+        compression_targets("compare/compression_vs_baseline.tsv"),
+    output:
+        str(COMPRESSION_ROOT / "summary.tsv"),
+    run:
+        import csv
+
+        rows = []
+        fieldnames = None
+        for path in input:
+            with open(path) as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                if fieldnames is None:
+                    fieldnames = reader.fieldnames
+                rows.extend(reader)
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)

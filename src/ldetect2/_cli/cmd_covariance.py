@@ -47,6 +47,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         metavar="FLOAT",
         help="LD cutoff; pairs below this are not written (default: 1e-7).",
     )
+    p.add_argument(
+        "--covariance-compression",
+        choices=("lzf", "zstd"),
+        default="zstd",
+        help=(
+            "HDF5 compression codec for the covariance partition. 'zstd' is "
+            "smaller and faster to read/write than 'lzf' at equal precision "
+            "(default: zstd)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -60,5 +70,6 @@ def _run(args: argparse.Namespace) -> int:
         output_path=args.output,
         ne=args.ne,
         cutoff=args.cutoff,
+        compression=args.covariance_compression,
     )
     return 0

@@ -76,6 +76,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--covariance-compression",
+        choices=("lzf", "zstd"),
+        default="zstd",
+        help=(
+            "HDF5 compression codec for covariance partitions. 'zstd' is "
+            "smaller and faster to read/write than 'lzf' at equal precision "
+            "(default: zstd)."
+        ),
+    )
+    p.add_argument(
         "--n-snps-bw-bpoints",
         type=int,
         default=10_000,
@@ -162,6 +172,7 @@ def _calc_partition(
     ne: float,
     cutoff: float,
     compact_output: bool,
+    compression: str,
 ) -> None:
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
@@ -194,6 +205,7 @@ def _calc_partition(
             ne=ne,
             cutoff=cutoff,
             compact_output=compact_output,
+            compression=compression,
         )
     tabix_proc.wait()
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
@@ -246,7 +258,8 @@ def _run(args: argparse.Namespace) -> int:
     compact_output = args.covariance_cache == "compact"
     log_msg(
         "Step 2: Calculating covariance matrices "
-        f"(workers={args.workers}, cache={args.covariance_cache})"
+        f"(workers={args.workers}, cache={args.covariance_cache}, "
+        f"compression={args.covariance_compression})"
     )
     log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
@@ -284,6 +297,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.ne,
                 args.cov_cutoff,
                 compact_output,
+                args.covariance_compression,
             ): (start, end)
             for start, end in pending
         }

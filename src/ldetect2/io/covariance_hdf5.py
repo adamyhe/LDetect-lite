@@ -7,7 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import hdf5plugin
 import numpy as np
+
+# Importing hdf5plugin (unconditionally, at module scope) registers its
+# bundled filter plugins -- including zstd -- with the HDF5 library for the
+# lifetime of this process. This must happen here, not lazily inside the
+# writer helpers below, because read-only consumers (metric/local-search/
+# matrix-to-vector workers) never call a writer function but still need zstd
+# available to decompress a zstd-written partition.
+_ZSTD_CLEVEL = 3
 
 _FORMAT = "ldetect2-covariance-h5"
 _VERSION = 1
@@ -154,6 +163,19 @@ def _validate_canonical_sorted_unique(
         prev_hi = int(hi_chunk[-1])
 
 
+def _dataset_compression_kwargs(compression: str | None) -> dict[str, Any]:
+    """Build the ``create_dataset`` kwargs for a compression choice.
+
+    ``"zstd"`` needs both a filter id and level-carrying ``compression_opts``,
+    which a bare string can't express -- ``hdf5plugin.Zstd(...)`` returns the
+    matching kwargs dict. Every other value (``"lzf"``, ``"gzip"``, ``None``)
+    passes straight through as h5py's builtin ``compression=`` kwarg.
+    """
+    if compression == "zstd":
+        return dict(hdf5plugin.Zstd(clevel=_ZSTD_CLEVEL))
+    return {"compression": compression}
+
+
 def write_covariance_partition_hdf5(
     path: Path,
     *,
@@ -168,7 +190,7 @@ def write_covariance_partition_hdf5(
     j_gpos: np.ndarray | None = None,
     i_id: np.ndarray | None = None,
     j_id: np.ndarray | None = None,
-    compression: str | None = "lzf",
+    compression: str | None = "zstd",
     assume_canonical_sorted_unique: bool = False,
 ) -> None:
     """Write one canonical, indexed HDF5 covariance partition.
@@ -232,7 +254,7 @@ def write_covariance_partition_hdf5(
 
         cov = h5.create_group("covariance")
         idx = h5.create_group("index")
-        kwargs = {"compression": compression, "shuffle": True}
+        kwargs = {**_dataset_compression_kwargs(compression), "shuffle": True}
         cov.create_dataset("lo", data=lo, **kwargs)
         cov.create_dataset("hi", data=hi, **kwargs)
         cov.create_dataset("shrink_ld", data=shrink, **kwargs)
@@ -262,7 +284,7 @@ def write_covariance_partition_hdf5(
                 "i_id",
                 data=np.asarray(iid, dtype=object),
                 dtype=string_dtype,
-                compression=compression,
+                **_dataset_compression_kwargs(compression),
             )
         if jid is not None:
             string_dtype = h5py.string_dtype(encoding="utf-8")
@@ -270,7 +292,7 @@ def write_covariance_partition_hdf5(
                 "j_id",
                 data=np.asarray(jid, dtype=object),
                 dtype=string_dtype,
-                compression=compression,
+                **_dataset_compression_kwargs(compression),
             )
 
         idx.create_dataset("diag_pos", data=diag_pos, **kwargs)
@@ -288,7 +310,7 @@ def write_compact_covariance_partition_hdf5_chunks(
     chrom: str | None = None,
     start: int | None = None,
     end: int | None = None,
-    compression: str | None = "lzf",
+    compression: str | None = "zstd",
     chunk_rows: int = 1_000_000,
     dataset_chunk_rows: int = HDF5_DATASET_CHUNK_ROWS,
 ) -> None:
@@ -317,7 +339,7 @@ def write_compact_covariance_partition_hdf5_chunks(
     path.parent.mkdir(parents=True, exist_ok=True)
     position_dtype = positions.dtype
     h5_chunk_rows = max(1, min(int(dataset_chunk_rows), max(n_rows, 1)))
-    kwargs = {"compression": compression, "shuffle": True}
+    kwargs = {**_dataset_compression_kwargs(compression), "shuffle": True}
 
     diag_pos_parts: list[np.ndarray] = []
     diag_val_parts: list[np.ndarray] = []
@@ -420,7 +442,7 @@ def write_compact_covariance_partition_hdf5_append(
     chrom: str | None = None,
     start: int | None = None,
     end: int | None = None,
-    compression: str | None = "lzf",
+    compression: str | None = "zstd",
     chunk_rows: int = 1_000_000,
     dataset_chunk_rows: int = HDF5_DATASET_CHUNK_ROWS,
 ) -> int:
@@ -430,7 +452,7 @@ def write_compact_covariance_partition_hdf5_append(
     path.parent.mkdir(parents=True, exist_ok=True)
     position_dtype = positions.dtype
     h5_chunk_rows = max(1, int(dataset_chunk_rows))
-    kwargs = {"compression": compression, "shuffle": True}
+    kwargs = {**_dataset_compression_kwargs(compression), "shuffle": True}
     dataset_kwargs = {
         **kwargs,
         "shape": (0,),
