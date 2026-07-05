@@ -642,6 +642,68 @@ on this thread. The experimental `filter_vcf_minor` rule and
 `pyrho_EAS_minormaf` block set are left in place (harmless, opt-in,
 additive) as a documented negative result rather than reverted.
 
+## Individual-identity-drift hypothesis (2026-07-04) — de-risked, not fully closed
+
+Follow-up on the user's alternate hypothesis (raised alongside the MAF
+question): could our pipeline be selecting a slightly different *set* of
+1000G individuals per population than MacDonald's original run, causing
+covariance drift even with matching `expected_count`? `prep_individuals.py`
+only asserts `len(intersection) == expected_count` — a same-size,
+different-membership drift would pass silently.
+
+Both our script and MacDonald's own documented recipe
+(`_reference/LDblocks_GRCh38/README.md`) use the **identical mechanism**:
+scrape each subpop's *live* 1000G FTP directory listing
+(`data/<SUBPOP>/`), union across subpops, intersect with the VCF header. No
+randomness, deterministic given a fixed FTP listing — but the FTP listing
+itself isn't a pinned, versioned artifact, so it could in principle have
+drifted between MacDonald's original run (~2022) and ours (2026).
+
+Cheap check performed (no genome-wide rerun — just metadata): diffed the
+cached `resources/resources/{AFR,EAS,EUR,SAS}_inds.txt` against the
+canonical, versioned 1000G Phase 3 panel
+(`integrated_call_samples_v3.20130502.ALL.panel`, 2504 samples) restricted
+to each population's subpops:
+
+| pop | cached | canonical-panel-only | extra (cached, not in canonical panel) |
+|---|---|---|---|
+| AFR | 513 | 503 (+1 panel sample missing from cached) | 10 |
+| EAS | 515 | 504 | 11 |
+| EUR | 417 | 404 | 13 |
+| SAS | 492 | 489 | 3 |
+
+37 individuals total are in our final lists but absent from the canonical
+2504-sample panel *and* absent from the extended 3202-sample
+pedigree/relatedness panel (`20130606_g1k_3202_samples_ped_population.txt`)
+— i.e., not mislabeled to a different population, just outside both
+official reference lists entirely. Spot-checked two (`NA19044`, `NA19359`)
+directly against the live FTP listing: both are genuinely present today,
+correctly filed under `LWK` (one of AFR's five subpops) — so this isn't a
+parsing bug in our script picking up junk lines; these are real directory
+entries with real genotype data in our filtered VCF.
+
+**Key reconciling fact**: restricting to the canonical panel *undershoots*
+every population's `expected_count` (503/504/404/489 vs. 513/515/417/492 —
+short by exactly 10/11/13/3, the same as the "extra" counts above).
+Our counts only land on MacDonald's own documented `expected_count` values
+*because* we include these off-panel individuals. Since our method is a
+faithful clone of MacDonald's documented recipe, this is strong indirect
+evidence that MacDonald's original run included the same class of
+off-panel individuals to hit those same published counts — not proof
+(MacDonald never published their actual per-population ID list to diff
+against directly), but a self-consistent second signal beyond a bare count
+match.
+
+**Conclusion: de-risks but doesn't fully close the hypothesis.** The
+selection *method* is confirmed identical to MacDonald's documented recipe
+and is FTP-listing-deterministic today; the exact-count reconciliation via
+off-panel individuals is suggestive that this has been stable since
+MacDonald's run too. What remains genuinely unverifiable: whether the FTP
+directory listing itself has changed at the margins (a sample added,
+renamed, or removed) between MacDonald's run and now — there is no
+snapshot or ground truth to check that against. Not planned as further
+work unless a new lead emerges; this is a reasonable place to leave it.
+
 ## Working Hypotheses For pyrho
 
 The pyrho results are already close enough that a wholesale algorithm problem is
@@ -795,11 +857,120 @@ this session; do not re-open without a new lead (e.g. an actual chr9
 pipeline rerun with precision/VCF-parity comparisons, mirroring the approach
 in `notes/ldetect-original-handoff.md`).
 
-### 5. Keep deCODE notes separate
+### 5. Keep deCODE notes separate — diagnosed 2026-07-05, root cause found
 
 deCODE `EUR` raw and final are identical, and its mismatch is not fixed by
-postprocessing changes. It likely reflects a deCODE-specific input or map
-preprocessing difference. Do not let it drive pyrho postprocessing changes.
+postprocessing changes (11.5% exact boundaries, 0.63 mean recall — much
+worse than any pyrho set's 79-87%). It reflects a deCODE-specific *map
+input* difference, now root-caused rather than just characterized:
+
+**We recompute our own deCODE genetic-map interpolation instead of using
+MacDonald's own published output, unlike the pyrho path.** For pyrho block
+sets, `block_set_genetic_map()` (`Snakefile`) points directly at
+MacDonald's own published already-interpolated maps
+(`pyrho_map_base_url`/`{map_pop}/chr{chrom}.tab.gz`, downloaded via
+`download_pyrho_map`) — no interpolation-method mismatch is possible by
+construction. For the deCODE-sourced `EUR` block set, the same function
+instead points at `MAPS_DIR/interpolated/chr{chrom}.tab.gz`, produced by
+*our own* `interpolate_map` rule → `ldetect2 interpolate-maps` →
+`src/ldetect2/interpolate_maps.py` (a Python port of
+`joepickrell/1000-genomes-genetic-maps/scripts/interpolate_maps.py`) run
+against the raw deCODE supplementary file (`aau1043_datas3.gz`).
+
+But MacDonald's README states they used **their own R script**
+(`interpolate.R`) to do this interpolation, not joepickrell's tool — and,
+critically, **MacDonald's actual GitHub repository publishes the resulting
+already-interpolated deCODE maps**, exactly the same way they publish the
+pyrho maps: `_reference/LDblocks_GRCh38/data/deCODE_interpolated_maps/chr{1..22}.tab.gz`
+(confirmed via `git log` inside that nested checkout: commit `2c5a7e9
+"Added interpolated deCODE map files"`, part of their real published
+history, not something we generated). We have simply never wired the
+Snakefile up to use it, unlike pyrho.
+
+Confirmed this is a drop-in, no-reformatting substitution: both
+`deCODE_interpolated_maps/chr{N}.tab.gz` and the already-working
+`pyrho_interpolated_maps/{pop}/chr{N}.tab.gz` are tab-separated
+`chr, pos, cM` (no header, no rs_id column). The map-consuming code
+(`src/ldetect2/shrinkage.py`, `partition_chromosome`/`calc_covariance`)
+only ever reads `parts[1]` (position) and `parts[2]` (cM) via a
+whitespace-generic `.split()` — column 0's content is never inspected, and
+SNP matching to the VCF is done purely by physical position. So the pyrho
+code path already proves this format works end-to-end; no adapter needed.
+
+Bonus: switching removes a real operational liability — `decode_map_url`
+(the Science supplementary file) currently 403s (confirmed via `curl -I`,
+Cloudflare bot-challenge), matching the config comment that it may require
+manual, paywalled download. Using MacDonald's published interpolated
+output instead removes this paywalled dependency entirely, exactly as the
+pyrho maps already avoid needing 1000G's own map-building inputs.
+
+**Supporting evidence already on disk, not previously connected to this
+diagnosis**: `results/compare/map_ref_comparison.tsv` (produced by the
+existing `compare_maps` diagnostic rule, which already downloads
+MacDonald's published deCODE map for comparison) shows our own
+interpolation is highly but not perfectly correlated with MacDonald's:
+Pearson r ≈ 1.0 everywhere, but mean absolute error is 0.0013-0.0026 cM on
+most chromosomes (chr9 is an outlier at 0.017 cM MAE / 3.0 cM max error,
+consistent with its already-diagnosed genetic-map-desert issue), and
+25-33% of SNPs exceed a 0.001 cM absolute difference, 2-4% exceed 0.01 cM.
+Given `LocalSearch`'s already-demonstrated extreme sensitivity to tiny
+numerical differences (see "razor-thin margins" above, where sub-0.1%
+covariance swings flip which candidate wins), a systematic map-value
+difference at this scale — present on *every* deCODE-mapped chromosome,
+unlike pyrho where no such difference is even possible since we use
+MacDonald's exact file — is a strong, quantified fit for why deCODE
+uniquely underperforms.
+
+**Implemented 2026-07-05, not yet run.** Added `decode_interpolated_map_base_url`
+(`config.yaml`) and a new `download_decode_interpolated_map` rule
+(`Snakefile`, mirroring `download_pyrho_map`) pointing at
+`https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps/chr{chrom}.tab.gz`;
+repointed `block_set_genetic_map()`'s `decode` branch at its output. The
+old `download_decode_map`/`convert_decode_map`/`interpolate_map` rules and
+`interpolate_maps.py` module were deliberately **not removed** — they're
+still exercised by the `validate_maps`/`compare_maps` diagnostic rules
+(which need *our own* interpolation output to compare/regression-check
+against MacDonald's), and `interpolate_maps.py`/`ldetect2 interpolate-maps`
+is a documented, independently-tested public CLI command, not
+MacDonald2022-specific. Verified via `snakemake -n`/`--lint`, full unit
+suite (178 passed), and a `--forceall`-scoped dry run confirming
+`run_ldetect2` for `EUR` now takes `data/maps/decode_interpolated_maps/chr{N}.tab.gz`
+as input; confirmed pyrho block sets' job graph is completely unaffected.
+
+**Caveat found while verifying:** locally, a plain (unforced) dry run
+targeting the final `EUR` outputs does *not* show the new download rule or
+`run_ldetect2` as needing to rerun, because this local checkout is missing
+the intermediate files entirely (`results/EUR/chr*/`, `data/filtered/`,
+etc. were never synced back — only final aggregated outputs were). This is
+a local-sandbox artifact, not a real risk on the actual remote host: there,
+Snakemake has real provenance metadata from the original run and will
+correctly detect that `run_ldetect2`'s declared input set changed. Still,
+to guarantee a correct rerun without relying on implicit staleness
+detection, delete the stale EUR-specific outputs first (this does not
+touch `data/maps/interpolated/`, which the diagnostic rules still need, or
+anything pyrho-related):
+
+```bash
+cd examples/MacDonald2022
+rm -rf results/EUR results/logs/EUR \
+  results/EUR_LD_blocks.bed results/EUR_raw_LD_blocks.bed \
+  results/compare/EUR_block_comparison.tsv results/compare/raw/EUR_block_comparison.tsv \
+  results/compare/boundaries/EUR_boundary_offsets.tsv results/compare/raw/EUR_boundary_offsets.tsv
+
+uv run snakemake --cores N \
+  results/EUR_LD_blocks.bed \
+  results/compare/EUR_block_comparison.tsv \
+  results/compare/boundaries/EUR_boundary_offsets.tsv \
+  results/compare/raw/EUR_block_comparison.tsv \
+  results/compare/raw/EUR_boundary_offsets.tsv
+```
+
+Compare the resulting boundary-offset/block-comparison stats against the
+11.5%-exact / 0.63-mean-recall baseline recorded above. If this closes most
+of the gap, `download_decode_map`/`convert_decode_map`/`interpolate_map`
+become genuinely dead for this example beyond the diagnostic role they
+already serve — no further action needed either way, since they're
+harmless left in place.
 
 ### 6. Other bad chromosomes — bifurcated across all three pyrho populations, 2026-07-03/04
 

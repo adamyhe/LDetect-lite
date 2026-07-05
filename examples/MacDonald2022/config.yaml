@@ -116,14 +116,20 @@ vcf_filename_template: "ALL.chr{chrom}.shapeit2_integrated_v1a.GRCh38.20181129.p
 # eurinds.txt, followed by intersection with a filtered VCF header.
 sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000_genomes_project/data"
 
-# deCODE recombination map (Halldorsson et al. 2019, Science)
+# deCODE recombination map (Halldorsson et al. 2019, Science).
 # NOTE: requires journal access; download manually if behind paywall and place at
-#       data/maps/decode_raw/aau1043_datas3.gz
+#       data/maps/decode_raw/aau1043_datas3.gz. Only used by the diagnostic
+#       convert_decode_map/interpolate_map/compare_maps rules (regression-checks
+#       our own ldetect2 interpolate-maps against MacDonald's published output
+#       below) -- the EUR block set itself uses decode_interpolated_map_base_url.
 decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
 
-# MacDonald et al. published already-interpolated pyrho maps in the reference
-# repository. These are in the chr/position/cM format accepted by ldetect2 run.
+# MacDonald et al. published already-interpolated pyrho AND deCODE maps in the
+# reference repository. These are in the chr/position/cM format accepted by
+# ldetect2 run, used directly (no local interpolation) for both the pyrho and
+# EUR/deCODE block sets.
 pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
+decode_interpolated_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps"
 reference_bed_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data"
 
 # UCSC GRCh38 centromere coordinates
