@@ -1,6 +1,6 @@
 # MacDonald2022 pyrho Handoff
 
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 
 ## Goal
 
@@ -12,8 +12,11 @@ improving the published pyrho LD block reproductions:
 - `pyrho_EUR`
 
 Set aside `pyrho_SAS` for now because MacDonald et al. do not appear to
-document an SAS-specific effective population size. Also set aside the deCODE
-`EUR` mismatch initially; it has a different failure mode.
+document an SAS-specific effective population size. The deCODE `EUR`
+mismatch (originally set aside as "a different failure mode") was
+diagnosed and fixed 2026-07-05 — see "Keep deCODE notes separate" below —
+and is no longer a special case; it now performs in the same band as the
+pyrho sets.
 
 ## Current State (2026-07-04)
 
@@ -96,6 +99,12 @@ It outputs one row per boundary in both directions:
 - `within_tolerance`
 
 ## Current Comparison Summary
+
+**The `EUR` rows below are superseded as of 2026-07-05** by the
+deCODE-map-source fix (see "Keep deCODE notes separate" below) — mean
+recall went from 0.6296 to 0.865, block count is now exact (1361/1361).
+Kept here for historical before/after comparison; don't treat the `EUR`
+numbers in this section as current.
 
 Final postprocessed comparisons downloaded under
 `examples/MacDonald2022/results/compare`:
@@ -971,6 +980,34 @@ of the gap, `download_decode_map`/`convert_decode_map`/`interpolate_map`
 become genuinely dead for this example beyond the diagnostic role they
 already serve — no further action needed either way, since they're
 harmless left in place.
+
+**Run genome-wide 2026-07-05 — confirmed fixed.** The map-source switch
+closes almost all of deCODE's gap:
+
+| metric | before (recomputed interpolation) | after (MacDonald's published map) |
+|---|---|---|
+| block count | 1362 ours / 1361 ref (+1) | **1361 / 1361 (exact)** |
+| mean recall | 0.6296 | **0.865** |
+| mean Jaccard | not previously reported at this granularity | **0.773** |
+| boundary exact rate | 11.49% overall | per-chromosome *median* boundary offset is **0.0 kb on all 22 chromosomes** (implies >50% exact in every one, not just in aggregate) |
+
+deCODE `EUR` now sits squarely in the same performance band as the three
+pyrho block sets (mean recall 0.822-0.874) instead of being the clear
+outlier. Worst remaining chromosomes: chr18 (recall 0.65), chr21 (0.667),
+chr15 (0.70) — all with real (100s-of-kb-to-~700kb) offsets rather than
+razor-thin margins, so these look like genuine remaining boundary-placement
+differences (possibly the same genetic-map-desert/Category-A mechanism
+already understood for pyrho) rather than a new class of bug. Best:
+chr10/11/14/16/17/20/22 all >0.9 recall, several with 0 non-exact
+boundaries at all.
+
+**Conclusion: diagnosis confirmed, fix validated.** The
+`download_decode_interpolated_map` rule and repointed `block_set_genetic_map()`
+are the correct, permanent fix — not an experiment to revert. deCODE `EUR`
+should be treated the same as the pyrho sets going forward: any remaining
+divergence is in the same "genuine numerical/placement differences"
+category, not a data-pipeline bug. No further action planned unless a new
+lead emerges on the still-imperfect chromosomes (chr18/21/15).
 
 ### 6. Other bad chromosomes — bifurcated across all three pyrho populations, 2026-07-03/04
 
