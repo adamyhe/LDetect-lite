@@ -150,3 +150,96 @@ def test_local_search_matches_across_cache_and_recompute_stores(
                 float(cache_metric["sum"])
             )
             assert float(recompute_metric["N_zero"]) == float(cache_metric["N_zero"])
+
+
+def test_find_breakpoints_matches_across_cache_and_recompute_source(
+    individuals_subset: Path, tmp_path: Path
+) -> None:
+    """Exercises find_breakpoints's own local_search_source="vcf-recompute"
+    wiring (temp CovarianceStore lifecycle, _load_or_recompute_partition
+    memoization, args threading) -- not just LocalSearch called directly, as
+    in the tests above.
+    """
+    import json
+
+    from ldetect_lite._util.vector_array import write_diag_vector_array
+    from ldetect_lite.pipeline import find_breakpoints
+
+    cache_store = _build_store(tmp_path / "cache", individuals_subset)
+    snp_first, snp_last = _PARTITIONS[0][0], _PARTITIONS[-1][1]
+
+    vector_path = tmp_path / "vector.txt.gz"
+    write_diag_vector_array(
+        name=_CHROM,
+        store=cache_store,
+        partitions=_PARTITIONS,
+        snp_first=snp_first,
+        snp_last=snp_last,
+        out_path=vector_path,
+    )
+
+    def _run_find_breakpoints(local_search_source: str, out_name: str) -> dict:
+        out_path = tmp_path / out_name
+        find_breakpoints(
+            input_path=vector_path,
+            chr_name=_CHROM,
+            store=cache_store,
+            n_snps_bw_bpoints=50,
+            output_path=out_path,
+            snp_first=snp_first,
+            snp_last=snp_last,
+            local_search_source=local_search_source,
+            vcf_path=str(_CHR9_VCF),
+            genetic_map_path=_CHR9_MAP,
+            individuals_path=individuals_subset,
+            subsets={"fourier_ls"},
+        )
+        return json.loads(out_path.read_text())
+
+    cache_result = _run_find_breakpoints("cache", "cache.json")
+    recompute_result = _run_find_breakpoints("vcf-recompute", "recompute.json")
+
+    assert cache_result["fourier_ls"]["loci"] == recompute_result["fourier_ls"]["loci"]
+    assert cache_result["fourier_ls"]["metric"]["sum"] == pytest.approx(
+        recompute_result["fourier_ls"]["metric"]["sum"]
+    )
+    assert (
+        cache_result["fourier_ls"]["metric"]["N_zero"]
+        == recompute_result["fourier_ls"]["metric"]["N_zero"]
+    )
+
+
+def test_find_breakpoints_rejects_vcf_recompute_with_multiple_workers(
+    individuals_subset: Path, tmp_path: Path
+) -> None:
+    from ldetect_lite._util.vector_array import write_diag_vector_array
+    from ldetect_lite.pipeline import find_breakpoints
+
+    cache_store = _build_store(tmp_path / "cache", individuals_subset)
+    snp_first, snp_last = _PARTITIONS[0][0], _PARTITIONS[-1][1]
+    vector_path = tmp_path / "vector.txt.gz"
+    write_diag_vector_array(
+        name=_CHROM,
+        store=cache_store,
+        partitions=_PARTITIONS,
+        snp_first=snp_first,
+        snp_last=snp_last,
+        out_path=vector_path,
+    )
+
+    with pytest.raises(ValueError, match="vcf-recompute"):
+        find_breakpoints(
+            input_path=vector_path,
+            chr_name=_CHROM,
+            store=cache_store,
+            n_snps_bw_bpoints=50,
+            output_path=tmp_path / "out.json",
+            snp_first=snp_first,
+            snp_last=snp_last,
+            workers=2,
+            local_search_source="vcf-recompute",
+            vcf_path=str(_CHR9_VCF),
+            genetic_map_path=_CHR9_MAP,
+            individuals_path=individuals_subset,
+            subsets={"fourier_ls"},
+        )

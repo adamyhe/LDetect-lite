@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import decimal
 import gzip
 import json
 import math
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -42,6 +44,7 @@ class _LocalSearchGroupResult(TypedDict):
     loci: list[int]
     metrics: list[_LocalSearchDetails | None]
 
+
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
 # ---------------------------------------------------------------------------
@@ -66,6 +69,12 @@ def find_breakpoints(
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
     subsets: set[str] | None = None,
+    local_search_source: str = "cache",
+    vcf_path: str | None = None,
+    genetic_map_path: Path | None = None,
+    individuals_path: Path | None = None,
+    ne: float = 11418.0,
+    cutoff: float = 1e-7,
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
 
@@ -103,6 +112,18 @@ def find_breakpoints(
             for normal float metrics.
         subsets: Optional breakpoint subsets to compute and write.  ``None``
             preserves the historical behavior and writes all four subsets.
+        local_search_source: ``"cache"`` (default) reads persisted HDF5
+            partitions as today. ``"vcf-recompute"`` recomputes each
+            partition on demand from source VCF instead (priority 5,
+            `notes/logs/covariance-cache-redesign-plan.md`) -- only
+            supported with ``workers=1``, ``use_decimal=False``, and no
+            ``covariance_cache`` (raises ``ValueError`` otherwise).
+        vcf_path: VCF reference panel path (accessed via tabix). Required
+            when ``local_search_source="vcf-recompute"``.
+        genetic_map_path: Required when ``local_search_source="vcf-recompute"``.
+        individuals_path: Required when ``local_search_source="vcf-recompute"``.
+        ne: Effective population size, used only for VCF recompute.
+        cutoff: LD cutoff, used only for VCF recompute.
     """
     requested_subsets, explicit_subsets = _normalise_subsets(subsets)
     needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
@@ -188,46 +209,79 @@ def find_breakpoints(
     if covariance_cache is None:
         metric_cov = None
 
-    # 6. Local search on Fourier
-    fourier_ls = None
-    if needs_fourier_ls:
-        if fourier_metric is None:
-            raise RuntimeError("Fourier local search requires the Fourier metric")
-        log_msg("Running local search on Fourier breakpoints")
-        log_memory_checkpoint("fourier_local_search_start")
-        fourier_ls = _run_local_search(
-            chr_name,
-            fourier_loci,
-            snp_first,
-            snp_last,
-            store,
-            fourier_metric,
-            workers=workers,
-            use_decimal=use_decimal,
-            covariance_cache=covariance_cache,
-            subset_name="fourier_ls",
+    # 6-7. Local search on Fourier / uniform. "vcf-recompute" needs a
+    # scratch CovarianceStore that lives only as long as these two local
+    # search calls -- recomputed partitions aren't needed for anything
+    # after this point, so the temp dir is cleaned up as soon as both
+    # subsets are done, not held for the rest of the function.
+    recompute_tmpdir_cm: (
+        tempfile.TemporaryDirectory[str] | contextlib.nullcontext[None]
+    ) = (
+        tempfile.TemporaryDirectory(prefix="ldetect_local_search_recompute_")
+        if local_search_source == "vcf-recompute"
+        else contextlib.nullcontext(None)
+    )
+    with recompute_tmpdir_cm as recompute_tmpdir:
+        recompute_store = (
+            CovarianceStore(root=Path(recompute_tmpdir))
+            if recompute_tmpdir is not None
+            else None
         )
-        log_memory_checkpoint("fourier_local_search_end")
-    # 7. Local search on uniform
-    uniform_ls = None
-    if needs_uniform_ls:
-        if uniform_loci is None or uniform_metric is None:
-            raise RuntimeError("Uniform local search requires uniform breakpoints")
-        log_msg("Running local search on uniform breakpoints")
-        log_memory_checkpoint("uniform_local_search_start")
-        uniform_ls = _run_local_search(
-            chr_name,
-            uniform_loci,
-            snp_first,
-            snp_last,
-            store,
-            uniform_metric,
-            workers=workers,
-            use_decimal=use_decimal,
-            covariance_cache=covariance_cache,
-            subset_name="uniform_ls",
-        )
-        log_memory_checkpoint("uniform_local_search_end")
+
+        # 6. Local search on Fourier
+        fourier_ls = None
+        if needs_fourier_ls:
+            if fourier_metric is None:
+                raise RuntimeError("Fourier local search requires the Fourier metric")
+            log_msg("Running local search on Fourier breakpoints")
+            log_memory_checkpoint("fourier_local_search_start")
+            fourier_ls = _run_local_search(
+                chr_name,
+                fourier_loci,
+                snp_first,
+                snp_last,
+                store,
+                fourier_metric,
+                workers=workers,
+                use_decimal=use_decimal,
+                covariance_cache=covariance_cache,
+                subset_name="fourier_ls",
+                local_search_source=local_search_source,
+                recompute_store=recompute_store,
+                vcf_path=vcf_path,
+                genetic_map_path=genetic_map_path,
+                individuals_path=individuals_path,
+                ne=ne,
+                cutoff=cutoff,
+            )
+            log_memory_checkpoint("fourier_local_search_end")
+        # 7. Local search on uniform
+        uniform_ls = None
+        if needs_uniform_ls:
+            if uniform_loci is None or uniform_metric is None:
+                raise RuntimeError("Uniform local search requires uniform breakpoints")
+            log_msg("Running local search on uniform breakpoints")
+            log_memory_checkpoint("uniform_local_search_start")
+            uniform_ls = _run_local_search(
+                chr_name,
+                uniform_loci,
+                snp_first,
+                snp_last,
+                store,
+                uniform_metric,
+                workers=workers,
+                use_decimal=use_decimal,
+                covariance_cache=covariance_cache,
+                subset_name="uniform_ls",
+                local_search_source=local_search_source,
+                recompute_store=recompute_store,
+                vcf_path=vcf_path,
+                genetic_map_path=genetic_map_path,
+                individuals_path=individuals_path,
+                ne=ne,
+                cutoff=cutoff,
+            )
+            log_memory_checkpoint("uniform_local_search_end")
     fourier_ls_metric = None
     if fourier_ls is not None:
         log_memory_checkpoint("fourier_ls_metric_start")
@@ -373,11 +427,7 @@ def _log_metric(metric_out: MetricDict) -> None:
         # sum/N_zero are always both-Decimal or both-float/int at runtime
         # (see MetricDict/Metric.use_decimal); mypy can't see that invariant.
         metric = metric_out["sum"] / n_zero  # type: ignore[operator]
-        log_msg(
-            f"  sum={metric_out['sum']:.6f}  "
-            f"N_zero={n_zero}  "
-            f"metric={metric:.6e}"
-        )
+        log_msg(f"  sum={metric_out['sum']:.6f}  N_zero={n_zero}  metric={metric:.6e}")
 
 
 def _midpoint(a: int, b: int) -> int:
@@ -469,6 +519,13 @@ def _run_local_search(
     use_decimal: bool = False,
     covariance_cache: ChromosomeCovariance | None = None,
     subset_name: str = "local_search",
+    local_search_source: str = "cache",
+    recompute_store: CovarianceStore | None = None,
+    vcf_path: str | None = None,
+    genetic_map_path: Path | None = None,
+    individuals_path: Path | None = None,
+    ne: float = 11418.0,
+    cutoff: float = 1e-7,
 ) -> _LocalSearchGroupResult:
     """Refine all breakpoints for one subset and log aggregate elapsed time.
 
@@ -476,7 +533,36 @@ def _run_local_search(
     or through a process pool depending on *workers*, except that an in-memory
     covariance cache is intentionally kept single-process to avoid copying a
     large cache into worker processes.
+
+    ``local_search_source="vcf-recompute"`` recomputes each partition from
+    source VCF on demand instead of reading the persisted cache (priority 5).
+    Only supported in the single-process, non-Decimal, grouped-partition path
+    below (the default) -- raises ``ValueError`` otherwise, since that
+    combination hasn't been validated (see
+    `notes/logs/covariance-cache-redesign-plan.md`).
     """
+    if local_search_source == "vcf-recompute":
+        if workers != 1 or use_decimal or covariance_cache is not None:
+            raise ValueError(
+                "local_search_source='vcf-recompute' is only supported with "
+                "workers=1, use_decimal=False, and no in-memory "
+                "covariance_cache -- got "
+                f"workers={workers} use_decimal={use_decimal} "
+                f"covariance_cache={'set' if covariance_cache is not None else None}"
+            )
+        if (
+            recompute_store is None
+            or vcf_path is None
+            or genetic_map_path is None
+            or individuals_path is None
+        ):
+            raise ValueError(
+                "local_search_source='vcf-recompute' requires recompute_store, "
+                "vcf_path, genetic_map_path, and individuals_path"
+            )
+    elif local_search_source != "cache":
+        raise ValueError(f"Unknown local_search_source: {local_search_source!r}")
+
     run_start = time.perf_counter()
     total_sum = metric_out["sum"]
     total_n = metric_out["N_zero"]
@@ -550,10 +636,30 @@ def _run_local_search(
             )
             for partition_bounds, group in grouped_tasks:
                 group_load_start = time.perf_counter()
-                group_hdf5_partitions = tuple(
-                    local_search_hdf5_partition(chr_name, store, start, end)
-                    for start, end in partition_bounds
-                )
+                if local_search_source == "vcf-recompute":
+                    assert recompute_store is not None
+                    assert vcf_path is not None
+                    assert genetic_map_path is not None
+                    assert individuals_path is not None
+                    group_hdf5_partitions = tuple(
+                        _load_or_recompute_partition(
+                            chr_name,
+                            recompute_store,
+                            start,
+                            end,
+                            vcf_path=vcf_path,
+                            genetic_map_path=genetic_map_path,
+                            individuals_path=individuals_path,
+                            ne=ne,
+                            cutoff=cutoff,
+                        )
+                        for start, end in partition_bounds
+                    )
+                else:
+                    group_hdf5_partitions = tuple(
+                        local_search_hdf5_partition(chr_name, store, start, end)
+                        for start, end in partition_bounds
+                    )
                 group_load_seconds = time.perf_counter() - group_load_start
                 group_row_count = sum(
                     partition.source_row_count for partition in group_hdf5_partitions
@@ -624,6 +730,46 @@ def _run_local_search(
     )
 
     return {"loci": new_loci, "metrics": new_metrics}
+
+
+def _load_or_recompute_partition(
+    chr_name: str,
+    recompute_store: CovarianceStore,
+    start: int,
+    end: int,
+    *,
+    vcf_path: str,
+    genetic_map_path: Path,
+    individuals_path: Path,
+    ne: float,
+    cutoff: float,
+) -> LocalSearchHDF5Partition:
+    """Recompute one partition from source VCF if not already in *recompute_store*.
+
+    Memoized on disk (skip-if-exists) so partitions shared across breakpoint
+    groups, or across the fourier_ls/uniform_ls subsets within one
+    `find_breakpoints` call, are only recomputed once. Delegates to the
+    unchanged `local_search_hdf5_partition` for the actual load, so the
+    returned object is indistinguishable from a cache-backed one downstream.
+    """
+    from ldetect_lite._util.local_search_vcf_recompute import (
+        recompute_partition_to_hdf5,
+    )
+
+    partition_path = recompute_store.partition_path(chr_name, start, end)
+    if not partition_path.exists():
+        recompute_partition_to_hdf5(
+            vcf_path=Path(vcf_path),
+            genetic_map_path=genetic_map_path,
+            individuals_path=individuals_path,
+            chrom=chr_name,
+            start=start,
+            end=end,
+            output_path=partition_path,
+            ne=ne,
+            cutoff=cutoff,
+        )
+    return local_search_hdf5_partition(chr_name, recompute_store, start, end)
 
 
 def _group_local_search_tasks(
