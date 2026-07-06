@@ -244,3 +244,131 @@ the default cache.
   an explicit, pre-declared tolerance on final BED boundaries — not just
   vector-level max-abs-diff — given that vector-level tolerance and
   local-search-outcome tolerance are now known to be different quantities.
+
+## Implementation update (2026-07-06)
+
+Priorities 2, 3, 4, and (a variant of) 6 were prototyped and validated this
+round, on this branch, as library-level modules with their own test suites —
+**not** wired into `calc_covariance`, the CLI, or `pipeline.py`. Scoping
+decision (explicit, asked of the user): schema/structural changes are
+prototype-only in this round, deferring the "rewire every consumer +
+version-dispatch old files" migration to a later, separately-scoped pass.
+
+### Sidecars 1 and 2 (`src/ldetect_lite/_util/covariance_sidecars.py`)
+
+Built as a single fused accumulator that **tees** the exact
+`CovarianceRowChunk` iterator `calc_covariance` already uses to persist the
+HDF5 partition (`shrinkage.py`'s `_compact_pair_chunks_single_pass` output),
+rather than a second, independently-invoked kernel pass. This was a
+deliberate response to the old `ldetect2`-era direct-vector prototype's
+unresolved chr9/chr14 vector residual (§1 above): tee-ing guarantees
+bit-identical `(lo, hi, shrink_ld)` inputs to both the persisted cache and
+the sidecar, structurally ruling out the "two kernel invocations quietly
+disagree" failure class rather than just being more careful about it. The
+only independently-derived quantity is the per-locus diagonal
+(`shrinkage._diag_values_impl`, a closed-form vectorized collapse of the
+kernel's `i == j` branch — pure function of `hap_sums`, no second nested-loop
+pass), verified bit-exact against the persisted `diag_pos`/`diag_val`.
+
+Results:
+
+- **Direct-vector fragment: bit-exact**, both single-partition and across
+  two overlapping partitions, against the existing post-hoc HDF5-based
+  vector build (`vector_array.py`). This is the sidecar with the historical
+  divergence risk, and it's now the most confidently exact piece of this
+  round's work.
+- **Metric coverage-array fragment (original flat 1D difference-array
+  design): confirmed broken on real data**, not just theoretically fragile.
+  Measured directly on the real EUR chr2 fixture
+  (`tests/data/cov_matrix/chr2/chr2.39967768.40067768.h5`): max surviving
+  pair span is **99,899 bp** against a minimum real breakpoint gap of
+  **4,646 bp** (from `fourier_ls` minima) — **91% of all 225,402 surviving
+  pairs exceed the minimum gap**. The single-breakpoint-crossing assumption
+  §2 flagged as "plausible headroom, not guaranteed" is, on this real
+  window, the overwhelming common case of violation, not an edge case. The
+  flat difference array double-counts any pair crossing more than one
+  breakpoint — see
+  `tests/test_covariance_sidecars.py::test_metric_coverage_violates_single_crossing_assumption_when_breakpoints_are_close`
+  for a constructive, reproducible counterexample, and
+  `test_single_breakpoint_crossing_assumption_on_real_fixture` for the real-
+  data measurement above. **This flat-array implementation is superseded by
+  the exact decomposition below and should not be built on further** —
+  kept in the codebase for now as a documented negative result, not a
+  competing design.
+
+### Priority 2's fallback, built and benchmarked (`src/ldetect_lite/_util/banded_metric_coverage.py`)
+
+Per §2's own stated fallback ("if violated, the correct generalization is an
+offline 2D Fenwick/BIT over sorted pair endpoints"), replaced the flat array
+with an exact decomposition that's correct for *any* number of breakpoints a
+pair crosses: `sum_crossing = total_mass - Σ intra_block_mass(block)`, where
+blocks are the position ranges between consecutive breakpoints. A pair fully
+contained in one block is excluded exactly once; a pair crossing N≥1
+breakpoints is never "intra" anywhere and is counted exactly once via
+`total_mass` — no double-count, unlike the flat array.
+
+Two variants were built and benchmarked against each other, per an explicit
+follow-up question about whether a persisted 2D structure is worth its
+storage cost relative to just reading the (smaller) compact cache on demand:
+
+- `sum_crossing_linear_scan`: one O(n_rows) pass over the compact cache's
+  own arrays, zero extra storage.
+- `MergeSortRangeSumTree`: a persisted O(n log n)-space merge-sort/segment
+  tree for O(log² n) queries without touching per-row arrays at query time.
+
+Both are exact against `metric_from_arrays`, including the close-breakpoints
+case that broke the flat array. **Benchmark result (real chr2 fixture,
+225,402 pairs): the persisted tree is 42.5x larger than the v2 compact cache
+(72.7 MB vs. 1.7 MB) for negligible-to-negative query-time benefit** — 0.9x
+(i.e. slower) at a realistic 12-breakpoint set, both variants sub-
+millisecond regardless. Root cause: a persistent structure only pays for
+itself when its O(n log n) build cost is amortized over many repeated
+queries, and this metric is evaluated ~4 times per chromosome (once per
+fourier/fourier_ls/uniform/uniform_ls subset) via `pipeline.py:357`, not
+repeatedly — confirmed by reading `find_minima.custom_binary_search_with_trackback`,
+which only evaluates a vector-smoothing function, never `metric_from_arrays`.
+**Conclusion: drop the persisted-tree variant; `sum_crossing_linear_scan`
+over the compact cache is strictly better here** (exact, no extra storage,
+already fast enough). A persisted structure would only be worth revisiting
+if some future consumer needed many repeated crossing-sum queries against
+the same partition — no such consumer exists in this pipeline today.
+
+### Priority 1, prototyped (`src/ldetect_lite/_util/compact_schema_v2.py`)
+
+v2 schema exactly as sketched above (drop per-row `lo`, `hi` as a rank index
+into a per-partition `positions` array). Round-trips bit-exact against v1 on
+the real chr2 fixture. **Real-world size reduction: 6.4%** (1,827,417 →
+1,710,775 bytes for 226,074 rows) — well short of the ~37.5% pre-compression
+estimate (`16 B → 10 B` per row), because zstd already exploits most of the
+same redundancy the CSR cleanup targets. Useful calibration for priority 6:
+lossless schema tricks are near diminishing returns under zstd; the larger
+remaining lever is genuinely lossy (bounded fixed-point `r²` quantization).
+
+### Not done this round
+
+Priority 5 (local-search on-demand recompute) and the task-grouping item
+(priority 7) are unstarted — sidecars 1/2 being prototype-only (not wired
+into the read paths they're meant to replace) means the "bulk cache drops
+off the critical path" net implication (§ above) hasn't actually landed yet
+either; it's demonstrated as *feasible*, not *shipped*.
+
+### Open decision: merge and release
+
+Recommended: merge this branch's work into `main` as ordinary internal
+development (all of it is additive — new modules, new tests, zero changes
+to `calc_covariance`'s default behavior or any existing reader) but **do
+not** cut a `v0.1.1` tag for it. Nothing here is wired into `calc_covariance`,
+the CLI, or `pipeline.py`, so there is no user-observable change a version
+bump would honestly describe yet. Before merging, reconcile the two
+metric-coverage implementations living side by side in
+`covariance_sidecars.py` (flat, known-wrong) and `banded_metric_coverage.py`
+(exact, recommended) so a future reader doesn't mistake the former for a
+live option — at minimum, a doc pointer from the flat implementation to its
+replacement; ideally, delete the flat implementation once nothing depends on
+its tests as a documented negative result.
+
+Next planned step: priority 6, bounded fixed-point `r²` quantization,
+scoped down given local search (priority 5, unstarted) still reads the
+persisted cache directly — quantization needs its own validation harness
+distinguishing vector-level tolerance from final-BED-outcome tolerance, per
+the validation methodology above.
