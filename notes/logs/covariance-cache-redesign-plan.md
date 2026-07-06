@@ -515,3 +515,46 @@ is the better-ROI remaining lever — it doesn't require touching the reader
 API surface or building version dispatch, and wasn't invalidated by this
 finding. `compact_schema_v2.py` and its tests remain in the repo as a
 validated prototype/reference, not a migration in progress.
+
+Also explicitly considered and declined: wiring `banded_metric_coverage.py`
+into production. Unlike priority 5/direct-vector, it doesn't replace a real
+production dependency — `metric_from_files` was already exact the whole
+time, so there's nothing broken for it to fix. It's also built directly
+against v2's rank-encoded arrays, so using it would mean resurrecting v2 or
+re-deriving `metric_from_files`'s own logic against v1 data. No path forward
+here that isn't strictly worse than what's already shipped.
+
+## Real-scale profiling harness for priority 5 / --fused-vector (2026-07-06)
+
+Both flags were only validated for *correctness* this session (small real
+regions, one single-partition manual smoke test) — never for wall-clock/
+memory cost at real chromosome scale. Added
+`examples/MacDonald2022/Snakefile.priority5_profiling` (+
+`priority5_profiling.yaml`), a self-contained diagnostic workflow (matching
+the existing `Snakefile.compression_diagnostics` sibling-workflow
+convention) that runs `ldetect run` three ways per chromosome — baseline,
+`--fused-vector`, `--local-search-source vcf-recompute` (pinned to
+`--workers 1`, the only validated configuration) — against identical real
+input, wrapped in `/usr/bin/time -v` (matching the main Snakefile's own
+`run_ldetect` benchmarking convention, not a new mechanism), checks BED
+output is byte-identical across all three (it must be — these are three
+exact computations of the same thing), and reports wall-clock/peak-RSS
+deltas in `summary.tsv`.
+
+Not run yet — meant to be run remotely (`/usr/bin/time -v` is GNU-only, not
+available on this dev machine; confirmed by trying it locally). Validated
+short of actually running it: the Snakemake DAG resolves cleanly in dry-run
+against real local chr9 data (`--config profiling_chromosomes='[9]'`), and
+the GNU-time-output parsing logic was unit-checked against fabricated
+sample output in both `m:ss` and `h:mm:ss` forms — this caught a real bug
+(the "Elapsed (wall clock) time" label's own `(h:mm:ss or m:ss)` hint text
+contains colons, so a naive first-colon split grabbed part of the label
+instead of the value; fixed to split on the last `": "` instead).
+
+Open question this data should answer, not decided here: `--local-search-
+source vcf-recompute` is currently unsupported with `--local-search-workers
+> 1` (would need a locking scheme for concurrent recompute into a shared
+temp store across worker processes). Whether that's worth building depends
+on how much of `vcf_recompute` mode's wall-clock is the per-partition
+recompute step versus everything else — exactly what `summary.tsv` will
+show once run.

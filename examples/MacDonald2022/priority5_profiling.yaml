@@ -1,0 +1,12 @@
+# Config for Snakefile.priority5_profiling.
+#
+# Defaults to the chr21/22 smoke-test scale already used by the other
+# diagnostic workflows in this directory (see Snakefile.compression_diagnostics).
+# Override for a real full-scale profiling run, e.g.:
+#   uv run snakemake -s Snakefile.priority5_profiling --cores 8 \
+#       --config profiling_chromosomes='[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22]'
+
+profiling_chromosomes: [21, 22]
+profiling_population: EUR
+# pyrho GWD map, matching this session's chr9 manual smoke-testing setup.
+profiling_map_pop: GWD
