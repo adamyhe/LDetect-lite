@@ -780,3 +780,148 @@ def test_zstd_output_smaller_than_lzf_for_same_data(tmp_path: Path) -> None:
     )
 
     assert zstd_path.stat().st_size < lzf_path.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# float32 shrink_ld precision
+# ---------------------------------------------------------------------------
+
+
+def test_shrink_ld_precision_rejects_unknown_value(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unsupported shrink_ld precision"):
+        write_covariance_partition_hdf5(
+            tmp_path / "bad.h5",
+            i_pos=np.array([100], dtype=np.int32),
+            j_pos=np.array([100], dtype=np.int32),
+            shrink_ld=np.array([0.5]),
+            shrink_ld_precision="float16",
+        )
+
+
+def test_full_schema_writer_stores_shrink_ld_as_float32_on_disk(
+    tmp_path: Path,
+) -> None:
+    import h5py
+
+    shrink_ld = np.array([0.5, 1.0 / 3, 0.7, 1e-8, 0.9], dtype=np.float64)
+    path = tmp_path / "f32.h5"
+    write_covariance_partition_hdf5(
+        path,
+        i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=shrink_ld,
+        shrink_ld_precision="float32",
+    )
+
+    with h5py.File(path, "r") as h5:
+        assert h5["covariance/shrink_ld"].dtype == np.float32
+        assert h5["index/diag_val"].dtype == np.float32
+        assert h5.attrs["shrink_ld_dtype"] == "float32"
+
+    with open_covariance_reader(path, 100, 300) as reader:
+        chunk = reader.read_all()
+        diag_pos, diag_val = reader.read_diagonal()
+    assert chunk.shrink_ld.dtype == np.float64  # readers always upcast
+    order = np.argsort(chunk.lo, kind="stable")
+    np.testing.assert_allclose(
+        chunk.shrink_ld[order],
+        shrink_ld.astype(np.float32).astype(np.float64),
+        rtol=0,
+        atol=0,
+    )
+    # Diagonal entries (lo == hi, i.e. positions 100 and 300) must read back
+    # bit-identical whether fetched via shrink_ld or via the diag_val index --
+    # both are the same logical value and must be rounded the same way.
+    diag_from_rows = {
+        int(lo): float(val)
+        for lo, hi, val in zip(chunk.lo, chunk.hi, chunk.shrink_ld)
+        if lo == hi
+    }
+    for pos, val in zip(diag_pos, diag_val):
+        assert diag_from_rows[int(pos)] == float(val)
+
+
+def test_compact_writers_store_shrink_ld_as_float32_on_disk(
+    tmp_path: Path,
+) -> None:
+    import h5py
+
+    positions = np.array([100, 200, 300], dtype=np.int32)
+    row_counts = np.array([2, 2, 1], dtype=np.int64)
+    row_chunk = CovarianceRowChunk(
+        lo=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        hi=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 1.0 / 3, 0.7, 1e-8, 0.9], dtype=np.float64),
+    )
+
+    chunks_path = tmp_path / "compact_chunks_f32.h5"
+    write_compact_covariance_partition_hdf5_chunks(
+        chunks_path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([row_chunk]),
+        shrink_ld_precision="float32",
+    )
+
+    append_path = tmp_path / "compact_append_f32.h5"
+    write_compact_covariance_partition_hdf5_append(
+        append_path,
+        positions=positions,
+        row_chunks=iter([row_chunk]),
+        shrink_ld_precision="float32",
+    )
+
+    expected = row_chunk.shrink_ld.astype(np.float32).astype(np.float64)
+    for path in (chunks_path, append_path):
+        with h5py.File(path, "r") as h5:
+            assert h5["covariance/shrink_ld"].dtype == np.float32
+            assert h5["index/diag_val"].dtype == np.float32
+        with open_covariance_reader(path, 100, 300) as reader:
+            read_back = reader.read_all()
+        np.testing.assert_array_equal(read_back.lo, row_chunk.lo)
+        np.testing.assert_array_equal(read_back.hi, row_chunk.hi)
+        np.testing.assert_allclose(read_back.shrink_ld, expected, rtol=0, atol=0)
+
+
+def test_float32_precision_shrinks_uncompressed_output(tmp_path: Path) -> None:
+    rng = np.random.default_rng(7)
+    n_positions = 500
+    rows_per_position = 20
+    positions = np.sort(
+        rng.choice(1_000_000, size=n_positions, replace=False)
+    ).astype(np.int32)
+
+    lo_parts = []
+    hi_parts = []
+    for pos in positions:
+        offsets = np.sort(
+            rng.choice(1_000_000, size=rows_per_position, replace=False)
+        ).astype(np.int32)
+        lo_parts.append(np.full(rows_per_position, pos, dtype=np.int32))
+        hi_parts.append(pos + offsets)
+    lo = np.concatenate(lo_parts)
+    hi = np.concatenate(hi_parts)
+    shrink_ld = rng.normal(0, 0.05, size=lo.size)
+    chunk = CovarianceRowChunk(lo=lo, hi=hi, shrink_ld=shrink_ld)
+    row_counts = np.full(n_positions, rows_per_position, dtype=np.int64)
+
+    f64_path = tmp_path / "f64.h5"
+    f32_path = tmp_path / "f32.h5"
+    write_compact_covariance_partition_hdf5_chunks(
+        f64_path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([chunk]),
+        compression=None,
+        shrink_ld_precision="float64",
+    )
+    write_compact_covariance_partition_hdf5_chunks(
+        f32_path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([chunk]),
+        compression=None,
+        shrink_ld_precision="float32",
+    )
+
+    assert f32_path.stat().st_size < f64_path.stat().st_size

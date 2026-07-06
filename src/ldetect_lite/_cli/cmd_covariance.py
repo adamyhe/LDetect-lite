@@ -57,6 +57,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "(default: zstd)."
         ),
     )
+    p.add_argument(
+        "--shrink-ld-precision",
+        choices=("float64", "float32"),
+        default="float64",
+        help=(
+            "On-disk dtype for shrink_ld/diagonal values. 'float32' roughly "
+            "halves their uncompressed size (and compresses further on top "
+            "of that); every reader upcasts back to float64 in memory, so "
+            "this is lossy on disk only. Not yet validated as a pipeline "
+            "default, so it defaults off (default: float64)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -71,5 +83,6 @@ def _run(args: argparse.Namespace) -> int:
         ne=args.ne,
         cutoff=args.cutoff,
         compression=args.covariance_compression,
+        shrink_ld_precision=args.shrink_ld_precision,
     )
     return 0

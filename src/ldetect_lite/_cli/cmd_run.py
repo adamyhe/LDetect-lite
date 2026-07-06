@@ -86,6 +86,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--shrink-ld-precision",
+        choices=("float64", "float32"),
+        default="float64",
+        help=(
+            "On-disk dtype for shrink_ld/diagonal values in covariance "
+            "partitions. 'float32' roughly halves their uncompressed size "
+            "(and compresses further on top of that); every reader upcasts "
+            "back to float64 in memory, so this is lossy on disk only. Not "
+            "yet validated as a pipeline default, so it defaults off "
+            "(default: float64)."
+        ),
+    )
+    p.add_argument(
         "--n-snps-bw-bpoints",
         type=int,
         default=10_000,
@@ -178,6 +191,7 @@ def _calc_partition(
     cutoff: float,
     compact_output: bool,
     compression: str,
+    shrink_ld_precision: str,
 ) -> None:
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
@@ -211,6 +225,7 @@ def _calc_partition(
             cutoff=cutoff,
             compact_output=compact_output,
             compression=compression,
+            shrink_ld_precision=shrink_ld_precision,
         )
     tabix_proc.wait()
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
@@ -269,7 +284,8 @@ def _run(args: argparse.Namespace) -> int:
     log_msg(
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache}, "
-        f"compression={args.covariance_compression})"
+        f"compression={args.covariance_compression}, "
+        f"shrink_ld_precision={args.shrink_ld_precision})"
     )
     log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
@@ -308,6 +324,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.cov_cutoff,
                 compact_output,
                 args.covariance_compression,
+                args.shrink_ld_precision,
             ): (start, end)
             for start, end in pending
         }

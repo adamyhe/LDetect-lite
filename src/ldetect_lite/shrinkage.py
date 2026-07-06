@@ -523,6 +523,7 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
+    shrink_ld_precision: str = "float64",
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -551,6 +552,11 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
+        shrink_ld_precision: On-disk dtype for ``shrink_ld``/diagonal values
+            (``"float64"``, the default, or ``"float32"``). ``"float32"``
+            halves that dataset's uncompressed size and compresses further
+            on top of that; every reader upcasts back to float64 in memory,
+            so this is lossy on disk only -- no schema or reader change.
     """
     from ldetect_lite._util.logging import log_debug
     from ldetect_lite._util.memory import log_memory_checkpoint
@@ -710,6 +716,7 @@ def calc_covariance(
                 ),
                 chunk_rows=compact_chunk_rows,
                 compression=compression,
+                shrink_ld_precision=shrink_ld_precision,
             )
             dataset_chunk_rows = HDF5_DATASET_CHUNK_ROWS if n_pairs else 0
             log_debug(
@@ -769,6 +776,7 @@ def calc_covariance(
             ),
             chunk_rows=compact_chunk_rows,
             compression=compression,
+            shrink_ld_precision=shrink_ld_precision,
         )
         log_debug(
             "calc_covariance compact_hdf5_written "
@@ -811,6 +819,7 @@ def calc_covariance(
             shrink_ld=ds2_arr,
             assume_canonical_sorted_unique=assume_sorted_unique_rows,
             compression=compression,
+            shrink_ld_precision=shrink_ld_precision,
         )
         log_debug(
             "calc_covariance compact_hdf5_written_fallback "
@@ -836,6 +845,7 @@ def calc_covariance(
         j_id=rs_arr[jj],
         assume_canonical_sorted_unique=assume_sorted_unique_rows,
         compression=compression,
+        shrink_ld_precision=shrink_ld_precision,
     )
     log_debug(
         "calc_covariance full_hdf5_written "

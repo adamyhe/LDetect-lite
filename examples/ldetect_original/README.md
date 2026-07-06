@@ -281,18 +281,28 @@ The downloaded files are written under
 ## Compression Diagnostic Workflow
 
 `Snakefile.compression_diagnostics` measures the performance, exactness, and
-**covariance cache size** of the `--covariance-compression` codec choice
-against this pipeline's real 1000G data. For each configured chromosome x
-population, it runs `ldetect run` twice on identical filtered input — once
-with `--covariance-compression lzf` (the prior default) and once with
-`--covariance-compression zstd` (the new default) — then compares the two
-runs':
+**covariance cache size** of covariance-storage candidates against this
+pipeline's real 1000G data. For each configured chromosome x population, it
+runs `ldetect run` three times on identical filtered input:
+
+- `baseline` — `--covariance-compression lzf` (the prior default);
+- `zstd` — `--covariance-compression zstd` (the current default): a lossless
+  codec swap, smaller and faster to read/write at equal precision;
+- `zstd_shrink32` — `--covariance-compression zstd --shrink-ld-precision
+  float32`: additionally stores `shrink_ld`/`diag_val` as real on-disk
+  float32 instead of float64. This is **lossy** (a genuine precision
+  reduction, not a lossless trick) and not yet validated against real
+  breakpoints — that is exactly what this diagnostic is for.
+
+`zstd` and `zstd_shrink32` are each compared against `baseline`, producing one
+comparison row per (population, chromosome, candidate) triple:
 
 - **vector/breakpoints/BED**: row count, sha256 digest, exact loci match, and
-  BED boundary recall/precision/Jaccard at `tolerance` bp (default `0`).
-  Compression is lossless, so these are expected to match exactly — any
-  divergence here indicates a real bug, not floating-point noise from a
-  different computation order;
+  BED boundary recall/precision/Jaccard at `tolerance` bp (default `0`). For
+  `zstd` (lossless) these are expected to match exactly — any divergence
+  there indicates a real bug, not floating-point noise. For `zstd_shrink32`
+  (lossy) divergence is possible; the question this diagnostic answers is
+  whether it ever shifts a real breakpoint;
 - **covariance directory size**: total bytes of every `.h5` partition under
   each mode's covariance directory, plus the size ratio and percent
   reduction — this is the actual point of this diagnostic;
@@ -301,7 +311,9 @@ runs':
 
 This defaults to the **full 22-chromosome, 3-population dataset**, since a
 comprehensive storage-size comparison is only meaningful at full-genome
-scale — run it on a remote server/cluster given the compute cost.
+scale — run it on a remote server/cluster given the compute cost. A third
+mode means the non-baseline legs now cost 1.5x what they did with just
+`zstd` — smoke-test before committing to a full run.
 
 Dry-run the default (full-genome) diagnostic:
 
@@ -315,25 +327,37 @@ Run it for real:
 uv run snakemake -s Snakefile.compression_diagnostics --cores 8
 ```
 
-Smoke-test a smaller subset instead of the full genome:
+Smoke-test a smaller subset instead of the full genome — recommended before a
+full run, especially to validate the new `zstd_shrink32` candidate. Snakemake
+merges `--config` dict overrides key-by-key rather than replacing the whole
+`chromosomes_by_population` value, so the other populations must be
+explicitly zeroed out too or they'll silently still run at full 22-chromosome
+scale:
 
 ```bash
 uv run snakemake -s Snakefile.compression_diagnostics --cores 4 \
-  --config chromosomes_by_population='{EUR: [11, 22]}'
+  --config chromosomes_by_population='{EUR: [21, 22], AFR: [], ASN: []}'
 ```
 
 Outputs:
 
-- `results/compression_diagnostics/{population}/{chrom}/{baseline,zstd}/` —
+- `results/compression_diagnostics/{population}/{chrom}/{baseline,zstd,zstd_shrink32}/` —
   each mode's full `ldetect run` output directory, including its covariance
   partitions under `{mode}/{chrom}/`.
 - `results/compression_diagnostics/{population}/{chrom}/logs/{mode}.benchmark.tsv` —
   Snakemake's wall-clock/peak-memory record for that mode.
-- `results/compression_diagnostics/{population}/{chrom}/compare/compression_vs_baseline.tsv` —
-  one row combining the exactness, size, and performance comparison for that
-  chromosome x population.
+- `results/compression_diagnostics/{population}/{chrom}/compare/compression_vs_baseline.{zstd,zstd_shrink32}.tsv` —
+  one row per candidate combining the exactness, size, and performance
+  comparison against baseline for that chromosome x population.
 - `results/compression_diagnostics/summary.tsv` — all comparison rows
-  concatenated.
+  concatenated (both candidates, all chromosomes, all populations).
+
+Note: any stale local `results/compression_diagnostics/` data from prior
+exploration (this directory is gitignored, not tracked) may use a
+`zstd_f32` label from an earlier, since-abandoned prototype that rounded
+`shrink_ld` to float32 precision but still stored it as float64 on disk —
+that is a different technique from `zstd_shrink32`'s real float32 dtype, and
+the two should not be confused.
 
 ## Resource Profiling
 

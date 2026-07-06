@@ -97,6 +97,15 @@ def test_covariance_compression_accepts_lzf() -> None:
     assert args.covariance_compression == "lzf"
 
 
+def test_shrink_ld_precision_defaults_to_float64() -> None:
+    assert _parse_run_args([]).shrink_ld_precision == "float64"
+
+
+def test_shrink_ld_precision_accepts_float32() -> None:
+    args = _parse_run_args(["--shrink-ld-precision", "float32"])
+    assert args.shrink_ld_precision == "float32"
+
+
 def test_stage_workers_default_to_none_and_inherit_shared_workers() -> None:
     args = _parse_run_args(["--workers", "4"])
     assert args.matrix_workers is None

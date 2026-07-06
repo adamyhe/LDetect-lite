@@ -20,6 +20,12 @@ tolerance: 0
 # on a high-memory machine; this only affects Step 2/Step 4 parallelism
 # inside each mode's `ldetect run` invocation, not which modes run
 # concurrently (see ldetect_job_threads below).
+#
+# Three modes now run per chromosome (baseline, zstd, zstd_shrink32) --
+# candidates are hardcoded in Snakefile.compression_diagnostics's
+# CANDIDATE_MODES, not configurable here, since each is always compared
+# against the same baseline. The two non-baseline legs cost 1.5x what they
+# did before this third mode was added.
 covariance_cache: compact
 workers: 4
 

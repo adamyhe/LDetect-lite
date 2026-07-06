@@ -22,6 +22,10 @@ _FORMAT = "ldetect-lite-covariance-h5"
 _LEGACY_FORMAT = "ldetect2-covariance-h5"
 _VALID_FORMATS = frozenset({_FORMAT, _LEGACY_FORMAT})
 _VERSION = 1
+_SHRINK_LD_DTYPES: dict[str, type[np.floating[Any]]] = {
+    "float64": np.float64,
+    "float32": np.float32,
+}
 HDF5_DATASET_CHUNK_ROWS = 65_536
 _REQUIRED_DATASETS = frozenset(
     {
@@ -165,6 +169,22 @@ def _validate_canonical_sorted_unique(
         prev_hi = int(hi_chunk[-1])
 
 
+def _shrink_ld_dtype(precision: str) -> np.dtype:
+    """Resolve a ``shrink_ld_precision`` choice to its on-disk numpy dtype.
+
+    ``shrink_ld``/``diag_val`` are the only datasets this controls -- every
+    other field (positions, ``naive_ld``, genetic positions, rsIDs) keeps its
+    own fixed dtype regardless of this setting.
+    """
+    try:
+        return np.dtype(_SHRINK_LD_DTYPES[precision])
+    except KeyError:
+        raise ValueError(
+            f"unsupported shrink_ld precision {precision!r}; expected one of "
+            f"{sorted(_SHRINK_LD_DTYPES)}"
+        ) from None
+
+
 def _dataset_compression_kwargs(compression: str | None) -> dict[str, Any]:
     """Build the ``create_dataset`` kwargs for a compression choice.
 
@@ -193,6 +213,7 @@ def write_covariance_partition_hdf5(
     i_id: np.ndarray | None = None,
     j_id: np.ndarray | None = None,
     compression: str | None = "zstd",
+    shrink_ld_precision: str = "float64",
     assume_canonical_sorted_unique: bool = False,
 ) -> None:
     """Write one canonical, indexed HDF5 covariance partition.
@@ -202,7 +223,13 @@ def write_covariance_partition_hdf5(
     duplicate pairs. This avoids the defensive sort/dedup allocations used for
     generic callers and is intended for ``calc_covariance()``, whose pairwise
     kernel emits unique rows in sorted SNP-index order.
+
+    ``shrink_ld_precision`` (``"float64"`` or ``"float32"``) controls the
+    on-disk dtype of ``covariance/shrink_ld`` and ``index/diag_val`` -- every
+    reader upcasts back to float64 in memory, so this is transparent to every
+    downstream consumer.
     """
+    shrink_dtype = _shrink_ld_dtype(shrink_ld_precision)
     meta_inputs = [
         values
         for values in (naive_ld, i_gpos, j_gpos, i_id, j_id)
@@ -250,6 +277,7 @@ def write_covariance_partition_hdf5(
         if end is not None:
             h5.attrs["end"] = int(end)
         h5.attrs["position_dtype"] = str(lo.dtype)
+        h5.attrs["shrink_ld_dtype"] = str(shrink_dtype)
         h5.attrs["sorted_by"] = "lo_hi"
         h5.attrs["deduplicated"] = True
         h5.attrs["compact"] = naive is None and ig is None and iid is None
@@ -259,7 +287,7 @@ def write_covariance_partition_hdf5(
         kwargs = {**_dataset_compression_kwargs(compression), "shuffle": True}
         cov.create_dataset("lo", data=lo, **kwargs)
         cov.create_dataset("hi", data=hi, **kwargs)
-        cov.create_dataset("shrink_ld", data=shrink, **kwargs)
+        cov.create_dataset("shrink_ld", data=shrink, dtype=shrink_dtype, **kwargs)
         if naive is not None:
             cov.create_dataset(
                 "naive_ld",
@@ -298,7 +326,7 @@ def write_covariance_partition_hdf5(
             )
 
         idx.create_dataset("diag_pos", data=diag_pos, **kwargs)
-        idx.create_dataset("diag_val", data=diag_val, **kwargs)
+        idx.create_dataset("diag_val", data=diag_val, dtype=shrink_dtype, **kwargs)
         idx.create_dataset("lo_values", data=lo_values, **kwargs)
         idx.create_dataset("lo_offsets", data=lo_offsets, **kwargs)
 
@@ -313,6 +341,7 @@ def write_compact_covariance_partition_hdf5_chunks(
     start: int | None = None,
     end: int | None = None,
     compression: str | None = "zstd",
+    shrink_ld_precision: str = "float64",
     chunk_rows: int = 1_000_000,
     dataset_chunk_rows: int = HDF5_DATASET_CHUNK_ROWS,
 ) -> None:
@@ -321,7 +350,9 @@ def write_compact_covariance_partition_hdf5_chunks(
     This is the compact-cache writer used by ``calc_covariance()``. It avoids
     materializing full-partition ``i_pos``/``j_pos`` arrays while preserving the
     same HDF5 schema and ``lo_offsets`` index as ``write_covariance_partition_hdf5``.
+    See that function's docstring for ``shrink_ld_precision``.
     """
+    shrink_dtype = _shrink_ld_dtype(shrink_ld_precision)
     positions = _position_array(positions)
     row_counts = np.asarray(row_counts, dtype=np.int64)
     if positions.shape != row_counts.shape:
@@ -359,6 +390,7 @@ def write_compact_covariance_partition_hdf5_chunks(
         if end is not None:
             h5.attrs["end"] = int(end)
         h5.attrs["position_dtype"] = str(position_dtype)
+        h5.attrs["shrink_ld_dtype"] = str(shrink_dtype)
         h5.attrs["sorted_by"] = "lo_hi"
         h5.attrs["deduplicated"] = True
         h5.attrs["compact"] = True
@@ -371,7 +403,7 @@ def write_compact_covariance_partition_hdf5_chunks(
             cov.create_dataset("lo", data=np.array([], dtype=position_dtype), **kwargs)
             cov.create_dataset("hi", data=np.array([], dtype=position_dtype), **kwargs)
             cov.create_dataset(
-                "shrink_ld", data=np.array([], dtype=np.float64), **kwargs
+                "shrink_ld", data=np.array([], dtype=shrink_dtype), **kwargs
             )
         else:
             dataset_kwargs = {
@@ -382,7 +414,7 @@ def write_compact_covariance_partition_hdf5_chunks(
             lo_ds = cov.create_dataset("lo", dtype=position_dtype, **dataset_kwargs)
             hi_ds = cov.create_dataset("hi", dtype=position_dtype, **dataset_kwargs)
             shrink_ds = cov.create_dataset(
-                "shrink_ld", dtype=np.float64, **dataset_kwargs
+                "shrink_ld", dtype=shrink_dtype, **dataset_kwargs
             )
 
             for chunk in row_chunks:
@@ -426,9 +458,9 @@ def write_compact_covariance_partition_hdf5_chunks(
             else np.array([], dtype=position_dtype)
         )
         diag_val = (
-            np.concatenate(diag_val_parts).astype(np.float64, copy=False)
+            np.concatenate(diag_val_parts).astype(shrink_dtype, copy=False)
             if diag_val_parts
-            else np.array([], dtype=np.float64)
+            else np.array([], dtype=shrink_dtype)
         )
         idx.create_dataset("diag_pos", data=diag_pos, **kwargs)
         idx.create_dataset("diag_val", data=diag_val, **kwargs)
@@ -445,10 +477,15 @@ def write_compact_covariance_partition_hdf5_append(
     start: int | None = None,
     end: int | None = None,
     compression: str | None = "zstd",
+    shrink_ld_precision: str = "float64",
     chunk_rows: int = 1_000_000,
     dataset_chunk_rows: int = HDF5_DATASET_CHUNK_ROWS,
 ) -> int:
-    """Write compact canonical rows from a bounded stream in one generation pass."""
+    """Write compact canonical rows from a bounded stream in one generation pass.
+
+    See ``write_covariance_partition_hdf5``'s docstring for ``shrink_ld_precision``.
+    """
+    shrink_dtype = _shrink_ld_dtype(shrink_ld_precision)
     positions = _position_array(positions)
     h5py = _h5py()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,6 +516,7 @@ def write_compact_covariance_partition_hdf5_append(
         if end is not None:
             h5.attrs["end"] = int(end)
         h5.attrs["position_dtype"] = str(position_dtype)
+        h5.attrs["shrink_ld_dtype"] = str(shrink_dtype)
         h5.attrs["sorted_by"] = "lo_hi"
         h5.attrs["deduplicated"] = True
         h5.attrs["compact"] = True
@@ -490,7 +528,7 @@ def write_compact_covariance_partition_hdf5_append(
         lo_ds = cov.create_dataset("lo", dtype=position_dtype, **dataset_kwargs)
         hi_ds = cov.create_dataset("hi", dtype=position_dtype, **dataset_kwargs)
         shrink_ds = cov.create_dataset(
-            "shrink_ld", dtype=np.float64, **dataset_kwargs
+            "shrink_ld", dtype=shrink_dtype, **dataset_kwargs
         )
 
         for chunk in row_chunks:
@@ -543,9 +581,9 @@ def write_compact_covariance_partition_hdf5_append(
             else np.array([], dtype=position_dtype)
         )
         diag_val = (
-            np.concatenate(diag_val_parts).astype(np.float64, copy=False)
+            np.concatenate(diag_val_parts).astype(shrink_dtype, copy=False)
             if diag_val_parts
-            else np.array([], dtype=np.float64)
+            else np.array([], dtype=shrink_dtype)
         )
         nonzero_lo = row_counts > 0
         lo_values = positions[nonzero_lo].astype(np.int64, copy=False)

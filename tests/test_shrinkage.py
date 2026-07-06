@@ -410,6 +410,72 @@ def test_calc_covariance_lzf_override_matches_zstd_default(tmp_path: Path) -> No
     np.testing.assert_allclose(zstd_rows.shrink_ld, lzf_rows.shrink_ld)
 
 
+def test_calc_covariance_float32_precision_rounds_shrink_ld_on_disk(
+    tmp_path: Path,
+) -> None:
+    """shrink_ld_precision="float32" must round shrink_ld/diag_val to float32
+    precision on disk (verified via h5py directly), without ever moving a real
+    breakpoint-relevant value by more than float32 rounding error, and every
+    reader must still hand back float64 arrays."""
+    import h5py
+
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    f64_path = tmp_path / "f64.h5"
+    f32_path = tmp_path / "f32.h5"
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=f64_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+    calc_covariance(
+        vcf_stream=_vcf_stream(),
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=f32_path,
+        cutoff=1e-7,
+        compact_output=True,
+        shrink_ld_precision="float32",
+    )
+
+    with h5py.File(f32_path, "r") as h5:
+        assert h5["covariance/shrink_ld"].dtype == np.float32
+        assert h5["index/diag_val"].dtype == np.float32
+    with h5py.File(f64_path, "r") as h5:
+        assert h5["covariance/shrink_ld"].dtype == np.float64
+
+    with open_covariance_reader(f64_path, 100, 300) as reader:
+        f64_rows = reader.read_all()
+    with open_covariance_reader(f32_path, 100, 300) as reader:
+        f32_rows = reader.read_all()
+        f32_diag_pos, f32_diag_val = reader.read_diagonal()
+
+    assert f32_rows.shrink_ld.dtype == np.float64  # reader always upcasts
+    np.testing.assert_array_equal(f64_rows.lo, f32_rows.lo)
+    np.testing.assert_array_equal(f64_rows.hi, f32_rows.hi)
+    np.testing.assert_allclose(
+        f32_rows.shrink_ld,
+        f64_rows.shrink_ld.astype(np.float32).astype(np.float64),
+        rtol=0,
+        atol=0,
+    )
+    # diag_val must match the identical (lo == hi) row in shrink_ld exactly --
+    # both encode the same logical value and must round the same way.
+    diag_from_rows = {
+        int(lo): float(val)
+        for lo, hi, val in zip(f32_rows.lo, f32_rows.hi, f32_rows.shrink_ld)
+        if lo == hi
+    }
+    for pos, val in zip(f32_diag_pos, f32_diag_val):
+        assert diag_from_rows[int(pos)] == float(val)
+
+
 def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
     hap_mat = np.array(
         [
