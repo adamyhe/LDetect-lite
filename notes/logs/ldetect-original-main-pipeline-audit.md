@@ -1,5 +1,7 @@
 # ldetect_original Main Pipeline Audit
 
+**Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
+
 ## Historical background: fp64/high-precision concordance & legacy-downstream diagnostics (2026-05-06 to 2026-06-21)
 
 Folded in from the retired `ldetect-original-concordance.md` (superseded as a
@@ -745,7 +747,7 @@ If this substitution meaningfully shifted boundary placement, ASN should show
 some symptom too — it shows none. No further action; not a candidate root
 cause, but worth documenting since nobody had actually checked `ldetect2`'s
 own behavior here before (only speculated about it, in
-`notes/local-search-divergence-asn22.md`).
+`notes/logs/local-search-divergence-asn22.md`).
 
 ### EUR sample list — definitively confirmed correct, byte-for-byte
 
@@ -1264,7 +1266,7 @@ source) or a substantially different investigative angle — not more
 diagnostics of the kind already run. Rather than continue indefinitely,
 this is being accepted as a known, documented, low-priority residual
 divergence so the branch can merge and attention can move to other issues.
-See `notes/ldetect-original-handoff.md` for the condensed status this
+See `notes/findings/ldetect-original-reproduction.md` for the condensed status this
 decision is based on, and the "If this is picked up again" section there for
 the concrete next steps (AFR chr22 precision/legacy-downstream confirmation,
 then the still-open Tier 1 hidden-assumption items) if new evidence or

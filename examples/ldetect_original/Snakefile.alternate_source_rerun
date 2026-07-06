@@ -3,7 +3,7 @@
 Every "cheap" upstream-input hypothesis for why EUR chr8-12 and AFR
 chr11/chr22 fail to exactly reproduce the published Berisa & Pickrell (2016)
 LD blocks has been ruled out by sampling-based diagnostics (see
-notes/ldetect-original-main-pipeline-audit.md): VCF release-version
+notes/logs/ldetect-original-main-pipeline-audit.md): VCF release-version
 provenance (both which positions are called and actual phasing-sensitive LD),
 SNP-only vs. all-variant filtering, genetic map family, and
 duplicate-position/cross-partition handling in ldetect2 itself.
@@ -281,13 +281,13 @@ rule run_ldetect2_alt_source:
         timing=str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.timing.log"),
     benchmark:
         str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.benchmark.tsv")
-    threads: config["cov_workers"]
+    threads: config["workers"]
     params:
         output_dir=str(ALT_RESULTS / "{source}" / "{population}" / "{chrom}"),
         log_dir=str(ALT_RESULTS / "logs" / "{source}" / "{population}"),
         ne=lambda wc: pop_ne(wc.population),
         cutoff=config["cov_cutoff"],
-        cov_workers=config["cov_workers"],
+        workers=config["workers"],
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
@@ -307,7 +307,7 @@ rule run_ldetect2_alt_source:
             --covariance-cache {params.covariance_cache} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
-            --workers {params.cov_workers} \
+            --workers {params.workers} \
             --local-search-workers {params.local_search_workers} \
             > {log.run} 2>&1
         """

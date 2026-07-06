@@ -17,7 +17,7 @@ Pipeline steps:
        direct port of MacDonald's R interpolation scripts and should match
        their published maps almost exactly, while --mode point (the prior
        default) reproduces the interval-shift bug those scripts fixed -- see
-       notes/macdonald2022-interpolation-port.md
+       notes/logs/macdonald2022-interpolation-port.md
     3  LD block detection per chromosome (ldetect2 run)
     4  Post-processing: centromere removal + small block merging
     5  Genome-wide BED assembly (cat all chromosomes)
@@ -95,7 +95,7 @@ def block_set_maf_filter(block_set):
     """'nref' (default, matches MacDonald's literal bcftools command) or
     'minor' (true minor-allele-frequency filtering, matching MacDonald's
     README prose rather than their script -- see
-    notes/macdonald2022-pyrho-handoff.md for why this is worth testing).
+    notes/logs/macdonald2022-pyrho-handoff.md for why this is worth testing).
     """
     return config["block_sets"][block_set].get("maf_filter", "nref")
 
@@ -376,7 +376,7 @@ rule interpolate_map:
 # can quantify the interpolation bug --mode interval fixed: feeding
 # convert_decode_map.py's interval-rate rows into point-based interpolation
 # uses the *next* interval's rate for SNPs in the *current* interval. See
-# notes/macdonald2022-interpolation-port.md.
+# notes/logs/macdonald2022-interpolation-port.md.
 rule interpolate_map_point:
     input:
         snps=rules.extract_snp_positions.output[0],
@@ -421,7 +421,7 @@ rule run_ldetect2:
         str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.benchmark.tsv")
     wildcard_constraints:
         block_set=BLOCK_SET_PATTERN,
-    threads: config["cov_workers"]
+    threads: config["workers"]
     params:
         output_dir=str(RESULTS / "{block_set}" / "chr{chrom}"),
         log_dir=str(RESULTS / "logs" / "{block_set}"),
@@ -574,7 +574,7 @@ rule compare_maps:
 # the two map_ref_comparison*.tsv files can be diffed directly: interval
 # mode's MAE should collapse to ~0 while point mode reproduces the
 # previously measured 0.0013-0.0026 cM error. See
-# notes/macdonald2022-interpolation-port.md.
+# notes/logs/macdonald2022-interpolation-port.md.
 rule compare_maps_point_mode:
     input:
         expand(

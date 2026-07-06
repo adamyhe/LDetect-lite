@@ -21,10 +21,9 @@ tolerance: 0
 # inside each mode's `ldetect2 run` invocation, not which modes run
 # concurrently (see ldetect2_job_threads below).
 covariance_cache: compact
-cov_workers: 4
-local_search_workers: 1
+workers: 4
 
 # Snakemake scheduling guard: this rule claims many threads so `--cores 8`
 # still runs only one heavy chromosome x mode job at a time. ldetect2 itself
-# still receives cov_workers/local_search_workers above.
+# still receives workers/local_search_workers above.
 ldetect2_job_threads: 4

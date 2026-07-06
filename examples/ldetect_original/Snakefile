@@ -215,13 +215,13 @@ rule run_ldetect2:
         timing=str(RESULTS / "logs" / "{population}" / "{chrom}.timing.log"),
     benchmark:
         str(RESULTS / "logs" / "{population}" / "{chrom}.benchmark.tsv")
-    threads: config.get("ldetect2_job_threads", config["cov_workers"])
+    threads: config.get("ldetect2_job_threads", config["workers"])
     params:
         output_dir=str(RESULTS / "{population}" / "{chrom}"),
         log_dir=str(RESULTS / "logs" / "{population}"),
         ne=lambda wc: pop_ne(wc.population),
         cutoff=config["cov_cutoff"],
-        cov_workers=config["cov_workers"],
+        workers=config["workers"],
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
@@ -241,7 +241,7 @@ rule run_ldetect2:
             --covariance-cache {params.covariance_cache} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
-            --workers {params.cov_workers} \
+            --workers {params.workers} \
             --local-search-workers {params.local_search_workers} \
             > {log.run} 2>&1
         """

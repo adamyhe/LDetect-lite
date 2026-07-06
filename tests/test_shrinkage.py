@@ -201,7 +201,7 @@ def test_calc_covariance_duplicate_position_matches_first_encountered_variant(
     """The duplicate-position dedup must behave like keeping only the first
     VCF-encountered variant, matching the legacy reference's effective
     first-write-wins matrix-insert semantics (see
-    notes/ldetect-original-main-pipeline-audit.md)."""
+    notes/logs/ldetect-original-main-pipeline-audit.md)."""
     map_path = tmp_path / "map.gz"
     _write_map(map_path)
     individuals_path = tmp_path / "inds.txt"

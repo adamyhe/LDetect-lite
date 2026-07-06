@@ -1,5 +1,7 @@
 # MacDonald2022 Boundary Diagnostics
 
+**Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
+
 Run commands from:
 
 ```bash

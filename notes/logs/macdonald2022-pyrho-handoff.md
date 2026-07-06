@@ -1,5 +1,7 @@
 # MacDonald2022 pyrho Handoff
 
+**Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
+
 Last updated: 2026-07-05
 
 ## Goal
@@ -179,7 +181,7 @@ Worst by fraction of `ours_to_ref` boundaries within 50 kb:
 first target per the plan above. The mechanism is now well-evidenced; the
 remaining root cause converges with the already-parked
 `ldetect-original-reproduction` investigation (see
-`notes/ldetect-original-handoff.md`), which never resolved it either.
+`notes/findings/ldetect-original-reproduction.md`), which never resolved it either.
 
 ### The mechanism
 
@@ -233,7 +235,7 @@ budget matches exactly — the divergence is about *where* the same ~59
 breakpoints land, not how many there are.
 
 That points to the same mechanism already identified (and left unresolved)
-in `notes/ldetect-original-handoff.md`: with a single global Hanning-filter
+in `notes/findings/ldetect-original-reproduction.md`: with a single global Hanning-filter
 width applied across the whole chromosome, a small numerical difference
 upstream (covariance computation, float-vs-Decimal precision, or a handful
 of SNPs differing between our VCF filtering and MacDonald's) can shift which
@@ -293,7 +295,7 @@ locally — see step 6 below).
 ### Why almost nothing is exact anywhere (2026-07-03) — this differs sharply from `ldetect_original`
 
 The user asked directly: unlike `ldetect_original` (near-exact genome-wide,
-per `notes/ldetect-original-handoff.md`), MacDonald pyrho reproduction has
+per `notes/findings/ldetect-original-reproduction.md`), MacDonald pyrho reproduction has
 **no chromosome anywhere close to 100% exact** — per-chromosome exact-match
 rates range ~29%–96% for both AFR and EAS, with most clustering around
 80–90%. Overall: AFR 17.8% non-exact (288/1621 boundaries), EAS 20.8%
@@ -494,7 +496,7 @@ differences") explains the razor-thin margins. Investigated four angles:
    mean the algorithm is maximally sensitive to tiny input differences by
    construction.
 3. **A real historical bug, now confirmed fixed on real data.**
-   `notes/local-search-divergence-asn22.md` (2026-04-30) documents a
+   `notes/logs/local-search-divergence-asn22.md` (2026-04-30) documents a
    serious past bug: an earlier array-backed local-search precompute used a
    different effective locus list than the legacy dictionary path in
    multi-partition windows (down to 2/19 exact matches on ASN chr22 at the
@@ -864,9 +866,15 @@ legacy's exactly — converges with the already-parked, unresolved
 `ldetect-original-reproduction` "flat region" finding. Not resolved further
 this session; do not re-open without a new lead (e.g. an actual chr9
 pipeline rerun with precision/VCF-parity comparisons, mirroring the approach
-in `notes/ldetect-original-handoff.md`).
+in `notes/findings/ldetect-original-reproduction.md`).
 
 ### 5. Keep deCODE notes separate — diagnosed 2026-07-05, root cause found
+
+The root-cause investigation for the *interpolation* half of this bug (the
+off-by-one interval-vs-point interpolation bug in
+`src/ldetect2/interpolate_maps.py`, independent of the map-source-switch
+workaround below) has its own full writeup in
+`notes/logs/macdonald2022-interpolation-port.md`.
 
 deCODE `EUR` raw and final are identical, and its mismatch is not fixed by
 postprocessing changes (11.5% exact boundaries, 0.63 mean recall — much

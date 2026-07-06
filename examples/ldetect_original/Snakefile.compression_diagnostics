@@ -178,13 +178,13 @@ rule compression_run_ldetect2:
         timing=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
     benchmark:
         str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
-    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
     params:
         output_dir=lambda wc: str(COMPRESSION_ROOT / wc.population / wc.chrom / wc.mode),
         log_dir=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs"),
         ne=lambda wildcards: pop_ne(wildcards.population),
         cutoff=config["cov_cutoff"],
-        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -209,7 +209,7 @@ rule compression_run_ldetect2:
             --covariance-compression {params.compression} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
-            --workers {params.cov_workers} \
+            --workers {params.workers} \
             --local-search-workers {params.local_search_workers} \
             > {log.run} 2>&1
         """

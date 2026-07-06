@@ -1,5 +1,7 @@
 # ASN chr22 Local-Search Divergence Notes
 
+**Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
+
 Date: 2026-04-30
 
 ## Context

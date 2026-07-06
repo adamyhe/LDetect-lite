@@ -120,37 +120,42 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         type=int,
         default=1,
         metavar="N",
-        help="Parallel workers for covariance calculation (default: 1).",
+        help=(
+            "Parallel workers for the pipeline; used directly for covariance "
+            "calculation (Step 2) and as the default for --matrix-workers, "
+            "--local-search-workers, and --metric-workers when those are not "
+            "set explicitly (default: 1)."
+        ),
     )
     p.add_argument(
         "--local-search-workers",
         type=int,
-        default=1,
+        default=None,
         metavar="N",
         help=(
             "Parallel workers for local search. Higher values may multiply "
             "memory use because each worker loads its own covariance window "
-            "(default: 1)."
+            "(default: inherit --workers)."
         ),
     )
     p.add_argument(
         "--matrix-workers",
         type=int,
-        default=1,
+        default=None,
         metavar="N",
         help=(
             "Parallel workers for Step 3 matrix-to-vector partition computation "
-            "(default: 1)."
+            "(default: inherit --workers)."
         ),
     )
     p.add_argument(
         "--metric-workers",
         type=int,
-        default=1,
+        default=None,
         metavar="N",
         help=(
             "Parallel workers for Step 4 streaming metric row passes "
-            "(default: 1)."
+            "(default: inherit --workers)."
         ),
     )
     p.add_argument(
@@ -209,6 +214,11 @@ def _calc_partition(
         )
     tabix_proc.wait()
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
+
+
+def _resolve_workers(explicit: int | None, default: int) -> int:
+    """Resolve a per-stage worker override, falling back to --workers."""
+    return default if explicit is None else explicit
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -314,21 +324,29 @@ def _run(args: argparse.Namespace) -> int:
     snp_first = partitions[0][0]
     snp_last = partitions[-1][1]
 
+    matrix_workers = _resolve_workers(args.matrix_workers, args.workers)
+    local_search_workers = _resolve_workers(args.local_search_workers, args.workers)
+    metric_workers = _resolve_workers(args.metric_workers, args.workers)
+
     # ------------------------------------------------------------------ #
     # Step 3: Matrix → vector                                             #
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
-    log_msg("Step 3: Converting matrix to vector")
+    log_msg(f"Step 3: Converting matrix to vector (workers={matrix_workers})")
     log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
-    analysis.calc_diag_lean(vector_path, matrix_workers=args.matrix_workers)
+    analysis.calc_diag_lean(vector_path, matrix_workers=matrix_workers)
     log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #
     # Step 4: Find minima                                                 #
     # ------------------------------------------------------------------ #
     breakpoints_path = output_dir / f"breakpoints-{chrom}.json"
-    log_msg("Step 4: Finding breakpoints")
+    log_msg(
+        "Step 4: Finding breakpoints "
+        f"(local_search_workers={local_search_workers}, "
+        f"metric_workers={metric_workers})"
+    )
     log_memory_checkpoint("step4_start")
     find_breakpoints(
         input_path=vector_path,
@@ -336,8 +354,8 @@ def _run(args: argparse.Namespace) -> int:
         store=store,
         n_snps_bw_bpoints=args.n_snps_bw_bpoints,
         output_path=breakpoints_path,
-        workers=args.local_search_workers,
-        metric_workers=args.metric_workers,
+        workers=local_search_workers,
+        metric_workers=metric_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
         subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),

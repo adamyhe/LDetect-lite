@@ -1,5 +1,7 @@
 # Post-Covariance Optimization Review
 
+**Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
+
 Date: 2026-05-03
 
 ## Context

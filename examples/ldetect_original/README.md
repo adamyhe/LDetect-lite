@@ -162,17 +162,17 @@ uv run snakemake -s Snakefile.diagnostics --cores 4 \
 
 By default, each diagnostic `ldetect2 run` job claims
 `ldetect2_job_threads: 4` Snakemake cores and passes up to
-`cov_workers: 4` to `ldetect2 --workers`. Local search is defensively capped
+`workers: 4` to `ldetect2 --workers`. Local search is defensively capped
 at one worker in this diagnostic workflow to avoid multiplying memory use.
 With `--cores 4`, chromosomes run one at a time. To run multiple chromosomes
-concurrently instead, use one internal covariance worker per chromosome and
+concurrently instead, use one internal worker per chromosome and
 give Snakemake more cores:
 
 ```bash
 uv run snakemake -s Snakefile.diagnostics --cores 4 \
   --config chromosomes='[8,9,10,11,12,13]' \
            population=EUR \
-           cov_workers=1 \
+           workers=1 \
            ldetect2_job_threads=1
 ```
 
@@ -259,7 +259,7 @@ uv run snakemake -s Snakefile.legacy_diagnostics --cores 1 \
 ```
 
 `legacy_diagnostics.yaml` keeps `local_search_workers` conservative. Raising
-`cov_workers` or `local_search_workers` can spawn multiple large
+`workers` or `local_search_workers` can spawn multiple large
 covariance/local-search processes inside a single chromosome job; raising
 `--cores` can also allow Snakemake to run multiple chromosome jobs at once
 unless `ldetect2_job_threads` claims the cores for each heavy job. Staging

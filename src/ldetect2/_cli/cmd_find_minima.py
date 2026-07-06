@@ -89,11 +89,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     p.add_argument(
         "--metric-workers",
         type=int,
-        default=1,
+        default=None,
         metavar="N",
         help=(
             "Parallel workers for streaming metric row passes "
-            "(default: 1)."
+            "(default: inherit --workers)."
         ),
     )
     p.add_argument(
@@ -123,8 +123,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
+    from ldetect2._cli.cmd_run import _resolve_workers
     from ldetect2.io.partitions import CovarianceStore
     from ldetect2.pipeline import find_breakpoints
+
+    metric_workers = _resolve_workers(args.metric_workers, args.workers)
 
     store = CovarianceStore(root=args.dataset_path)
     find_breakpoints(
@@ -139,7 +142,7 @@ def _run(args: argparse.Namespace) -> int:
         trackback_step=args.trackback_step,
         init_search_location=args.init_search_loc,
         workers=args.workers,
-        metric_workers=args.metric_workers,
+        metric_workers=metric_workers,
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
         subsets=set(args.subset) if args.subset else None,

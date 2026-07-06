@@ -10,6 +10,7 @@ import numpy as np
 from ldetect2._cli.cmd_run import (
     _breakpoint_subsets_for_run,
     _is_valid_covariance_partition,
+    _resolve_workers,
     register,
 )
 from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
@@ -94,3 +95,19 @@ def test_covariance_compression_defaults_to_zstd() -> None:
 def test_covariance_compression_accepts_lzf() -> None:
     args = _parse_run_args(["--covariance-compression", "lzf"])
     assert args.covariance_compression == "lzf"
+
+
+def test_stage_workers_default_to_none_and_inherit_shared_workers() -> None:
+    args = _parse_run_args(["--workers", "4"])
+    assert args.matrix_workers is None
+    assert args.local_search_workers is None
+    assert args.metric_workers is None
+    assert _resolve_workers(args.matrix_workers, args.workers) == 4
+    assert _resolve_workers(args.local_search_workers, args.workers) == 4
+    assert _resolve_workers(args.metric_workers, args.workers) == 4
+
+
+def test_stage_worker_override_takes_precedence_over_shared_workers() -> None:
+    args = _parse_run_args(["--workers", "4", "--local-search-workers", "1"])
+    assert _resolve_workers(args.matrix_workers, args.workers) == 4
+    assert _resolve_workers(args.local_search_workers, args.workers) == 1

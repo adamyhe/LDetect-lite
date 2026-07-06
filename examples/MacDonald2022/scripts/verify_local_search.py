@@ -2,7 +2,7 @@
 curve across its search window, not just the reported optimum.
 
 Motivation: for several "Category B" MacDonald2022 pyrho boundary mismatches
-(see notes/macdonald2022-pyrho-handoff.md), the raw Hanning-filter stage finds
+(see notes/logs/macdonald2022-pyrho-handoff.md), the raw Hanning-filter stage finds
 a candidate very close to the published reference boundary, but local search
 then refines it away to a worse position. This script reproduces the exact
 LocalSearch computation (using the real total_sum/total_n stored in the

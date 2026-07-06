@@ -1,7 +1,7 @@
 # Config for Snakefile.alternate_source_rerun.
 #
 # Chromosomes currently failing to exactly reproduce the published reference
-# (notes/ldetect-original-main-pipeline-audit.md summary table, 2026-07-02).
+# (notes/logs/ldetect-original-main-pipeline-audit.md summary table, 2026-07-02).
 # chr13 (both populations) is the exact-match control and is intentionally
 # excluded here — its v3 baseline already reproduces exactly, so there is
 # nothing to test by rerunning it.

@@ -1,10 +1,11 @@
 # deCODE map interpolation: root cause + fix (2026-07-05)
 
+**Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
+
 ## Context
 
 The MacDonald2022 pyrho/deCODE investigation (full writeup in
-`notes/macdonald2022-pyrho-handoff.md`, which lives on the
-`covariance-streaming` branch, not this one) previously found that our
+`notes/logs/macdonald2022-pyrho-handoff.md`) previously found that our
 own recomputed deCODE genetic map disagreed with MacDonald's published
 `deCODE_interpolated_maps` by a mean absolute error of 0.0013-0.0026 cM
 per chromosome (`map_ref_comparison.tsv`). The workaround at the time was
@@ -135,9 +136,8 @@ warranted.
 reference almost exactly; the tiny remaining residual is not an
 algorithmic issue and not worth chasing further without new evidence.
 
-## Not yet done
+## Cross-reference
 
-Cross-referencing this finding into `notes/macdonald2022-pyrho-handoff.md`
-on the `covariance-streaming` branch — that branch wasn't touched here per
-the "don't port/diff code across branches" guidance; whoever next works on
-that branch/notes file should add a pointer back to this one.
+`notes/logs/macdonald2022-pyrho-handoff.md` (Suggested Next Steps, item 5)
+now points back to this doc — both files live in the same tree as of the
+`notes/` reorganization.

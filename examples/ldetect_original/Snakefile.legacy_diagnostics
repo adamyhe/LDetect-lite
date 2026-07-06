@@ -198,13 +198,13 @@ rule legacy_run_ldetect2_full:
         timing=str(
             LEGACY_ROOT / "{population}" / "{chrom}" / "logs" / "ldetect2_full.timing.log"
         ),
-    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
     params:
         output_dir=ldetect2_dir,
         log_dir=str(LEGACY_ROOT / "{population}" / "{chrom}" / "logs"),
         ne=lambda wildcards: pop_ne(wildcards.population),
         cutoff=config["cov_cutoff"],
-        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -227,7 +227,7 @@ rule legacy_run_ldetect2_full:
             --covariance-cache {params.covariance_cache} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
-            --workers {params.cov_workers} \
+            --workers {params.workers} \
             --local-search-workers {params.local_search_workers} \
             > {log.run} 2>&1
         """

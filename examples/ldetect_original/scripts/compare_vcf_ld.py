@@ -125,7 +125,7 @@ def read_phased_haplotypes(
     emits all of them. This keeps only the *first* one per position, in
     on-disk file order, matching how ``ldetect2.shrinkage.calc_covariance``
     resolves the same situation when it streams a VCF (see
-    notes/ldetect-original-main-pipeline-audit.md, "Duplicate-position /
+    notes/logs/ldetect-original-main-pipeline-audit.md, "Duplicate-position /
     cross-partition equivalence"). A plain last-write-wins dict assignment
     here previously let the record order of duplicate-position sites (which
     can differ between VCF releases and between the "all"/"snps" filtered

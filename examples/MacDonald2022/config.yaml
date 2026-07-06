@@ -59,7 +59,7 @@ block_sets:
   # minor-allele-frequency (--min-af 0.01:minor) instead of bcftools'
   # nref-frequency default -- testing whether MacDonald's README prose
   # ("MAF>0.01") was the intended filter, even though their actual script
-  # doesn't specify :minor. See notes/macdonald2022-pyrho-handoff.md.
+  # doesn't specify :minor. See notes/logs/macdonald2022-pyrho-handoff.md.
   # Deliberately not in active_block_sets -- request explicitly, e.g.:
   #   uv run snakemake --cores N \
   #     results/pyrho_EAS_minormaf_LD_blocks.bed \
@@ -96,11 +96,12 @@ subset: fourier_ls
 # n_snps_bw_bpoints argument. Use SNP spacing rather than stale reference-BED
 # breakpoint-count targeting.
 n_snps_bw_bpoints: 7000
-# Parallel workers for covariance calculation within each chromosome job.
-# Set to the number of partitions per chromosome (~40 for human autosomes).
-# Snakemake will reserve this many cores per job, so total cores used =
-# (simultaneous chromosome jobs) × cov_workers.
-cov_workers: 16
+# Parallel workers for the ldetect2 pipeline within each chromosome job
+# (covariance calculation, matrix-to-vector, local search, and metric
+# scoring all default to this value). Set to the number of partitions per
+# chromosome (~40 for human autosomes). Snakemake will reserve this many
+# cores per job, so total cores used = (simultaneous chromosome jobs) × workers.
+workers: 4
 
 # Post-processing
 min_snps_per_block: 100

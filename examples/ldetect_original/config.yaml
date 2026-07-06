@@ -25,8 +25,7 @@ cov_cutoff: 0.0000001
 covariance_cache: compact
 n_snps_bw_bpoints: 10000
 subset: fourier_ls
-cov_workers: 4
-local_search_workers: 1
+workers: 4
 
 # Post-processing
 min_snps_per_block: 0   # original ldetect does not merge small blocks

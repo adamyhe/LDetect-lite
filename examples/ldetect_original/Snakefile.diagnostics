@@ -272,13 +272,13 @@ rule diagnostic_run_ldetect2:
     log:
         run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2.log"),
         timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing.log"),
-    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
     params:
         output_dir=diag_run_dir,
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
         ne=pop_ne(DIAG_POP),
         cutoff=config["cov_cutoff"],
-        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -302,7 +302,7 @@ rule diagnostic_run_ldetect2:
             --covariance-cache {params.covariance_cache} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
-            --workers {params.cov_workers} \
+            --workers {params.workers} \
             --local-search-workers {params.local_search_workers} \
             {params.high_precision} \
             > {log.run} 2>&1
@@ -374,13 +374,13 @@ rule diagnostic_run_ldetect2_omni:
     log:
         run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2_omni.log"),
         timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing_omni.log"),
-    threads: config.get("ldetect2_job_threads", config.get("cov_workers", 4))
+    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
     params:
         output_dir=lambda wc: str(DIAG_ROOT / str(wc.chrom) / "omni_run"),
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
         ne=pop_ne(DIAG_POP),
         cutoff=config["cov_cutoff"],
-        cov_workers=lambda wildcards, threads: min(config.get("cov_workers", 4), threads),
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config.get("subset", "fourier_ls"),
@@ -404,7 +404,7 @@ rule diagnostic_run_ldetect2_omni:
             --covariance-cache {params.covariance_cache} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
-            --workers {params.cov_workers} \
+            --workers {params.workers} \
             --local-search-workers {params.local_search_workers} \
             {params.high_precision} \
             > {log.run} 2>&1

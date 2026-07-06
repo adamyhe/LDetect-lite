@@ -1,6 +1,8 @@
 # Performance Optimizations
 
-This document summarises the performance improvements applied to `ldetect2` since the initial implementation. This is meant to be a human-readable summary of the major implemented optimizations. Agent-facing notes, future implementation plans, and historical notes should go in other docs.
+**Human-oriented reference.** This documents completed, shipped performance work only, for readers who want to understand *why* the pipeline is fast. It is not a task list or a log — in-progress investigation notes and design history live under `notes/logs/`; distilled current-status findings live under `notes/findings/`.
+
+This document summarises the performance improvements applied to `ldetect2` since the initial implementation.
 
 ---
 
@@ -151,3 +153,15 @@ while curr_locus <= end_locus:
     ...
     if x in matrix and y in matrix[x]:
 ```
+
+---
+
+## 9. zstd covariance compression (`io/covariance_hdf5.py`)
+
+**Affected code:** `write_covariance_partition_hdf5`, `write_compact_covariance_partition_hdf5_chunks`/`_append` in `src/ldetect2/io/covariance_hdf5.py`
+
+`shrink_ld` dominates covariance partition storage (82% of file size in measurement) and barely compresses under `lzf` (compression ratio 0.972). Switched the default HDF5 compression codec to `zstd` (via the new `hdf5plugin` dependency), which strictly dominates both `lzf` and `gzip` at full float64 precision — smaller, faster to write, and faster to read, with no tradeoff.
+
+**CLI:** `--covariance-compression {lzf,zstd}` on `ldetect2 run` and `ldetect2 calc-covariance` (default: `zstd`).
+
+**Measured impact:** validated on the full 1000G dataset (22 chromosomes x 3 populations): 66/66 chromosome x population combinations show byte-identical downstream vectors, exact breakpoints, and exact BED boundaries (compression is lossless), a 12.4% covariance-directory size reduction (1000.65 GB -> 876.43 GB), and a 1.2x aggregate wall-clock speedup.

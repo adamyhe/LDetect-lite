@@ -2,7 +2,7 @@
 
 These are the one previously-untested combination flagged during the EUR
 chr8-12/AFR chr11/chr22 reproduction investigation
-(notes/ldetect-original-main-pipeline-audit.md): a duplicate physical VCF
+(notes/logs/ldetect-original-main-pipeline-audit.md): a duplicate physical VCF
 position that also sits inside the overlap zone between two partitions.
 Unlike tests/test_covariance_io.py and tests/test_metric.py's
 divergent-overlap-pair tests (which use hand-typed HDF5 rows), the fixture
