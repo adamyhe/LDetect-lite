@@ -584,6 +584,11 @@ chromosome scale, not just the small regions tested when these were built.
   memory-constrained scenarios (e.g. many chromosomes running concurrently
   under a fixed memory budget) without any further work.
 
+  **Correction (see below): this 5x figure is confounded** — the harness
+  that produced it also pinned `--workers 1` for Step 2/3/metric, which is
+  unrelated to `--local-search-source`. The true recompute-only cost is
+  smaller than 5x by an unknown amount; re-run pending.
+
 **Validation status of the final (`ldetect_original`) location**: DAG
 resolves cleanly in dry-run against a real chromosome config
 (`--config profiling_chromosomes='[21]'`). Not run live from this location
@@ -604,3 +609,36 @@ processes) is a `speed vs. engineering effort` call now, not a `does this
 even matter` call — the 5x gap is large enough that parallelizing across,
 say, 4 workers could plausibly bring `vcf_recompute` close to baseline
 wall-clock while keeping most of its memory advantage.
+
+## Profiling harness confound found: `vcf_recompute`'s 5x included an unrelated Step 2/3/metric slowdown (2026-07-06)
+
+Re-examined the 5x number above before treating it as the true cost of
+on-demand recompute. `Snakefile.priority5_profiling`'s `MODE_WORKERS`
+passed a single top-level `--workers 1` for `vcf_recompute` mode, relying
+on `_resolve_workers`'s fallback to also pin `--matrix-workers`,
+`--metric-workers`, and `--local-search-workers` to 1. But
+`_validate_local_search_source` (`cmd_run.py:299`) only requires
+`--local-search-workers == 1` — Step 2 (covariance calc, which still runs
+unconditionally to build the persisted cache metric computation always
+reads from), Step 3 (matrix→vector), and Step 4's metric pass are all
+untouched by `--local-search-source` and have no reason to be serialized.
+`baseline`/`fused_vector` ran those same stages at `--workers 4`
+(`config.yaml`). So the recorded 538s/544.70s `vcf_recompute` numbers
+conflate two effects: (1) losing 4x parallelism on three pipeline stages
+that have nothing to do with the feature being measured, and (2) the
+actual recompute-specific overhead in local search itself.
+
+Fixed by decoupling the flags: `MODE_WORKERS["vcf_recompute"]` now equals
+`config["workers"]` (same as the other two modes), and `MODE_FLAGS`
+explicitly adds `--local-search-workers 1` alongside
+`--local-search-source vcf-recompute`. Verified via dry-run
+(`-n -p .../vcf_recompute/21-ld-blocks.bed`) that the generated command is
+now `--workers 4 --local-search-source vcf-recompute
+--local-search-workers 1` — Step 2/3/metric run at full parallelism, only
+local search stays serial.
+
+Not yet re-run live (same local `bcftools` blocker as before). Re-running
+this corrected harness is the next step before deciding whether to build
+multi-worker support for the recompute step itself — the previous 5x
+figure is now known to be an overestimate of the true recompute-only cost,
+by an unknown amount until this runs.

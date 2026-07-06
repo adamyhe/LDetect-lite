@@ -21,24 +21,36 @@ Three modes per chromosome, identical filtered input:
     baseline      -- today's default (Step 3 post-hoc vector read, cache-
                      based local search)
     fused_vector  -- --fused-vector only
-    vcf_recompute -- --local-search-source vcf-recompute only, pinned to
-                     --workers 1 (the only validated configuration --
-                     combining it with multiple workers currently raises a
-                     clear error; see _validate_local_search_source in
-                     src/ldetect_lite/_cli/cmd_run.py). baseline/
-                     fused_vector use the configured worker count so their
-                     numbers reflect normal usage.
+    vcf_recompute -- --local-search-source vcf-recompute, with only
+                     --local-search-workers pinned to 1 (the only validated
+                     combination; combining vcf-recompute with
+                     --local-search-workers > 1 currently raises a clear
+                     error, see _validate_local_search_source in
+                     src/ldetect_lite/_cli/cmd_run.py). All three modes now
+                     run with the same top-level --workers -- Step 2
+                     covariance calc, Step 3 matrix-to-vector, and Step 4's
+                     metric pass are all untouched by --local-search-source
+                     and should run at full parallelism regardless of mode.
+                     (An earlier version of this harness pinned
+                     --workers 1 for vcf_recompute -- which also needlessly
+                     serialized those three unrelated stages, inflating the
+                     apparent slowdown with a confound that had nothing to
+                     do with on-demand recompute.)
 
 Every mode must produce byte-identical BED/JSON output to baseline (all
 three are exact, deterministic computations of the same thing) -- checked
 alongside the timing/memory comparison, not assumed.
 
 Open design question this data should answer: is vcf_recompute's per-
-partition recompute overhead (tabix + calc_covariance per breakpoint group)
-enough of the total wall-clock to justify building multi-worker support for
-it (currently unsupported, would need a locking scheme for concurrent
-recompute of a shared temp store)? Check summary.tsv's vcf_recompute row
-against baseline's wall-clock before deciding.
+partition recompute overhead (tabix + calc_covariance per breakpoint group),
+now isolated from Step 2/3/metric parallelism, enough of the total
+wall-clock to justify building multi-worker support for the recompute step
+itself (currently unsupported, would need extending
+_run_local_search's grouped-partition loading to the ProcessPoolExecutor
+path the same way Step 3 fans out compute and serializes the merge/write in
+the parent -- see notes/logs/covariance-cache-redesign-plan.md)? Check
+summary.tsv's vcf_recompute row against baseline's wall-clock before
+deciding.
 
 Usage:
     cd examples/ldetect_original/
@@ -73,15 +85,21 @@ COMPARE_MODES = ["fused_vector", "vcf_recompute"]
 MODE_FLAGS = {
     "baseline": [],
     "fused_vector": ["--fused-vector"],
-    "vcf_recompute": ["--local-search-source", "vcf-recompute"],
+    # --local-search-workers 1 is the hard constraint (see
+    # _validate_local_search_source) -- deliberately NOT expressed by
+    # pinning MODE_WORKERS/--workers below, which would also needlessly
+    # serialize Step 2/3/metric (unrelated to --local-search-source).
+    "vcf_recompute": [
+        "--local-search-source",
+        "vcf-recompute",
+        "--local-search-workers",
+        "1",
+    ],
 }
 MODE_WORKERS = {
     "baseline": config["workers"],
     "fused_vector": config["workers"],
-    # Pinned: vcf-recompute + workers>1 raises a validation error today
-    # (unvalidated combination, see _validate_local_search_source). Not a
-    # config knob -- a hard code constraint, not a profiling choice.
-    "vcf_recompute": 1,
+    "vcf_recompute": config["workers"],
 }
 
 wildcard_constraints:
