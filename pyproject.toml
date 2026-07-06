@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 heatmap = ["matplotlib>=3.7"]
 profiling = ["psutil>=5.9"]
+vcf-benchmark = ["pysam>=0.22", "cyvcf2>=0.31"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
@@ -69,7 +70,7 @@ strict = true
 # None of these ship inline types or stubs (numba/h5py/hdf5plugin have no
 # py.typed marker; scipy.ndimage/scipy.signal stubs are incomplete upstream).
 [[tool.mypy.overrides]]
-module = ["scipy.*", "numba.*", "h5py.*", "hdf5plugin.*"]
+module = ["scipy.*", "numba.*", "h5py.*", "hdf5plugin.*", "pysam.*", "cyvcf2.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

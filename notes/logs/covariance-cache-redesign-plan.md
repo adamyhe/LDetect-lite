@@ -372,3 +372,96 @@ scoped down given local search (priority 5, unstarted) still reads the
 persisted cache directly — quantization needs its own validation harness
 distinguishing vector-level tolerance from final-BED-outcome tolerance, per
 the validation methodology above.
+
+## Priority 5 prototype + VCF backend timing (2026-07-06)
+
+Investigated why a coverage sidecar can't reduce total storage (metric
+computation and local search both still read the shared bulk cache directly
+today) — this reasoning pointed at priority 5 as the actual prerequisite for
+priority 6, not just the next item on the list: it decouples local search
+from cache precision **without adding storage** (recomputes from source VCF,
+which is already on disk for a different reason), unlike any sidecar
+artifact (which duplicates O(n_pairs) data). Prototyped and validated,
+library-only (not wired into `pipeline.py`/the CLI — no VCF path is threaded
+through `find_breakpoints` today; that's a separate, larger change to make
+only if this prototype's results justify it).
+
+### On-demand recompute (`src/ldetect_lite/_util/local_search_vcf_recompute.py`)
+
+`recompute_partition_to_hdf5` needed almost no new code: `calc_covariance`
+is already exactly the function `cmd_run.py`'s `_calc_partition` uses to
+generate one partition on demand (tabix-slice the region, pipe into
+`calc_covariance`). Recomputing "on demand" is just calling that same
+function again, later, for the same `(start, end)` bounds a local-search
+call already needs via `get_final_partitions` — no new pairwise-LD kernel,
+and critically, no need to re-derive the ASN22 multi-partition boundary
+semantics (dummy loci, `end_locus`-from-next-partition-start), since those
+live entirely in `local_search.py`'s existing, already-fixed downstream
+reading code, which this prototype never touches — it only changes where
+the partition HDF5 file comes from.
+
+Validated on a real slice of the MacDonald2022 chr9 VCF (gitignored,
+local-only fixture; 20 EUR individuals, two overlapping windows
+chr9:100,000-250,000 / chr9:200,000-400,000, mirroring how real chromosome
+partitioning overlaps):
+
+- **Row-level determinism**: calling `recompute_partition_to_hdf5` twice
+  independently for the same bounds produces bit-identical HDF5 partitions.
+- **End-to-end `LocalSearch` equivalence**: `LocalSearch` reading a "cache"
+  store vs. a "recompute" store (both independently generated, same source
+  data) returns identical breakpoints and metrics, in both the array
+  (`use_decimal=False`) and Decimal (`use_decimal=True`) paths, across a
+  window spanning both partitions — the multi-partition path ASN22 broke.
+
+Both pass. This confirms the core hypothesis: recompute is a safe,
+zero-extra-storage substitute for reading the persisted partition, at least
+for the boundary conditions exercised here (a fuller validation before any
+real wiring would want more real regions/populations, matching this
+project's existing 66/66 chromosome × population acceptance bar).
+
+### VCF backend timing (`src/ldetect_lite/_util/vcf_backends.py`)
+
+Added `pysam`/`cyvcf2` as a new `vcf-benchmark` optional extra (not a core
+dependency — `pyproject.toml`). Three equivalent "extract phased genotypes
+for a region" readers (naive per-line text parsing / pysam / cyvcf2),
+verified to produce identical output on real data before trusting their
+timing. Benchmarked on chr9:100,000-700,000 (~20,500 variants, matching
+local search's typical ~10,000-20,000 SNP window scale), swept over
+individual count (20 / 100 / 417, the full `EUR_inds.txt`):
+
+| n_individuals | naive  | pysam            | cyvcf2           |
+|---------------|--------|------------------|------------------|
+| 20            | 0.87s  | 0.85s (1.03x)    | 0.59s (1.49x)    |
+| 100           | 1.24s  | 1.77s (0.70x)    | 0.84s (1.47x)    |
+| 417           | 2.61s  | 5.23s (0.50x)    | 2.00s (1.31x)    |
+
+**Individual count matters more than region size here, and the two
+candidate libraries diverge sharply**: pysam's per-sample dict-like
+accessor (`record.samples[ind]["GT"]`) has real per-call Python overhead
+that scales *worse* than the naive parser as individual count grows —
+2x *slower* than naive at 417 individuals, not a candidate worth adopting.
+cyvcf2's flat `variant.genotypes` list stays ahead at every size tested
+(1.3-1.5x), a real but modest win, not the order-of-magnitude a C-accelerated
+library might suggest — most of the remaining cost is downstream Python-side
+haplotype-matrix construction and pairwise LD computation, not VCF parsing
+itself. `polars-bio` was not benchmarked (much newer/more niche, not used
+anywhere in this ecosystem currently) — noted as un-benchmarked, not
+rejected.
+
+**Conclusion: cyvcf2 is worth adopting if/when the VCF-parsing path is
+revisited (real but modest 1.3-1.5x win, no scaling cliff); pysam is not.**
+Not switching the production parser this round — this was a measurement
+pass, and priority 5's actual walltime cost is currently dominated by
+`calc_covariance`'s pairwise LD kernel and per-partition subprocess
+(`tabix`) startup, not genotype parsing, for the region sizes tested here.
+
+### Next steps
+
+- If priority 5 moves toward real wiring: thread a VCF path through
+  `find_breakpoints` → `_run_local_search` → `LocalSearch`, add a CLI flag,
+  and validate multiprocessing-safety of per-worker VCF/tabix handles.
+- If the VCF backend switch is picked up: swap `calc_covariance`'s parser to
+  cyvcf2 for the genotype-extraction step only (keep the existing pairwise
+  kernel and array-building logic unchanged), and re-run this benchmark at
+  full-chromosome scale to see whether the 1.3-1.5x win holds or shrinks
+  further behind the pairwise-kernel cost.
