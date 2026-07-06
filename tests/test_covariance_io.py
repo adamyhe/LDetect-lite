@@ -883,6 +883,36 @@ def test_compact_writers_store_shrink_ld_as_float32_on_disk(
         np.testing.assert_allclose(read_back.shrink_ld, expected, rtol=0, atol=0)
 
 
+def test_iter_rows_upcasts_float32_shrink_ld_to_float64(tmp_path: Path) -> None:
+    positions = np.array([100, 200, 300], dtype=np.int32)
+    row_counts = np.array([2, 2, 1], dtype=np.int64)
+    row_chunk = CovarianceRowChunk(
+        lo=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        hi=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 1.0 / 3, 0.7, 1e-8, 0.9], dtype=np.float64),
+    )
+    path = tmp_path / "iter_rows_f32.h5"
+    write_compact_covariance_partition_hdf5_chunks(
+        path,
+        positions=positions,
+        row_counts=row_counts,
+        row_chunks=iter([row_chunk]),
+        shrink_ld_precision="float32",
+    )
+
+    expected = row_chunk.shrink_ld.astype(np.float32).astype(np.float64)
+    with open_covariance_reader(path, 100, 300) as reader:
+        chunks = list(reader.iter_rows(100, 300, chunk_rows=2))
+
+    assert chunks
+    read_lo = np.concatenate([c.lo for c in chunks])
+    read_shrink = np.concatenate([c.shrink_ld for c in chunks])
+    assert read_shrink.dtype == np.float64
+    order = np.argsort(read_lo, kind="stable")
+    np.testing.assert_array_equal(read_lo[order], row_chunk.lo)
+    np.testing.assert_allclose(read_shrink[order], expected, rtol=0, atol=0)
+
+
 def test_float32_precision_shrinks_uncompressed_output(tmp_path: Path) -> None:
     rng = np.random.default_rng(7)
     n_positions = 500

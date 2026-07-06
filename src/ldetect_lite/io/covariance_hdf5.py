@@ -631,7 +631,15 @@ def validate_covariance_hdf5(path: Path, require_full: bool = False) -> bool:
 
 
 class HDF5CovariancePartitionReader:
-    """Chunked reader for one HDF5 covariance partition."""
+    """Chunked reader for one HDF5 covariance partition.
+
+    ``shrink_ld``/``diag_val`` reads use ``Dataset.astype(np.float64)`` rather
+    than ``np.asarray(dataset[...], dtype=np.float64)``: when the on-disk dtype
+    is float32 (``shrink_ld_precision="float32"``), ``astype`` has HDF5 convert
+    during the read itself, so only the float64 result is ever materialized --
+    a plain post-hoc numpy cast would briefly hold both the float32 read result
+    and the newly allocated float64 copy at once.
+    """
 
     def __init__(self, path: Path, start: int, end: int) -> None:
         self.path = path
@@ -671,7 +679,7 @@ class HDF5CovariancePartitionReader:
         return CovarianceRowChunk(
             lo=_position_array(h5["covariance/lo"][:]),
             hi=_position_array(h5["covariance/hi"][:]),
-            shrink_ld=np.asarray(h5["covariance/shrink_ld"][:], dtype=np.float64),
+            shrink_ld=h5["covariance/shrink_ld"].astype(np.float64)[:],
         )
 
     def read_diagonal(self) -> tuple[np.ndarray, np.ndarray]:
@@ -679,7 +687,7 @@ class HDF5CovariancePartitionReader:
         h5 = self.h5
         return (
             _position_array(h5["index/diag_pos"][:]),
-            np.asarray(h5["index/diag_val"][:], dtype=np.float64),
+            h5["index/diag_val"].astype(np.float64)[:],
         )
 
     def read_loci(self) -> np.ndarray:
@@ -709,10 +717,9 @@ class HDF5CovariancePartitionReader:
             yield CovarianceRowChunk(
                 lo=_position_array(h5["covariance/lo"][chunk_start:chunk_stop]),
                 hi=_position_array(h5["covariance/hi"][chunk_start:chunk_stop]),
-                shrink_ld=np.asarray(
-                    h5["covariance/shrink_ld"][chunk_start:chunk_stop],
-                    dtype=np.float64,
-                ),
+                shrink_ld=h5["covariance/shrink_ld"].astype(np.float64)[
+                    chunk_start:chunk_stop
+                ],
             )
 
     def iter_owned_rows(
