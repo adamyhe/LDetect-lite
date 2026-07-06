@@ -1,4 +1,4 @@
-# Post-Covariance Optimization Review
+# Post-Covariance Optimization Review (THIS NOTE IS STALE)
 
 **Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
 
