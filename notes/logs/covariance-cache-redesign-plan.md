@@ -465,3 +465,53 @@ pass, and priority 5's actual walltime cost is currently dominated by
   kernel and array-building logic unchanged), and re-run this benchmark at
   full-chromosome scale to see whether the 1.3-1.5x win holds or shrinks
   further behind the pairwise-kernel cost.
+
+## Priority 5 and direct-vector sidecar wired into `ldetect run` (2026-07-06)
+
+Both wired in as opt-in flags (`--fused-vector`, `--local-search-source
+{cache,vcf-recompute}`), off by default. See `_cli/cmd_run.py` and
+`pipeline.py`. `--fused-vector` only takes the fast path when every
+partition is freshly computed this run (falls back to the post-hoc Step 3
+read otherwise, rather than half-solving mixed fresh/cached partitions).
+`--local-search-source vcf-recompute` is scoped to the `workers=1`,
+non-Decimal, grouped local-search path only — combined with
+`--local-search-workers > 1` or `--high-precision`, it raises an error
+before Step 2 even runs. Validated bit-exact/behavior-identical against the
+existing paths (unit tests, real chr9 data end-to-end through
+`find_breakpoints`, and a manual `ldetect run` smoke test producing
+byte-identical BED/JSON output on real data). The metric-coverage sidecar
+was explicitly **not** wired in — `metric_from_files` was already exact in
+production; only the flat-array *replacement attempt* was ever broken.
+
+## v2 lo-less schema: scoped, then explicitly deferred (2026-07-06)
+
+Investigated wiring `compact_schema_v2.py` in as the new default compact
+writer. Turned out to be a much larger lift than "swap the writer" once
+scoped:
+
+- **No streaming writer exists.** `write_v2_partition` requires fully
+  materialized `lo`/`hi`/`shrink_ld` arrays (`np.union1d(lo, hi)` over
+  complete data) — incompatible with `calc_covariance`'s default chunked/
+  streaming write path (`write_compact_covariance_partition_hdf5_append`),
+  which exists specifically to avoid materializing a whole partition in
+  memory for large chromosomes.
+- **No reader API parity.** Every consumer (`local_search.py`,
+  `covariance_array.py`, `vector_array.py`, the `--high-precision`
+  dictionary path in `io/covariance.py`) needs `row_count`,
+  `read_diagonal`, `read_loci`, `iter_rows`, and `iter_owned_rows`. v2 only
+  supports whole-partition reconstruction today.
+- **No version-dispatch mechanism exists at all**, even nominally — v1's
+  `format`/`version` HDF5 attrs are written but never actually branched on
+  by any reader; `HDF5CovariancePartitionReader` reads fixed dataset paths
+  unconditionally. Introducing v2 means building dispatch from scratch, not
+  extending something that already exists.
+
+Weighed against this cost: the measured real-world gain is **6.4%**, not
+the ~37.5% pre-compression estimate, because zstd already exploits most of
+the same redundancy the CSR cleanup targets (already noted above, but worth
+restating as the decisive factor here). **Decision (confirmed with user):
+skip the v2 migration.** Priority 6 (bounded fixed-point `r²` quantization)
+is the better-ROI remaining lever — it doesn't require touching the reader
+API surface or building version dispatch, and wasn't invalidated by this
+finding. `compact_schema_v2.py` and its tests remain in the repo as a
+validated prototype/reference, not a migration in progress.
