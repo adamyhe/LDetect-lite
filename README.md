@@ -8,7 +8,7 @@ A modern, fast re-implementation of [LDetect](https://bitbucket.org/nygcresearch
 
 ## Installation
 
-Install from PyPI via:
+LDetect-lite is available through PyPI:
 
 ```bash
 pip install ldetect-lite
@@ -43,7 +43,7 @@ From a development checkout, run CLI commands through `uv run` so they use the m
 ### End-to-end pipeline
 
 ```bash
-uv run ldetect run \
+ldetect run \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --reference-panel 1000G.chr2.vcf.gz \
   --individuals eurinds.txt \
@@ -80,7 +80,7 @@ Each of the five stages (partition, covariance, matrix-to-vector, find-minima, e
 Convert a recombination rate map (e.g. the [deCODE map](https://www.science.org/doi/10.1126/science.aau1043) or [HapMap-interpolated 1000G maps](https://github.com/joepickrell/1000-genomes-genetic-maps)) to per-SNP genetic positions required by steps 1 and 2:
 
 ```bash
-uv run ldetect interpolate-maps \
+ldetect interpolate-maps \
   --snp-file snps.bed.gz \
   --genetic-map recombination_map.gz \
   --output chr2.interpolated_genetic_map.gz
@@ -108,10 +108,10 @@ The available breakpoint sets are `fourier` and `uniform` (raw minima from Fouri
 
 ## Known limitations
 
-`ldetect-lite` reproduces the published Berisa & Pickrell (2016) 1000 Genomes LD blocks exactly for ASN (all 22 autosomes) and AFR (all chromosomes except chr22), and matches EUR block counts and coverage exactly but with shifted internal boundaries on chr8–chr12. These two residual divergences (EUR chr8-12, AFR chr22) are understood to stem from an unidentified upstream input/provenance difference from the original authors' pipeline, not a bug in this implementation — an extensive diagnostic effort ruled out VCF release-version provenance, SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, and reference-BED integrity as causes. See `notes/findings/ldetect-original-reproduction.md` for the full writeup, and `notes/findings/macdonald2022-reproduction.md` for the equivalent status reproducing MacDonald et al. (2022)'s GRCh38 blocks.
+`ldetect-lite` reproduces the published Berisa & Pickrell (2016) 1000 Genomes LD blocks exactly for ASN (all 22 autosomes) and AFR (all chromosomes except chr22), and matches EUR block counts and coverage exactly but with shifted internal boundaries on chr8–chr12. These two residual divergences (EUR chr8-12, AFR chr22) likelystem from an unidentified upstream input/provenance difference from the original authors' pipeline, not a bug in this implementation — an extensive diagnostic effort ruled out VCF release-version provenance, SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, and reference-BED integrity as causes. See `notes/findings/ldetect-original-reproduction.md` for the full writeup, and `notes/findings/macdonald2022-reproduction.md` for the equivalent status reproducing MacDonald et al. (2022)'s GRCh38 blocks.
 
 ## Pre-computed LD blocks
 
 Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by [MacDonald et al. (2022)](https://www.biorxiv.org/content/10.1101/2022.03.04.483057v2).
 
-BED files produced by our work will be released once the code base leaves alpha/finish major breaking updates.
+BED files produced by our work will be released once the code base leaves alpha/we finish major breaking updates.

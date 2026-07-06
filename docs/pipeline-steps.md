@@ -9,7 +9,7 @@ The pipeline has five stages that can be run individually:
 **Step 1 — Partition chromosome** into overlapping windows:
 
 ```bash
-uv run ldetect partition-chromosome \
+ldetect partition-chromosome \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --n-individuals 379 \
   --output chr2_partitions.txt
@@ -30,7 +30,7 @@ Arguments:
 
 ```bash
 tabix -h 1000G.chr2.vcf.gz chr2:39967768-40067768 | \
-  uv run ldetect calc-covariance \
+  ldetect calc-covariance \
     --genetic-map chr2.interpolated_genetic_map.gz \
     --individuals eurinds.txt \
     --output cov_matrix/chr2/chr2.39967768.40067768.h5
@@ -52,7 +52,7 @@ Arguments:
 **Step 3 — Matrix to vector**:
 
 ```bash
-uv run ldetect matrix-to-vector \
+ldetect matrix-to-vector \
   --dataset-path cov_matrix/ \
   --name chr2 \
   --output vector-chr2.txt.gz
@@ -74,7 +74,7 @@ Arguments:
 **Step 4 — Find breakpoints**:
 
 ```bash
-uv run ldetect find-minima \
+ldetect find-minima \
   --input vector-chr2.txt.gz \
   --chr-name chr2 \
   --dataset-path cov_matrix/ \
@@ -106,7 +106,7 @@ Arguments:
 ### Inspect covariance cache size
 
 ```bash
-uv run ldetect covariance-summary \
+ldetect covariance-summary \
   --dataset-path cov_matrix/ \
   --name chr2 \
   --format tsv
@@ -126,7 +126,7 @@ Arguments:
 **Step 5 — Extract to BED**:
 
 ```bash
-uv run ldetect extract-bpoints \
+ldetect extract-bpoints \
   --name chr2 \
   --dataset-path cov_matrix/ \
   --breakpoints breakpoints-chr2.json \
