@@ -12,6 +12,7 @@ from typing import IO, Any, TypeVar
 
 import numpy as np
 
+from ldetect_lite._util.covariance_sidecars import CovarianceSidecarAccumulator
 from ldetect_lite.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     CovarianceRowChunk,
@@ -279,6 +280,29 @@ def _genetic_stop_bounds_impl(
     return stops
 
 
+def _diag_values_impl(
+    hap_sums: np.ndarray,
+    n_total: float,
+    theta: float,
+    cutoff: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized closed form of the ``i == j`` branch of the pairwise kernel.
+
+    For ``i == j``, ``df == 0`` so ``ee == 1.0`` and ``n11 == nx1 == n1x ==
+    hap_sums[i]``, collapsing the general pairwise formula to a pure function
+    of ``hap_sums`` alone. Operation order mirrors
+    ``_pairwise_ld_compact_chunk_impl``'s ``i == j`` branch exactly (down to
+    ``* ee`` with ``ee == 1.0``, a floating-point no-op) so this reproduces
+    the persisted diagonal bit-for-bit without a second pairwise-kernel pass.
+    """
+    f1 = hap_sums / n_total
+    d_naive = f1 - f1 * f1
+    ds2 = (1.0 - theta) ** 2 * d_naive
+    valid = np.fabs(ds2) >= cutoff
+    diag_val = ds2 + (theta / 2.0) * (1.0 - theta / 2.0)
+    return valid, diag_val
+
+
 @_njit_fallback
 def _pairwise_ld_compact_chunk_impl(
     hap_mat: np.ndarray,
@@ -523,6 +547,7 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
+    sidecar: CovarianceSidecarAccumulator | None = None,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
 
@@ -551,6 +576,12 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
+        sidecar: Optional prototype fused-sidecar accumulator
+            (``_util.covariance_sidecars.CovarianceSidecarAccumulator``). When
+            given, this partition's row-chunk stream is teed through it (the
+            persisted output is unchanged) and its diagonal is set from this
+            call's vectorized ``_diag_values_impl`` precompute. Only wired
+            into the single-pass compact-output path.
     """
     from ldetect_lite._util.logging import log_debug
     from ldetect_lite._util.memory import log_memory_checkpoint
@@ -690,24 +721,36 @@ def calc_covariance(
         pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
     )
 
+    if sidecar is not None:
+        diag_valid, diag_val_all = _diag_values_impl(
+            hap_sums, float(n_haps), theta, cutoff
+        )
+        sidecar.set_diagonals(
+            pos_arr[diag_valid].astype(np.int64, copy=False),
+            diag_val_all[diag_valid],
+        )
+
     if compact_output and assume_sorted_unique_rows:
         write_start = time.perf_counter()
         try:
+            row_chunks: Iterator[CovarianceRowChunk] = _compact_pair_chunks_single_pass(
+                hap_mat,
+                gpos_arr,
+                hap_sums,
+                j_stop_by_i,
+                pos_arr,
+                ne,
+                float(n_ind),
+                theta,
+                cutoff,
+                compact_chunk_rows,
+            )
+            if sidecar is not None:
+                row_chunks = sidecar.wrap(row_chunks)
             n_pairs = write_compact_covariance_partition_hdf5_append(
                 output_path,
                 positions=pos_arr,
-                row_chunks=_compact_pair_chunks_single_pass(
-                    hap_mat,
-                    gpos_arr,
-                    hap_sums,
-                    j_stop_by_i,
-                    pos_arr,
-                    ne,
-                    float(n_ind),
-                    theta,
-                    cutoff,
-                    compact_chunk_rows,
-                ),
+                row_chunks=row_chunks,
                 chunk_rows=compact_chunk_rows,
                 compression=compression,
             )
