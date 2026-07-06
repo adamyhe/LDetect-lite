@@ -1,0 +1,11 @@
+# Config for Snakefile.priority5_profiling.
+#
+# Defaults to a chr21 smoke-test scale, the smallest human autosome (matching
+# other diagnostic workflows' use of chr21/22 for a quick real-data check --
+# see Snakefile.compression_diagnostics). Override for a fuller profiling
+# run, e.g.:
+#   uv run snakemake -s Snakefile.priority5_profiling --cores 8 \
+#       --config profiling_chromosomes='[21,22,20,19]'
+
+profiling_chromosomes: [21]
+profiling_population: EUR

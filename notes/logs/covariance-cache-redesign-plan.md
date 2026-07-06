@@ -528,33 +528,79 @@ here that isn't strictly worse than what's already shipped.
 
 Both flags were only validated for *correctness* this session (small real
 regions, one single-partition manual smoke test) — never for wall-clock/
-memory cost at real chromosome scale. Added
-`examples/MacDonald2022/Snakefile.priority5_profiling` (+
-`priority5_profiling.yaml`), a self-contained diagnostic workflow (matching
-the existing `Snakefile.compression_diagnostics` sibling-workflow
-convention) that runs `ldetect run` three ways per chromosome — baseline,
-`--fused-vector`, `--local-search-source vcf-recompute` (pinned to
+memory cost at real chromosome scale. Added a self-contained diagnostic
+Snakemake workflow that runs `ldetect run` three ways per chromosome —
+baseline, `--fused-vector`, `--local-search-source vcf-recompute` (pinned to
 `--workers 1`, the only validated configuration) — against identical real
-input, wrapped in `/usr/bin/time -v` (matching the main Snakefile's own
-`run_ldetect` benchmarking convention, not a new mechanism), checks BED
-output is byte-identical across all three (it must be — these are three
-exact computations of the same thing), and reports wall-clock/peak-RSS
-deltas in `summary.tsv`.
+input, checks BED output is byte-identical across all three (it must be —
+these are three exact computations of the same thing), and reports
+wall-clock/peak-RSS deltas in `summary.tsv`.
 
-Not run yet — meant to be run remotely (`/usr/bin/time -v` is GNU-only, not
-available on this dev machine; confirmed by trying it locally). Validated
-short of actually running it: the Snakemake DAG resolves cleanly in dry-run
-against real local chr9 data (`--config profiling_chromosomes='[9]'`), and
-the GNU-time-output parsing logic was unit-checked against fabricated
-sample output in both `m:ss` and `h:mm:ss` forms — this caught a real bug
-(the "Elapsed (wall clock) time" label's own `(h:mm:ss or m:ss)` hint text
-contains colons, so a naive first-colon split grabbed part of the label
-instead of the value; fixed to split on the last `": "` instead).
+**Location**: first built under `examples/MacDonald2022/` (real chr9 data
+was already local there from this session's earlier priority-5 validation
+work), using `/usr/bin/time -v` for timing/memory, matching that directory's
+main Snakefile's own `run_ldetect` convention. Reconsidered and moved to
+`examples/ldetect_original/` instead: that directory already hosts the
+closest sibling workflow (`Snakefile.compression_diagnostics`, an
+near-identical N-mode real-data comparison pattern) and the family of
+diagnostic-only Snakefiles this harness actually belongs to conceptually —
+it isn't about reproducing a specific paper's block sets, unlike both
+example directories' main pipelines. The move also switched from
+`/usr/bin/time -v` (GNU-only, unavailable on macOS, confirmed by trying it
+locally) to Snakemake's native `benchmark:` directive — the same mechanism
+`Snakefile.compression_diagnostics` already uses, portable, and needs no
+custom output parsing (eliminating the class of bug the `/usr/bin/time`
+version had — see below). Final files:
+`examples/ldetect_original/Snakefile.priority5_profiling`,
+`priority5_profiling.yaml`, `scripts/compare_priority5_mode.py`.
 
-Open question this data should answer, not decided here: `--local-search-
-source vcf-recompute` is currently unsupported with `--local-search-workers
-> 1` (would need a locking scheme for concurrent recompute into a shared
-temp store across worker processes). Whether that's worth building depends
-on how much of `vcf_recompute` mode's wall-clock is the per-partition
-recompute step versus everything else — exactly what `summary.tsv` will
-show once run.
+**Real chr21/chr22 results** (obtained from the MacDonald2022 version,
+`--workers 4` for baseline/`fused_vector`, `--workers 1` for
+`vcf_recompute`, before the move — the underlying feature performance
+characteristics this measures are about `ldetect run`'s flags, not about
+which example directory the harness lives in, so recorded here regardless):
+
+| chrom | mode | bed_exact | baseline | mode | speedup | baseline peak | mode peak | peak ratio |
+|---|---|---|---|---|---|---|---|---|
+| 21 | fused_vector | True | 105.95s | 101.92s | 1.04x | 1278.1 MiB | 1276.9 MiB | 1.00x |
+| 21 | vcf_recompute | True | 105.95s | 538.32s | 0.20x | 1278.1 MiB | 462.2 MiB | 0.36x |
+| 22 | fused_vector | True | 107.70s | 103.52s | 1.04x | 1793.7 MiB | 1824.7 MiB | 1.02x |
+| 22 | vcf_recompute | True | 107.70s | 544.70s | 0.20x | 1793.7 MiB | 485.8 MiB | 0.27x |
+
+BED output byte-identical in all four rows — correctness holds at real
+chromosome scale, not just the small regions tested when these were built.
+
+- **`--fused-vector`**: consistent, modest ~4% wall-clock win, no memory
+  cost. Low-risk; a reasonable default-on candidate once more chromosomes
+  are checked.
+- **`--local-search-source vcf-recompute`**: **~5x slower** but uses only
+  **27-36% of baseline's peak memory**. This directly answers the open
+  question below: recompute overhead clearly dominates `vcf_recompute`'s
+  wall-clock, confirming per-partition recompute (tabix + kernel) is the
+  bottleneck, not something else — parallelizing it across breakpoint
+  groups would plausibly close most of this gap, and is now justified by
+  data rather than speculation. Independent of that follow-up, the
+  memory/speed tradeoff is real and already usable today in
+  memory-constrained scenarios (e.g. many chromosomes running concurrently
+  under a fixed memory budget) without any further work.
+
+**Validation status of the final (`ldetect_original`) location**: DAG
+resolves cleanly in dry-run against a real chromosome config
+(`--config profiling_chromosomes='[21]'`). Not run live from this location
+— doing so requires `bcftools` (for `priority5_filter_vcf`), which isn't
+installed on this dev machine; per user instruction, system packages aren't
+installed to self-validate a deliverable meant to run elsewhere. Whoever
+runs this should confirm `wget`/`bcftools`/`tabix` are on `PATH` first. The
+GNU-time parsing bug from the earlier version (the "Elapsed (wall clock)
+time" label's own `(h:mm:ss or m:ss)` hint text contains colons, breaking a
+naive first-colon split) is moot now that `benchmark:` is used instead, but
+is recorded here since it was a real, non-obvious bug worth remembering the
+shape of.
+
+Remaining open question, now informed by the results above: whether
+multi-worker `vcf_recompute` support is worth building (needs a locking
+scheme for concurrent recompute into a shared temp store across worker
+processes) is a `speed vs. engineering effort` call now, not a `does this
+even matter` call — the 5x gap is large enough that parallelizing across,
+say, 4 workers could plausibly bring `vcf_recompute` close to baseline
+wall-clock while keeping most of its memory advantage.

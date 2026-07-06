@@ -1,0 +1,289 @@
+"""Profile --fused-vector and --local-search-source vcf-recompute at real
+chromosome scale against the default cache-based `ldetect run` path.
+
+Both flags (see notes/logs/covariance-cache-redesign-plan.md, "Priority 5
+and direct-vector sidecar wired into ldetect run") were only validated for
+*correctness* when built -- small real regions, one single-partition manual
+smoke test. This workflow answers the remaining question: what do they
+actually cost/save in wall-clock and peak memory at real chromosome scale?
+
+Self-contained (own download/prep/filter rules, `priority5_`-prefixed, not
+shared with the main Snakefile or Snakefile.compression_diagnostics) --
+matches this directory's existing convention of each diagnostic workflow
+owning its own upstream chain rather than depending on another Snakefile's
+rule graph. Sibling of Snakefile.compression_diagnostics; borrows its
+mode-comparison structure and its use of Snakemake's native `benchmark:`
+directive for wall-clock/peak-RSS (not `/usr/bin/time`, which is GNU-only
+and unavailable on macOS -- `benchmark:` is Snakemake's own psutil-based
+instrumentation and is portable).
+
+Three modes per chromosome, identical filtered input:
+    baseline      -- today's default (Step 3 post-hoc vector read, cache-
+                     based local search)
+    fused_vector  -- --fused-vector only
+    vcf_recompute -- --local-search-source vcf-recompute only, pinned to
+                     --workers 1 (the only validated configuration --
+                     combining it with multiple workers currently raises a
+                     clear error; see _validate_local_search_source in
+                     src/ldetect_lite/_cli/cmd_run.py). baseline/
+                     fused_vector use the configured worker count so their
+                     numbers reflect normal usage.
+
+Every mode must produce byte-identical BED/JSON output to baseline (all
+three are exact, deterministic computations of the same thing) -- checked
+alongside the timing/memory comparison, not assumed.
+
+Open design question this data should answer: is vcf_recompute's per-
+partition recompute overhead (tabix + calc_covariance per breakpoint group)
+enough of the total wall-clock to justify building multi-worker support for
+it (currently unsupported, would need a locking scheme for concurrent
+recompute of a shared temp store)? Check summary.tsv's vcf_recompute row
+against baseline's wall-clock before deciding.
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -s Snakefile.priority5_profiling -n
+    uv run snakemake -s Snakefile.priority5_profiling --cores 4
+    uv run snakemake -s Snakefile.priority5_profiling --cores 8 \
+        --config profiling_chromosomes='[21,22,20]'
+"""
+
+from pathlib import Path
+
+configfile: "config.yaml"
+configfile: "priority5_profiling.yaml"
+
+
+CHROMS = [str(c) for c in config["profiling_chromosomes"]]
+POPULATION = config["profiling_population"]
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"]) / "priority5_profiling"
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_VCF = str(
+    RESULTS / "filtered_vcf" / POPULATION / VCF_TMPL.replace(
+        ".vcf.gz", ".population-polymorphic.vcf.gz"
+    )
+)
+
+MODES = ["baseline", "fused_vector", "vcf_recompute"]
+COMPARE_MODES = ["fused_vector", "vcf_recompute"]
+MODE_FLAGS = {
+    "baseline": [],
+    "fused_vector": ["--fused-vector"],
+    "vcf_recompute": ["--local-search-source", "vcf-recompute"],
+}
+MODE_WORKERS = {
+    "baseline": config["workers"],
+    "fused_vector": config["workers"],
+    # Pinned: vcf-recompute + workers>1 raises a validation error today
+    # (unvalidated combination, see _validate_local_search_source). Not a
+    # config knob -- a hard code constraint, not a profiling choice.
+    "vcf_recompute": 1,
+}
+
+wildcard_constraints:
+    mode="|".join(MODES),
+    chrom="|".join(CHROMS),
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+rule all:
+    input:
+        str(RESULTS / "summary.tsv"),
+
+
+# ---------------------------------------------------------------------------
+# Self-contained download/prep/filter chain (own rule names -- this workflow
+# does not depend on the main Snakefile or Snakefile.compression_diagnostics
+# having already been run).
+# ---------------------------------------------------------------------------
+
+
+rule priority5_download_vcf:
+    output:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule priority5_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule priority5_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule priority5_prep_individuals:
+    input:
+        panel=rules.priority5_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule priority5_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Three-mode ldetect run: identical input, baseline / --fused-vector /
+# --local-search-source vcf-recompute
+# ---------------------------------------------------------------------------
+
+
+rule priority5_run_ldetect:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+    output:
+        bed=str(RESULTS / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(RESULTS / "{chrom}" / "{mode}" / "breakpoints-{chrom}.json"),
+    log:
+        run=str(RESULTS / "{chrom}" / "logs" / "{mode}.log"),
+    benchmark:
+        str(RESULTS / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
+    threads: lambda wc: MODE_WORKERS[wc.mode]
+    params:
+        output_dir=lambda wc: str(RESULTS / wc.chrom / wc.mode),
+        extra_flags=lambda wc: " ".join(MODE_FLAGS[wc.mode]),
+        workers=lambda wc: MODE_WORKERS[wc.mode],
+        ne=pop_ne(POPULATION),
+        cutoff=config["cov_cutoff"],
+        n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
+    shell:
+        """
+        rm -rf {params.output_dir}
+        mkdir -p {params.output_dir}
+        uv run ldetect run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
+            --subset fourier_ls \
+            --workers {params.workers} \
+            {params.extra_flags} \
+            > {log.run} 2>&1
+        """
+
+
+rule compare_priority5_mode:
+    input:
+        baseline_bed=str(RESULTS / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"),
+        mode_bed=str(RESULTS / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        baseline_breakpoints=str(
+            RESULTS / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
+        ),
+        mode_breakpoints=str(
+            RESULTS / "{chrom}" / "{mode}" / "breakpoints-{chrom}.json"
+        ),
+        baseline_benchmark=str(RESULTS / "{chrom}" / "logs" / "baseline.benchmark.tsv"),
+        mode_benchmark=str(RESULTS / "{chrom}" / "logs" / "{mode}.benchmark.tsv"),
+    output:
+        str(RESULTS / "{chrom}" / "{mode}" / "compare.tsv"),
+    wildcard_constraints:
+        mode="fused_vector|vcf_recompute",
+    params:
+        subset="fourier_ls",
+    shell:
+        """
+        uv run python scripts/compare_priority5_mode.py \
+            --chromosome {wildcards.chrom} \
+            --mode {wildcards.mode} \
+            --baseline-bed {input.baseline_bed} \
+            --mode-bed {input.mode_bed} \
+            --baseline-breakpoints {input.baseline_breakpoints} \
+            --mode-breakpoints {input.mode_breakpoints} \
+            --baseline-benchmark {input.baseline_benchmark} \
+            --mode-benchmark {input.mode_benchmark} \
+            --subset {params.subset} \
+            --output {output}
+        """
+
+
+rule priority5_summary:
+    input:
+        expand(
+            str(RESULTS / "{chrom}" / "{mode}" / "compare.tsv"),
+            chrom=CHROMS,
+            mode=COMPARE_MODES,
+        ),
+    output:
+        str(RESULTS / "summary.tsv"),
+    run:
+        import csv
+
+        rows = []
+        fieldnames = None
+        for path in input:
+            with open(path) as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                if fieldnames is None:
+                    fieldnames = reader.fieldnames
+                rows.extend(reader)
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)
