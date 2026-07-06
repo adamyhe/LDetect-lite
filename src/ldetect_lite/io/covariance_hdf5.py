@@ -18,7 +18,9 @@ import numpy as np
 # available to decompress a zstd-written partition.
 _ZSTD_CLEVEL = 3
 
-_FORMAT = "ldetect2-covariance-h5"
+_FORMAT = "ldetect-lite-covariance-h5"
+_LEGACY_FORMAT = "ldetect2-covariance-h5"
+_VALID_FORMATS = frozenset({_FORMAT, _LEGACY_FORMAT})
 _VERSION = 1
 HDF5_DATASET_CHUNK_ROWS = 65_536
 _REQUIRED_DATASETS = frozenset(
@@ -48,7 +50,7 @@ def _h5py() -> Any:
         import h5py
     except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "h5py is required for HDF5 covariance partitions. Install ldetect2 "
+            "h5py is required for HDF5 covariance partitions. Install ldetect-lite "
             "with its project dependencies before running covariance workflows."
         ) from exc
     return h5py
@@ -562,13 +564,13 @@ def write_compact_covariance_partition_hdf5_append(
 
 
 def validate_covariance_hdf5(path: Path, require_full: bool = False) -> bool:
-    """Return whether *path* is a readable ldetect2 HDF5 covariance partition."""
+    """Return whether *path* is a readable ldetect-lite HDF5 covariance partition."""
     if not path.exists():
         return False
     try:
         h5py = _h5py()
         with h5py.File(path, "r") as h5:
-            if h5.attrs.get("format") != _FORMAT:
+            if h5.attrs.get("format") not in _VALID_FORMATS:
                 return False
             if int(h5.attrs.get("version", -1)) != _VERSION:
                 return False

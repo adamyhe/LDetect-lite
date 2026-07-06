@@ -10,11 +10,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2.io.covariance_hdf5 import (
+from ldetect_lite.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     open_covariance_reader,
 )
-from ldetect2.shrinkage import (
+from ldetect_lite.shrinkage import (
     _count_pairwise_ld_by_i_impl,
     _genetic_stop_bounds_impl,
     calc_covariance,

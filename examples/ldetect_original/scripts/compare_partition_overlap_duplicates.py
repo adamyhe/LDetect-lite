@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check whether redundant cross-partition covariance pairs actually match.
 
-Partitions deliberately overlap (see ``ldetect2.shrinkage.partition_chromosome``),
+Partitions deliberately overlap (see ``ldetect_lite.shrinkage.partition_chromosome``),
 so the same canonical ``(lo, hi)`` SNP-position pair is independently,
 redundantly computed by two adjacent partitions' ``calc_covariance`` runs.
 Every downstream consumer (matrix-to-vector, metric, local search) resolves
@@ -16,7 +16,7 @@ that is the combination most likely to expose an edge case.
 
 NOTE: this cannot be run end-to-end in a fresh checkout — it requires real,
 already-materialized HDF5 covariance partitions for the target chromosome
-(e.g. from a completed `ldetect2 run` or the main `examples/ldetect_original`
+(e.g. from a completed `ldetect run` or the main `examples/ldetect_original`
 Snakefile). It is unit-tested against a synthetic fixture with a deliberately
 mismatched redundant pair; see
 tests/test_covariance_io.py::test_compare_partition_overlap_duplicates_flags_mismatch.
@@ -39,8 +39,8 @@ import statistics
 import subprocess
 from pathlib import Path
 
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
-from ldetect2.io.partitions import CovarianceStore, read_partitions
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
+from ldetect_lite.io.partitions import CovarianceStore, read_partitions
 
 FIELDNAMES = [
     "population",

@@ -1,4 +1,4 @@
-"""Tests for ldetect2.io.covariance."""
+"""Tests for ldetect_lite.io.covariance."""
 
 from __future__ import annotations
 
@@ -9,23 +9,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2._util.covariance_array import load_chromosome_covariance
-from ldetect2.io.covariance import (
+from ldetect_lite._util.covariance_array import load_chromosome_covariance
+from ldetect_lite.io.covariance import (
     delete_loci_smaller_than,
     delete_loci_smaller_than_leanest,
     insert_into_matrix_lean,
     read_partition_into_matrix,
     read_partition_into_matrix_lean,
 )
-from ldetect2.io.covariance_hdf5 import (
+from ldetect_lite.io.covariance_hdf5 import (
     CovarianceRowChunk,
     open_covariance_reader,
+    validate_covariance_hdf5,
     write_compact_covariance_partition_hdf5_append,
     write_compact_covariance_partition_hdf5_chunks,
     write_covariance_partition_hdf5,
 )
-from ldetect2.io.partitions import CovarianceStore
-from ldetect2.matrix_analysis import MatrixAnalysis
+from ldetect_lite.io.partitions import CovarianceStore
+from ldetect_lite.matrix_analysis import MatrixAnalysis
 from tests._partition_fixtures import (
     divergent_overlap_partitions,
     make_custom_partitioned_store,
@@ -77,6 +78,30 @@ def _make_compact_store(
     store = CovarianceStore(root=root)
     partitions: list[tuple[int, int]] = [(100, 300)]
     return store, partitions
+
+
+def test_validate_covariance_hdf5_accepts_current_and_legacy_signature(
+    tmp_path: Path,
+) -> None:
+    """New writes and pre-rename ldetect2 caches should both validate."""
+    import h5py
+
+    path = tmp_path / "chr1.100.300.h5"
+    write_covariance_partition_hdf5(
+        path,
+        i_pos=np.array([100, 100, 200, 200, 300], dtype=np.int32),
+        j_pos=np.array([100, 200, 200, 300, 300], dtype=np.int32),
+        shrink_ld=np.array([0.5, 0.3, 0.7, 0.1, 0.9], dtype=np.float64),
+    )
+    assert validate_covariance_hdf5(path)
+
+    with h5py.File(path, "a") as h5:
+        h5.attrs["format"] = "ldetect2-covariance-h5"
+    assert validate_covariance_hdf5(path)
+
+    with h5py.File(path, "a") as h5:
+        h5.attrs["format"] = "some-other-format"
+    assert not validate_covariance_hdf5(path)
 
 
 def test_hdf5_writer_trusted_canonical_path_matches_generic_path(
@@ -466,7 +491,7 @@ def test_matrix_to_vector_chunked_hdf5_matches_materialized_cache(
     monkeypatch,
     compact,
 ):
-    import ldetect2._util.vector_array as vector_array
+    import ldetect_lite._util.vector_array as vector_array
 
     monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
     store, partitions = _make_two_partition_store(tmp_path, compact=compact)
@@ -486,7 +511,7 @@ def test_matrix_to_vector_chunked_hdf5_matches_materialized_cache(
 def test_matrix_to_vector_hdf5_workers_match_single_process(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
 
-    import ldetect2._util.vector_array as vector_array
+    import ldetect_lite._util.vector_array as vector_array
 
     monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
     monkeypatch.setattr(vector_array, "ProcessPoolExecutor", ThreadPoolExecutor)
@@ -525,7 +550,7 @@ def test_matrix_to_vector_array_accepts_full_hdf5(tmp_path):
 
 
 def test_matrix_to_vector_array_respects_explicit_snp_range(tmp_path, monkeypatch):
-    import ldetect2._util.vector_array as vector_array
+    import ldetect_lite._util.vector_array as vector_array
 
     monkeypatch.setattr(vector_array, "MATRIX_TO_VECTOR_CHUNK_ROWS", 2)
     store, _ = _make_two_partition_store(tmp_path)

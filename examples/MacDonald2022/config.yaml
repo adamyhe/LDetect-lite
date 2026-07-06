@@ -89,14 +89,14 @@ maps_dir: data/maps
 resources_dir: resources
 results_dir: results
 
-# ldetect2 parameters
+# ldetect-lite parameters
 cov_cutoff: 0.0000001
 subset: fourier_ls
 # MacDonald et al. call P02_minima_pipeline.py via runStep4.sh with the
 # n_snps_bw_bpoints argument. Use SNP spacing rather than stale reference-BED
 # breakpoint-count targeting.
 n_snps_bw_bpoints: 7000
-# Parallel workers for the ldetect2 pipeline within each chromosome job
+# Parallel workers for the ldetect-lite pipeline within each chromosome job
 # (covariance calculation, matrix-to-vector, local search, and metric
 # scoring all default to this value). Set to the number of partitions per
 # chromosome (~40 for human autosomes). Snakemake will reserve this many
@@ -121,13 +121,13 @@ sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections
 # NOTE: requires journal access; download manually if behind paywall and place at
 #       data/maps/decode_raw/aau1043_datas3.gz. Only used by the diagnostic
 #       convert_decode_map/interpolate_map/compare_maps rules (regression-checks
-#       our own ldetect2 interpolate-maps against MacDonald's published output
+#       our own ldetect interpolate-maps against MacDonald's published output
 #       below) -- the EUR block set itself uses decode_interpolated_map_base_url.
 decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
 
 # MacDonald et al. published already-interpolated pyrho AND deCODE maps in the
 # reference repository. These are in the chr/position/cM format accepted by
-# ldetect2 run, used directly (no local interpolation) for both the pyrho and
+# ldetect run, used directly (no local interpolation) for both the pyrho and
 # EUR/deCODE block sets.
 pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
 decode_interpolated_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps"

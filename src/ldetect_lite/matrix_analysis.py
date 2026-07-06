@@ -6,17 +6,17 @@ import math
 from bisect import bisect_left
 from pathlib import Path
 
-from ldetect2._util.covariance_array import ChromosomeCovariance
-from ldetect2._util.logging import log_debug, log_msg
-from ldetect2._util.vector_array import write_diag_vector_array
-from ldetect2.io.covariance import (
+from ldetect_lite._util.covariance_array import ChromosomeCovariance
+from ldetect_lite._util.logging import log_debug, log_msg
+from ldetect_lite._util.vector_array import write_diag_vector_array
+from ldetect_lite.io.covariance import (
     Matrix,
     delete_loci_smaller_than,
     delete_loci_smaller_than_lean,
     read_partition_into_matrix_lean,
     write_corr_vector,
 )
-from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
+from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
 
 _USE_ARRAY_DIAG = True
 
@@ -293,7 +293,7 @@ class MatrixAnalysis:
 
     def calc_diag(self) -> None:
         """Compute the diagonal correlation-sum vector, keeping matrix in RAM."""
-        from ldetect2.io.covariance import (
+        from ldetect_lite.io.covariance import (
             read_partition_into_matrix,
         )
 

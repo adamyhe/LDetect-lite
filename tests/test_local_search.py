@@ -8,14 +8,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2._util.covariance_array import (
+from ldetect_lite._util.covariance_array import (
     CovariancePartition,
     load_chromosome_covariance,
     local_search_partition,
 )
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
-from ldetect2.io.partitions import CovarianceStore
-from ldetect2.local_search import (
+from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect_lite.io.partitions import CovarianceStore
+from ldetect_lite.local_search import (
     DenseLocalSearchAccumulator,
     LocalSearch,
     _first_seen_pair_mask,
@@ -25,7 +25,7 @@ from ldetect2.local_search import (
     _segment_rows_from_hdf5_partitions,
     local_search_hdf5_partition,
 )
-from ldetect2.metric import Metric
+from ldetect_lite.metric import Metric
 from tests._partition_fixtures import (
     divergent_overlap_partitions,
     first_write_wins_pair_value,
@@ -655,7 +655,7 @@ def test_cached_array_local_search_does_not_reload_partitions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ldetect2.local_search as local_search_mod
+    import ldetect_lite.local_search as local_search_mod
 
     loci = [100, 200, 300, 400, 500, 600, 700, 800, 900]
     partitions = [(100, 400), (300, 700), (600, 900)]

@@ -1,4 +1,4 @@
-"""ldetect2 unified CLI entry point."""
+"""ldetect-lite unified CLI entry point."""
 
 from __future__ import annotations
 
@@ -7,13 +7,13 @@ import logging
 import sys
 from typing import cast
 
-from ldetect2 import __version__
-from ldetect2._util.logging import configure_logging
+from ldetect_lite import __version__
+from ldetect_lite._util.logging import configure_logging
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="ldetect2",
+        prog="ldetect",
         description="Compute approximately independent LD blocks in the human genome.",
     )
     parser.add_argument(
@@ -33,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.required = True
 
     # Register all subcommands
-    from ldetect2._cli import (
+    from ldetect_lite._cli import (
         cmd_covariance,
         cmd_covariance_summary,
         cmd_extract_bpoints,

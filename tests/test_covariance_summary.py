@@ -7,10 +7,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2._cli.main import main
-from ldetect2._util.covariance_summary import summarize_covariance
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
-from ldetect2.io.partitions import CovarianceStore
+from ldetect_lite._cli.main import main
+from ldetect_lite._util.covariance_summary import summarize_covariance
+from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect_lite.io.partitions import CovarianceStore
 
 
 def _write_hdf5_partition(

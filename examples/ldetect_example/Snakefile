@@ -7,11 +7,11 @@ Reference data (chr2:39967768-40067768, 379 EUR individuals) is downloaded
 from BitBucket. The original VCF is not publicly archived, so this example
 starts from the reference covariance matrix in the legacy 8-column gzipped text
 format. The workflow converts that reference-only .gz file to the current
-ldetect2 HDF5 partition format before any ldetect2 command consumes it.
+ldetect-lite HDF5 partition format before any ldetect-lite command consumes it.
 
 Pipeline steps:
     0  Download reference intermediates from BitBucket
-    1  Stage reference covariance as ldetect2 HDF5 (example-only compatibility)
+    1  Stage reference covariance as ldetect-lite HDF5 (example-only compatibility)
     2  Stage reference partition file
     3  Run matrix-to-vector   (compare vs reference vector)
     4  Run find-minima         (compare vs reference breakpoints)
@@ -110,7 +110,7 @@ rule download_ref:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Stage reference covariance as ldetect2 HDF5
+# Step 1: Stage reference covariance as ldetect-lite HDF5
 # ---------------------------------------------------------------------------
 
 rule convert_ref_covariance:
@@ -150,7 +150,7 @@ rule matrix_to_vector:
         str(WORK_VECTOR),
     shell:
         """
-        uv run ldetect2 matrix-to-vector \
+        uv run ldetect matrix-to-vector \
             --dataset-path {WORK_DIR} \
             --name {CHROM} \
             --output {output}
@@ -169,7 +169,7 @@ rule find_minima:
         str(WORK_BPTS),
     shell:
         """
-        uv run ldetect2 find-minima \
+        uv run ldetect find-minima \
             --input {input.vector} \
             --chr-name {CHROM} \
             --dataset-path {WORK_DIR} \
@@ -190,7 +190,7 @@ rule extract_bpoints:
         str(WORK_BED),
     shell:
         """
-        uv run ldetect2 extract-bpoints \
+        uv run ldetect extract-bpoints \
             --name {CHROM} \
             --dataset-path {WORK_DIR} \
             --breakpoints {input.bpts} \
@@ -211,7 +211,7 @@ rule partition_chromosome:
     shell:
         """
         mkdir -p $(dirname {output})
-        uv run ldetect2 partition-chromosome \
+        uv run ldetect partition-chromosome \
             --genetic-map {input} \
             --n-individuals {N_INDS} \
             --ne {NE} \

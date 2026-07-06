@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2.shrinkage import _pairwise_ld_impl
+from ldetect_lite.shrinkage import _pairwise_ld_impl
 
 NE = 11418.0
 THETA = 0.01

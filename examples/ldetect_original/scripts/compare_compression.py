@@ -1,4 +1,4 @@
-"""Compare `ldetect2 run --covariance-compression zstd` against `lzf`.
+"""Compare `ldetect run --covariance-compression zstd` against `lzf`.
 
 Both modes run on identical filtered VCF/map/individuals input and
 compression is lossless, so the two outputs are expected to be exact matches
@@ -44,7 +44,7 @@ from pathlib import Path
 
 from compare_blocks import compare_chrom
 
-from ldetect2.io.bed import read_single_chrom_bed
+from ldetect_lite.io.bed import read_single_chrom_bed
 
 
 def _vector_map(path: Path) -> dict[int, float]:

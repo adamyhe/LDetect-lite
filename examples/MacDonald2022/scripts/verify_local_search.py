@@ -1,4 +1,4 @@
-"""Replay ldetect2's LocalSearch for one breakpoint and inspect the full metric
+"""Replay ldetect-lite's LocalSearch for one breakpoint and inspect the full metric
 curve across its search window, not just the reported optimum.
 
 Motivation: for several "Category B" MacDonald2022 pyrho boundary mismatches
@@ -34,8 +34,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2.io.partitions import CovarianceStore
-from ldetect2.local_search import LocalSearch
+from ldetect_lite.io.partitions import CovarianceStore
+from ldetect_lite.local_search import LocalSearch
 
 
 def _midpoint(a: int, b: int) -> int:

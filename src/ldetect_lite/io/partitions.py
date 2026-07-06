@@ -6,7 +6,7 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from ldetect2._util.logging import log_debug
+from ldetect_lite._util.logging import log_debug
 
 
 @dataclass(frozen=True)

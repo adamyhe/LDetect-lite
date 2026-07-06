@@ -50,7 +50,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.interpolate_maps import interpolate, interpolate_intervals
+    from ldetect_lite.interpolate_maps import interpolate, interpolate_intervals
 
     fn = interpolate if args.mode == "point" else interpolate_intervals
     fn(

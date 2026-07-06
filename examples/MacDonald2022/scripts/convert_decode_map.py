@@ -1,9 +1,9 @@
-"""Convert the deCODE recombination map to the 3-column format expected by ldetect2.
+"""Convert the deCODE recombination map to the 3-column format expected by ldetect_lite.
 
 The deCODE supplementary file S3 (aau1043_datas3.gz) has 5 columns:
     chr  interval_start  interval_end  cM_per_Mb  cumulative_cM
 
-ldetect2 interpolate-maps expects a gzipped file with a header line, then:
+ldetect interpolate-maps expects a gzipped file with a header line, then:
     position  rate_cM_Mb  genetic_position_cM
 
 This script splits the genome-wide deCODE file into one per-chromosome file,

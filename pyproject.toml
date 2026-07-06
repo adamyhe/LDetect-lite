@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ldetect2"
+name = "ldetect-lite"
 version = "0.1.0"
 description = "Fast calculation of approximately independent LD blocks"
 readme = "README.md"
@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 heatmap = ["matplotlib>=3.7"]
+profiling = ["psutil>=5.9"]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
@@ -41,10 +42,12 @@ dev = [
 ]
 
 [project.scripts]
-ldetect2 = "ldetect2._cli.main:main"
+ldetect-lite = "ldetect_lite._cli.main:main"
+ldetect = "ldetect_lite._cli.main:main"
+ldl = "ldetect_lite._cli.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ldetect2"]
+packages = ["src/ldetect_lite"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

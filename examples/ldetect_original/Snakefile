@@ -7,14 +7,14 @@ Reproduces the EUR / AFR / ASN analyses from:
 Reference panel:  1000G Phase 1 (GRCh37, release 20110521, 1,092 individuals)
 Genetic maps:     HapMap-interpolated per-SNP maps from joepickrell/1000-genomes-genetic-maps
 Note:             Phase 1 VCF chromosomes use bare integers (1, 2, ...) — no "chr" prefix.
-                  ldetect2 is invoked with --chromosome {N}; the BED assembly step
+                  ldetect-lite is invoked with --chromosome {N}; the BED assembly step
                   restores the "chr" prefix to match the published block files.
 
 Pipeline steps:
     0  Data download (VCFs + TBI, genetic maps, panel annotation, reference BED blocks)
     1  Individual list preparation (subpopulation intersection with VCF)
     2  Population-specific VCF filtering (MAC >= 1 after sample subsetting)
-    3  LD block detection per chromosome × population (ldetect2 run)
+    3  LD block detection per chromosome × population (ldetect run)
     4  Genome-wide BED assembly (cat all chromosomes, restore chr prefix)
     5  Compare against published ldetect blocks
 
@@ -197,12 +197,12 @@ rule filter_vcf:
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Run ldetect2 per chromosome × population
+# Step 3: Run ldetect-lite per chromosome × population
 # Note: --chromosome uses bare integer (e.g. 1) to match Phase 1 VCF CHROM field.
 # ---------------------------------------------------------------------------
 
 
-rule run_ldetect2:
+rule run_ldetect:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=FILT_VCF,
@@ -211,11 +211,11 @@ rule run_ldetect2:
     output:
         bed=str(RESULTS / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
     log:
-        run=str(RESULTS / "logs" / "{population}" / "{chrom}.ldetect2.log"),
+        run=str(RESULTS / "logs" / "{population}" / "{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{population}" / "{chrom}.timing.log"),
     benchmark:
         str(RESULTS / "logs" / "{population}" / "{chrom}.benchmark.tsv")
-    threads: config.get("ldetect2_job_threads", config["workers"])
+    threads: config.get("ldetect_job_threads", config["workers"])
     params:
         output_dir=str(RESULTS / "{population}" / "{chrom}"),
         log_dir=str(RESULTS / "logs" / "{population}"),
@@ -230,7 +230,7 @@ rule run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect2 run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \

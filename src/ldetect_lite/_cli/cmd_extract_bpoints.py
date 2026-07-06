@@ -49,8 +49,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.io.bed import write_bed
-    from ldetect2.io.partitions import CovarianceStore, read_partitions
+    from ldetect_lite.io.bed import write_bed
+    from ldetect_lite.io.partitions import CovarianceStore, read_partitions
 
     store = CovarianceStore(root=args.dataset_path)
     partitions = read_partitions(args.name, store)

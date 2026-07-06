@@ -14,8 +14,8 @@ from typing import Any, cast
 
 import numpy as np
 
-from ldetect2._util.binary_search import find_ge_ind, find_le_ind
-from ldetect2._util.covariance_array import (
+from ldetect_lite._util.binary_search import find_ge_ind, find_le_ind
+from ldetect_lite._util.covariance_array import (
     ChromosomeCovariance,
     CovariancePartition,
     LocalSearchPartition,
@@ -24,18 +24,18 @@ from ldetect2._util.covariance_array import (
     load_covariance_partitions,
     local_search_partition,
 )
-from ldetect2._util.logging import log_debug, log_msg
-from ldetect2.io.covariance import (
+from ldetect_lite._util.logging import log_debug, log_msg
+from ldetect_lite.io.covariance import (
     Matrix,
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
-from ldetect2.io.covariance_hdf5 import (
+from ldetect_lite.io.covariance_hdf5 import (
     CovarianceRowChunk,
     HDF5CovariancePartitionReader,
     open_covariance_reader,
 )
-from ldetect2.io.partitions import CovarianceStore, get_final_partitions
+from ldetect_lite.io.partitions import CovarianceStore, get_final_partitions
 
 _PREC = 50
 

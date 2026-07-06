@@ -7,13 +7,13 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2._cli.cmd_run import (
+from ldetect_lite._cli.cmd_run import (
     _breakpoint_subsets_for_run,
     _is_valid_covariance_partition,
     _resolve_workers,
     register,
 )
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
 
 
 def test_full_covariance_partition_validates_against_full_schema(

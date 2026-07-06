@@ -20,7 +20,7 @@ maps_dir: data/maps
 resources_dir: resources
 results_dir: results
 
-# ldetect2 parameters
+# ldetect-lite parameters
 cov_cutoff: 0.0000001
 covariance_cache: compact
 n_snps_bw_bpoints: 10000

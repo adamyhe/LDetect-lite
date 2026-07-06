@@ -1,6 +1,6 @@
 # Pipeline: individual steps
 
-`ldetect2 run` (see `README.md`) chains all five stages below end-to-end and is the recommended way to run the pipeline. This doc covers running each stage individually — useful for debugging, restarting a partial run, or inspecting intermediate outputs.
+`ldetect run` (see `README.md`) chains all five stages below end-to-end and is the recommended way to run the pipeline. This doc covers running each stage individually — useful for debugging, restarting a partial run, or inspecting intermediate outputs.
 
 The pipeline has five stages that can be run individually:
 
@@ -9,7 +9,7 @@ The pipeline has five stages that can be run individually:
 **Step 1 — Partition chromosome** into overlapping windows:
 
 ```bash
-uv run ldetect2 partition-chromosome \
+uv run ldetect partition-chromosome \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --n-individuals 379 \
   --output chr2_partitions.txt
@@ -30,15 +30,15 @@ Arguments:
 
 ```bash
 tabix -h 1000G.chr2.vcf.gz chr2:39967768-40067768 | \
-  uv run ldetect2 calc-covariance \
+  uv run ldetect calc-covariance \
     --genetic-map chr2.interpolated_genetic_map.gz \
     --individuals eurinds.txt \
     --output cov_matrix/chr2/chr2.39967768.40067768.h5
 ```
 
-This step must be run once per partition. `ldetect2 run --workers N` runs partitions in parallel automatically.
+This step must be run once per partition. `ldetect run --workers N` runs partitions in parallel automatically.
 
-Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect2 run` defaults to the compact schema described above.
+Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect run` defaults to the compact schema described above.
 
 Arguments:
 - `--genetic-map PATH` — gzipped 3-column map used to convert physical positions to genetic distances (cM) for the shrinkage estimator
@@ -52,7 +52,7 @@ Arguments:
 **Step 3 — Matrix to vector**:
 
 ```bash
-uv run ldetect2 matrix-to-vector \
+uv run ldetect matrix-to-vector \
   --dataset-path cov_matrix/ \
   --name chr2 \
   --output vector-chr2.txt.gz
@@ -64,17 +64,17 @@ Arguments:
 - `--dataset-path PATH` — root directory containing the partition `.h5` files and the partition list
 - `--name TEXT` — chromosome name, used to locate files under `dataset-path`
 - `--snp-first / --snp-last INT` — restrict the vector to a sub-range of positions (auto-detected from partition boundaries if omitted)
-- `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output (requires `ldetect2[heatmap]`)
+- `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output (requires `ldetect-lite[heatmap]`)
 - `--workers N` — parallel workers for partition-level vector computation (default: 1)
 
-`--generate-heatmap` requires full-schema covariance partitions. If your cache was created by the default `ldetect2 run` mode, rerun with `ldetect2 run --covariance-cache full` or create full partitions with standalone `ldetect2 calc-covariance`.
+`--generate-heatmap` requires full-schema covariance partitions. If your cache was created by the default `ldetect run` mode, rerun with `ldetect run --covariance-cache full` or create full partitions with standalone `ldetect calc-covariance`.
 
 ---
 
 **Step 4 — Find breakpoints**:
 
 ```bash
-uv run ldetect2 find-minima \
+uv run ldetect find-minima \
   --input vector-chr2.txt.gz \
   --chr-name chr2 \
   --dataset-path cov_matrix/ \
@@ -106,7 +106,7 @@ Arguments:
 ### Inspect covariance cache size
 
 ```bash
-uv run ldetect2 covariance-summary \
+uv run ldetect covariance-summary \
   --dataset-path cov_matrix/ \
   --name chr2 \
   --format tsv
@@ -126,7 +126,7 @@ Arguments:
 **Step 5 — Extract to BED**:
 
 ```bash
-uv run ldetect2 extract-bpoints \
+uv run ldetect extract-bpoints \
   --name chr2 \
   --dataset-path cov_matrix/ \
   --breakpoints breakpoints-chr2.json \

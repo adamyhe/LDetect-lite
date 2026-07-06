@@ -1,4 +1,4 @@
-"""Convert ldetect2 HDF5 covariance partitions to legacy ldetect .gz text."""
+"""Convert ldetect-lite HDF5 covariance partitions to legacy ldetect .gz text."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import csv
 import gzip
 from pathlib import Path
 
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
 
 
 def _parse_bounds(path: Path) -> tuple[int, int]:

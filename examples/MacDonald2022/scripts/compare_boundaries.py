@@ -8,8 +8,8 @@ import bisect
 import csv
 from pathlib import Path
 
-from ldetect2._util.intervals import boundaries
-from ldetect2.io.bed import read_genome_bed
+from ldetect_lite._util.intervals import boundaries
+from ldetect_lite.io.bed import read_genome_bed
 
 
 def nearest_boundary(

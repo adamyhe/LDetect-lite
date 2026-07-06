@@ -2,7 +2,7 @@
 
 Mirrors tests/test_compare_signal_cache_script.py's dynamic-load pattern:
 this diagnostic script is meant to run against a real Snakemake-produced
-dual-mode `ldetect2 run` (baseline lzf vs zstd), which isn't available in a
+dual-mode `ldetect run` (baseline lzf vs zstd), which isn't available in a
 fresh checkout, so it is unit-tested here against hand-built fixtures shaped
 like real output instead.
 """
@@ -18,7 +18,7 @@ from types import ModuleType
 
 import pytest
 
-from ldetect2.io.bed import write_bed
+from ldetect_lite.io.bed import write_bed
 
 _SCRIPT_DIR = (
     Path(__file__).resolve().parents[1]

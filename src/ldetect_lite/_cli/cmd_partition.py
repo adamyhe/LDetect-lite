@@ -57,7 +57,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.shrinkage import partition_chromosome
+    from ldetect_lite.shrinkage import partition_chromosome
 
     partition_chromosome(
         genetic_map_path=args.genetic_map,

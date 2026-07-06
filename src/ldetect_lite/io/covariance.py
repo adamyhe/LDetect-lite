@@ -9,9 +9,9 @@ import gzip
 from pathlib import Path
 from typing import Any
 
-from ldetect2._util.logging import log_debug, log_msg
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
-from ldetect2.io.partitions import CovarianceStore
+from ldetect_lite._util.logging import log_debug, log_msg
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
+from ldetect_lite.io.partitions import CovarianceStore
 
 # ---------------------------------------------------------------------------
 # Column indices for row-list insertion helpers:
@@ -169,7 +169,7 @@ def read_partition_into_matrix(
     if not path.exists():
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. Regenerate covariance "
-            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+            "with `ldetect run` or `ldetect calc-covariance`."
         )
     try:
         with open_covariance_reader(
@@ -257,7 +257,7 @@ def read_partition_into_matrix_lean(
     if not path.exists():
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. Regenerate covariance "
-            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+            "with `ldetect run` or `ldetect calc-covariance`."
         )
     try:
         with open_covariance_reader(

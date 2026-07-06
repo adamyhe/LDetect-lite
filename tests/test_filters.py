@@ -1,10 +1,10 @@
-"""Tests for ldetect2.filters."""
+"""Tests for ldetect_lite.filters."""
 
 from __future__ import annotations
 
 import numpy as np
 
-from ldetect2.filters import (
+from ldetect_lite.filters import (
     apply_filter,
     apply_filter_get_minima,
     apply_filter_get_minima_ind,

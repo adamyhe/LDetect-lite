@@ -13,25 +13,25 @@ from typing import TypedDict
 
 import numpy as np
 
-from ldetect2._util.binary_search import find_ge_ind, find_le_ind
-from ldetect2._util.covariance_array import (
+from ldetect_lite._util.binary_search import find_ge_ind, find_le_ind
+from ldetect_lite._util.covariance_array import (
     ChromosomeCovariance,
     LocalSearchPartition,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
     metric_from_arrays,
 )
-from ldetect2._util.logging import log_msg
-from ldetect2._util.memory import log_memory_checkpoint, max_rss_mib
-from ldetect2.filters import apply_filter, apply_filter_get_minima, get_minima_loc
-from ldetect2.find_minima import custom_binary_search_with_trackback
-from ldetect2.io.covariance import MetricDict
-from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
-from ldetect2.local_search import (
+from ldetect_lite._util.logging import log_msg
+from ldetect_lite._util.memory import log_memory_checkpoint, max_rss_mib
+from ldetect_lite.filters import apply_filter, apply_filter_get_minima, get_minima_loc
+from ldetect_lite.find_minima import custom_binary_search_with_trackback
+from ldetect_lite.io.covariance import MetricDict
+from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
+from ldetect_lite.local_search import (
     LocalSearch,
     LocalSearchHDF5Partition,
     local_search_hdf5_partition,
 )
-from ldetect2.metric import Metric
+from ldetect_lite.metric import Metric
 
 _LocalSearchDetails = dict[str, decimal.Decimal | float]
 
@@ -81,7 +81,7 @@ def find_breakpoints(
     Args:
         input_path: Gzipped vector file (position \\t corr_sum).
         chr_name: Chromosome name (e.g. ``"chr2"``).
-        store: :class:`~ldetect2.io.partitions.CovarianceStore` pointing at the
+        store: :class:`~ldetect_lite.io.partitions.CovarianceStore` pointing at the
             covariance matrix directory.
         n_snps_bw_bpoints: Target mean number of SNPs between breakpoints.
             Ignored when *n_bpoints* is provided.
@@ -406,7 +406,7 @@ def _local_search_worker(
     :class:`ProcessPoolExecutor`.  It keeps the previous fail-soft behavior:
     errors are logged and the original breakpoint is returned unchanged.
     """
-    from ldetect2._util.logging import log_debug, log_msg
+    from ldetect_lite._util.logging import log_debug, log_msg
 
     init_seconds = 0.0
     search_seconds = 0.0

@@ -1,4 +1,4 @@
-"""Convert the reference ldetect covariance fixture to ldetect2 HDF5 format.
+"""Convert the reference ldetect covariance fixture to ldetect-lite HDF5 format.
 
 Input column order:
     i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2.io.covariance_hdf5 import (
+from ldetect_lite.io.covariance_hdf5 import (
     validate_covariance_hdf5,
     write_covariance_partition_hdf5,
 )

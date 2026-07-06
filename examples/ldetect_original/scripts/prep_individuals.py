@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ldetect2.io.vcf import read_vcf_samples
+from ldetect_lite.io.vcf import read_vcf_samples
 
 
 def read_panel(panel_path: Path, subpops: list[str]) -> set[str]:

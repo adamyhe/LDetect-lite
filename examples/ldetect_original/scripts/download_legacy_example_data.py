@@ -1,6 +1,6 @@
 """Download optional legacy ldetect toy example data.
 
-The legacy diagnostics pipeline stages its own inputs from ldetect2 outputs and
+The legacy diagnostics pipeline stages its own inputs from ldetect_lite outputs and
 does not require these files. They are useful only when inspecting or manually
 running the vendored legacy example scripts.
 """

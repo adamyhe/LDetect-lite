@@ -6,7 +6,7 @@ SNP positions are called in each release. It cannot see genotype- or
 phasing-level differences at *shared* positions, e.g. re-imputation or
 re-phasing between 1000 Genomes Phase 1 releases (v1 -> v2 -> v3). Those are
 exactly what feeds the Wen & Stephens shrinkage covariance in
-``ldetect2.shrinkage``, so this script targets them directly.
+``ldetect_lite.shrinkage``, so this script targets them directly.
 
 For a deterministic, evenly-spaced sample of nearby SNP pairs (positions
 present in both VCFs), it computes minor allele frequency and pairwise
@@ -123,7 +123,7 @@ def read_phased_haplotypes(
     A physical position can have more than one VCF record (e.g. a SNP and a
     co-located indel, or a split multiallelic site); ``bcftools query``
     emits all of them. This keeps only the *first* one per position, in
-    on-disk file order, matching how ``ldetect2.shrinkage.calc_covariance``
+    on-disk file order, matching how ``ldetect_lite.shrinkage.calc_covariance``
     resolves the same situation when it streams a VCF (see
     notes/logs/ldetect-original-main-pipeline-audit.md, "Duplicate-position /
     cross-partition equivalence"). A plain last-write-wins dict assignment

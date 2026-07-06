@@ -20,8 +20,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import TextIO
 
-from ldetect2._util.intervals import boundaries
-from ldetect2.io.bed import Block, read_genome_bed
+from ldetect_lite._util.intervals import boundaries
+from ldetect_lite.io.bed import Block, read_genome_bed
 
 
 def open_text(path: Path) -> TextIO:

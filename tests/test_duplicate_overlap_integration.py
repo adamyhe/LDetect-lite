@@ -19,10 +19,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
-from ldetect2.local_search import LocalSearch
-from ldetect2.matrix_analysis import MatrixAnalysis
-from ldetect2.metric import Metric
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
+from ldetect_lite.local_search import LocalSearch
+from ldetect_lite.matrix_analysis import MatrixAnalysis
+from ldetect_lite.metric import Metric
 from tests._partition_fixtures import (
     build_two_overlapping_partitions_with_duplicate_position,
 )

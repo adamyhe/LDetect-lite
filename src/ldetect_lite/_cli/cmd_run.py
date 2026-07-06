@@ -8,7 +8,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from ldetect2.io.covariance_hdf5 import validate_covariance_hdf5
+from ldetect_lite.io.covariance_hdf5 import validate_covariance_hdf5
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
 
@@ -182,8 +182,8 @@ def _calc_partition(
     """
     Wraps tabix > calc_covariance so we can run as a worker process.
     """
-    from ldetect2._util.memory import log_memory_checkpoint
-    from ldetect2.shrinkage import calc_covariance
+    from ldetect_lite._util.memory import log_memory_checkpoint
+    from ldetect_lite.shrinkage import calc_covariance
 
     region = f"{chrom}:{start}-{end}"
     try:
@@ -224,14 +224,14 @@ def _resolve_workers(explicit: int | None, default: int) -> int:
 def _run(args: argparse.Namespace) -> int:
     import json
 
-    import ldetect2
-    from ldetect2._util.logging import log_msg
-    from ldetect2._util.memory import log_memory_checkpoint
-    from ldetect2.io.bed import write_bed
-    from ldetect2.io.partitions import CovarianceStore, read_partitions
-    from ldetect2.matrix_analysis import MatrixAnalysis
-    from ldetect2.pipeline import find_breakpoints
-    from ldetect2.shrinkage import partition_chromosome
+    import ldetect_lite
+    from ldetect_lite._util.logging import log_msg
+    from ldetect_lite._util.memory import log_memory_checkpoint
+    from ldetect_lite.io.bed import write_bed
+    from ldetect_lite.io.partitions import CovarianceStore, read_partitions
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.pipeline import find_breakpoints
+    from ldetect_lite.shrinkage import partition_chromosome
 
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -242,9 +242,9 @@ def _run(args: argparse.Namespace) -> int:
 
     store = CovarianceStore(root=output_dir)
     log_msg(
-        "ldetect2 runtime: "
-        f"version={getattr(ldetect2, '__version__', 'unknown')} "
-        f"source={Path(ldetect2.__file__).resolve()}"
+        "ldetect-lite runtime: "
+        f"version={getattr(ldetect_lite, '__version__', 'unknown')} "
+        f"source={Path(ldetect_lite.__file__).resolve()}"
     )
     log_memory_checkpoint("run_start")
 

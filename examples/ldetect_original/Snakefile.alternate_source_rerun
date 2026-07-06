@@ -6,10 +6,10 @@ LD blocks has been ruled out by sampling-based diagnostics (see
 notes/logs/ldetect-original-main-pipeline-audit.md): VCF release-version
 provenance (both which positions are called and actual phasing-sensitive LD),
 SNP-only vs. all-variant filtering, genetic map family, and
-duplicate-position/cross-partition handling in ldetect2 itself.
+duplicate-position/cross-partition handling in ldetect-lite itself.
 
 This workflow runs the direct, conclusive test instead of another sample-based
-diagnostic: the full `ldetect2 run` pipeline, end to end, once per (alternate
+diagnostic: the full `ldetect run` pipeline, end to end, once per (alternate
 1000G release x divergent chromosome), then compares each result against the
 same published reference BED the main pipeline uses. If any alternate release
 reproduces a chromosome that v3 doesn't, that is a direct answer rather than
@@ -30,7 +30,7 @@ Pipeline steps:
        can differ slightly by release)
     2  Population-specific VCF filtering (MAC >= 1 after sample subsetting,
        "all" variant types, matching the production pipeline exactly)
-    3  Full ldetect2 run per (source x population x divergent chromosome)
+    3  Full ldetect run per (source x population x divergent chromosome)
     4  Compare each result against the published reference BED
     5  Combine all comparisons into one summary TSV
 
@@ -263,11 +263,11 @@ rule download_ref_bed:
 
 
 # ---------------------------------------------------------------------------
-# Step 3: full ldetect2 run per (source x population x divergent chromosome)
+# Step 3: full ldetect run per (source x population x divergent chromosome)
 # ---------------------------------------------------------------------------
 
 
-rule run_ldetect2_alt_source:
+rule run_ldetect_alt_source:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=lambda wc: filtered_vcf_path(wc.source, VARIANT_FILTER, wc.population, wc.chrom),
@@ -277,7 +277,7 @@ rule run_ldetect2_alt_source:
     output:
         bed=str(ALT_RESULTS / "{source}" / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
     log:
-        run=str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.ldetect2.log"),
+        run=str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.ldetect.log"),
         timing=str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.timing.log"),
     benchmark:
         str(ALT_RESULTS / "logs" / "{source}" / "{population}" / "{chrom}.benchmark.tsv")
@@ -296,7 +296,7 @@ rule run_ldetect2_alt_source:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect2 run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \

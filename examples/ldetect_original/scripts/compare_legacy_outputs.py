@@ -1,4 +1,4 @@
-"""Compare ldetect2 and vendored legacy ldetect diagnostic outputs."""
+"""Compare ldetect-lite and vendored legacy ldetect diagnostic outputs."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from compare_blocks import compare_chrom
 
-from ldetect2.io.bed import read_genome_bed
+from ldetect_lite.io.bed import read_genome_bed
 
 
 def _vector_digest(path: Path) -> tuple[int, str]:
@@ -47,40 +47,40 @@ def _compare_blocks_for_chrom(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chromosome", required=True)
-    parser.add_argument("--ldetect2-vector", required=True, type=Path)
+    parser.add_argument("--ldetect-lite-vector", required=True, type=Path)
     parser.add_argument("--legacy-vector", required=True, type=Path)
-    parser.add_argument("--ldetect2-breakpoints", required=True, type=Path)
+    parser.add_argument("--ldetect-lite-breakpoints", required=True, type=Path)
     parser.add_argument("--legacy-breakpoints", required=True, type=Path)
-    parser.add_argument("--ldetect2-bed", required=True, type=Path)
+    parser.add_argument("--ldetect-lite-bed", required=True, type=Path)
     parser.add_argument("--legacy-bed", required=True, type=Path)
     parser.add_argument("--reference-bed", required=True, type=Path)
     parser.add_argument("--subset", default="fourier_ls")
     parser.add_argument("--tolerance", type=int, default=100_000)
-    parser.add_argument("--ldetect2-vs-legacy", required=True, type=Path)
+    parser.add_argument("--ldetect-lite-vs-legacy", required=True, type=Path)
     parser.add_argument("--legacy-vs-reference", required=True, type=Path)
     args = parser.parse_args()
 
-    l2_rows, l2_hash = _vector_digest(args.ldetect2_vector)
+    l2_rows, l2_hash = _vector_digest(args.ldetect_vector)
     legacy_rows, legacy_hash = _vector_digest(args.legacy_vector)
-    l2_loci = _read_loci(args.ldetect2_breakpoints, args.subset)
+    l2_loci = _read_loci(args.ldetect_breakpoints, args.subset)
     legacy_loci = _read_loci(args.legacy_breakpoints, args.subset)
     paired = list(zip(l2_loci, legacy_loci))
     identical_loci = sum(a == b for a, b in paired)
     bed_row = _compare_blocks_for_chrom(
-        args.ldetect2_bed, args.legacy_bed, args.chromosome, args.tolerance
+        args.ldetect_bed, args.legacy_bed, args.chromosome, args.tolerance
     )
 
-    args.ldetect2_vs_legacy.parent.mkdir(parents=True, exist_ok=True)
-    with args.ldetect2_vs_legacy.open("w", newline="") as f:
+    args.ldetect_vs_legacy.parent.mkdir(parents=True, exist_ok=True)
+    with args.ldetect_vs_legacy.open("w", newline="") as f:
         cols = [
             "chrom",
             "vector_rows_equal",
             "vector_sha256_equal",
-            "ldetect2_vector_rows",
+            "ldetect_vector_rows",
             "legacy_vector_rows",
-            "ldetect2_vector_sha256",
+            "ldetect_vector_sha256",
             "legacy_vector_sha256",
-            "ldetect2_n_loci",
+            "ldetect_n_loci",
             "legacy_n_loci",
             "identical_loci",
             "all_loci_equal",
@@ -98,11 +98,11 @@ def main() -> None:
                 "chrom": f"chr{args.chromosome}",
                 "vector_rows_equal": l2_rows == legacy_rows,
                 "vector_sha256_equal": l2_hash == legacy_hash,
-                "ldetect2_vector_rows": l2_rows,
+                "ldetect_vector_rows": l2_rows,
                 "legacy_vector_rows": legacy_rows,
-                "ldetect2_vector_sha256": l2_hash,
+                "ldetect_vector_sha256": l2_hash,
                 "legacy_vector_sha256": legacy_hash,
-                "ldetect2_n_loci": len(l2_loci),
+                "ldetect_n_loci": len(l2_loci),
                 "legacy_n_loci": len(legacy_loci),
                 "identical_loci": identical_loci,
                 "all_loci_equal": l2_loci == legacy_loci,

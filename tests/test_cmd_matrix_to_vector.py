@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from ldetect2._cli.cmd_matrix_to_vector import register
+from ldetect_lite._cli.cmd_matrix_to_vector import register
 
 
 def _parse_matrix_to_vector_args(extra: list[str]) -> argparse.Namespace:

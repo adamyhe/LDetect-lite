@@ -1,4 +1,4 @@
-"""Post-process ldetect2 BED output for MacDonald2022 replication.
+"""Post-process ldetect-lite BED output for MacDonald2022 replication.
 
 Operations:
   1. Optional centromere removal — drop blocks overlapping a centromeric region.
@@ -22,7 +22,7 @@ import gzip
 import subprocess
 from pathlib import Path
 
-from ldetect2.io.bed import read_single_chrom_bed, write_block_bed
+from ldetect_lite.io.bed import read_single_chrom_bed, write_block_bed
 
 # ---------------------------------------------------------------------------
 # Centromere removal

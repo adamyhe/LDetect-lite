@@ -1,4 +1,4 @@
-"""Summarise ldetect2 diagnostic runs and combine per-chromosome summaries."""
+"""Summarise ldetect-lite diagnostic runs and combine per-chromosome summaries."""
 
 from __future__ import annotations
 
@@ -10,8 +10,6 @@ import json
 import math
 import statistics
 from pathlib import Path
-
-import numpy as np
 
 SUMMARY_COLS = [
     "population",

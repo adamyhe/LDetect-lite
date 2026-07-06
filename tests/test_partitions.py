@@ -1,4 +1,4 @@
-"""Tests for ldetect2.io.partitions."""
+"""Tests for ldetect_lite.io.partitions."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ldetect2.io.partitions import (
+from ldetect_lite.io.partitions import (
     CovarianceStore,
     first_last,
     read_partitions,

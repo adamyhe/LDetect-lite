@@ -7,12 +7,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2._util.covariance_array import (
+from ldetect_lite._util.covariance_array import (
     _load_partition_arrays,
     load_covariance_partitions,
 )
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
-from ldetect2.io.partitions import CovarianceStore
+from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect_lite.io.partitions import CovarianceStore
 
 
 def test_load_partition_arrays_reports_invalid_hdf5_schema(tmp_path: Path) -> None:

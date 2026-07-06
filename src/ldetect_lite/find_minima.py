@@ -6,8 +6,8 @@ from collections.abc import Callable
 
 import numpy as np
 
-from ldetect2._util.binary_search import find_le_ind
-from ldetect2._util.logging import log_msg
+from ldetect_lite._util.binary_search import find_le_ind
+from ldetect_lite._util.logging import log_msg
 
 
 class FlexibleBoundedAccessor:

@@ -5,15 +5,15 @@ from __future__ import annotations
 import decimal
 from bisect import bisect_left
 
-from ldetect2._util.covariance_array import metric_from_files
-from ldetect2._util.logging import log_debug, log_msg
-from ldetect2.io.covariance import (
+from ldetect_lite._util.covariance_array import metric_from_files
+from ldetect_lite._util.logging import log_debug, log_msg
+from ldetect_lite.io.covariance import (
     Matrix,
     MetricDict,
     delete_loci_smaller_than_leanest,
     read_partition_into_matrix_lean,
 )
-from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
+from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
 
 _PREC = 50
 

@@ -67,8 +67,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.io.partitions import CovarianceStore
-    from ldetect2.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.io.partitions import CovarianceStore
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
 
     store = CovarianceStore(root=args.dataset_path)
     analysis = MatrixAnalysis(

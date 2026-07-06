@@ -9,10 +9,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2._util.logging import log_debug
-from ldetect2.io.covariance import MetricDict
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
-from ldetect2.io.partitions import CovarianceStore
+from ldetect_lite._util.logging import log_debug
+from ldetect_lite.io.covariance import MetricDict
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
+from ldetect_lite.io.partitions import CovarianceStore
 
 _DEFAULT_CHUNK_ROWS = 1_000_000
 _METRIC_WORKER_BREAKPOINTS: np.ndarray | None = None
@@ -99,7 +99,7 @@ def _load_partition_arrays(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarr
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. Array-backed covariance "
             "operations require HDF5 covariance partitions; regenerate covariance "
-            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+            "with `ldetect run` or `ldetect calc-covariance`."
         )
 
     start, end = _partition_bounds_from_path(path)

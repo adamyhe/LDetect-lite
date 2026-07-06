@@ -258,7 +258,7 @@ rule filter_vcf:
         """
 
 
-rule diagnostic_run_ldetect2:
+rule diagnostic_run_ldetect:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=FILT_VCF.replace("{population}", DIAG_POP),
@@ -270,9 +270,9 @@ rule diagnostic_run_ldetect2:
         vector=str(DIAG_ROOT / "{chrom}" / "run" / "vector-{chrom}.txt.gz"),
         partitions=str(DIAG_ROOT / "{chrom}" / "run" / "{chrom}_partitions.txt"),
     log:
-        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2.log"),
+        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect.log"),
         timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing.log"),
-    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
+    threads: config.get("ldetect_job_threads", config.get("workers", 4))
     params:
         output_dir=diag_run_dir,
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
@@ -291,7 +291,7 @@ rule diagnostic_run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect2 run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -319,7 +319,7 @@ rule diagnostic_input_summary:
         filtered_vcf=FILT_VCF.replace("{population}", DIAG_POP),
         filtered_tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
-        partitions=rules.diagnostic_run_ldetect2.output.partitions,
+        partitions=rules.diagnostic_run_ldetect.output.partitions,
         script="scripts/diagnose_inputs.py",
     output:
         str(DIAG_ROOT / "{chrom}" / "input_summary.tsv"),
@@ -340,9 +340,9 @@ rule diagnostic_input_summary:
 
 rule diagnostic_summarise_run:
     input:
-        bed=rules.diagnostic_run_ldetect2.output.bed,
-        breakpoints=rules.diagnostic_run_ldetect2.output.breakpoints,
-        vector=rules.diagnostic_run_ldetect2.output.vector,
+        bed=rules.diagnostic_run_ldetect.output.bed,
+        breakpoints=rules.diagnostic_run_ldetect.output.breakpoints,
+        vector=rules.diagnostic_run_ldetect.output.vector,
         script="scripts/diagnose_run.py",
     output:
         str(DIAG_ROOT / "{chrom}" / "summary.tsv"),
@@ -359,7 +359,7 @@ rule diagnostic_summarise_run:
         """
 
 
-rule diagnostic_run_ldetect2_omni:
+rule diagnostic_run_ldetect_omni:
     input:
         genetic_map=rules.download_omni_map.output[0],
         vcf=FILT_VCF.replace("{population}", DIAG_POP),
@@ -372,9 +372,9 @@ rule diagnostic_run_ldetect2_omni:
         ),
         vector=str(DIAG_ROOT / "{chrom}" / "omni_run" / "vector-{chrom}.txt.gz"),
     log:
-        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect2_omni.log"),
+        run=str(DIAG_ROOT / "{chrom}" / "logs" / "ldetect_omni.log"),
         timing=str(DIAG_ROOT / "{chrom}" / "logs" / "timing_omni.log"),
-    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
+    threads: config.get("ldetect_job_threads", config.get("workers", 4))
     params:
         output_dir=lambda wc: str(DIAG_ROOT / str(wc.chrom) / "omni_run"),
         log_dir=str(DIAG_ROOT / "{chrom}" / "logs"),
@@ -393,7 +393,7 @@ rule diagnostic_run_ldetect2_omni:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect2 run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -416,9 +416,9 @@ rule diagnostic_run_ldetect2_omni:
 
 rule diagnostic_summarise_omni_run:
     input:
-        bed=rules.diagnostic_run_ldetect2_omni.output.bed,
-        breakpoints=rules.diagnostic_run_ldetect2_omni.output.breakpoints,
-        vector=rules.diagnostic_run_ldetect2_omni.output.vector,
+        bed=rules.diagnostic_run_ldetect_omni.output.bed,
+        breakpoints=rules.diagnostic_run_ldetect_omni.output.breakpoints,
+        vector=rules.diagnostic_run_ldetect_omni.output.vector,
         script="scripts/diagnose_run.py",
     output:
         str(DIAG_ROOT / "{chrom}" / "omni_summary.tsv"),
@@ -437,7 +437,7 @@ rule diagnostic_summarise_omni_run:
 
 rule diagnostic_compare_omni_blocks:
     input:
-        ours=rules.diagnostic_run_ldetect2_omni.output.bed,
+        ours=rules.diagnostic_run_ldetect_omni.output.bed,
         ref=str(RES_DIR / "ldetect_ref" / f"{DIAG_POP}_fourier_ls-all.bed"),
     output:
         str(DIAG_ROOT / "{chrom}" / "omni_block_comparison.tsv"),
@@ -455,7 +455,7 @@ rule diagnostic_compare_omni_blocks:
 
 rule diagnostic_compare_blocks:
     input:
-        ours=rules.diagnostic_run_ldetect2.output.bed,
+        ours=rules.diagnostic_run_ldetect.output.bed,
         ref=str(RES_DIR / "ldetect_ref" / f"{DIAG_POP}_fourier_ls-all.bed"),
     output:
         str(DIAG_ROOT / "{chrom}" / "block_comparison.tsv"),

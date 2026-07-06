@@ -1,7 +1,7 @@
 """Shared covariance-partition fixture builders for cross-module overlap tests.
 
 Not a test module itself (leading underscore keeps pytest from collecting it,
-mirroring the ``src/ldetect2/_util/`` naming convention). Centralizes fixture
+mirroring the ``src/ldetect_lite/_util/`` naming convention). Centralizes fixture
 builders that were previously duplicated or under-varied across
 ``test_local_search.py``, ``test_covariance_io.py``, and ``test_metric.py``, so
 ``matrix_analysis``, ``metric``, and ``local_search`` can all be exercised
@@ -15,9 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
-from ldetect2.io.partitions import CovarianceStore
-from ldetect2.shrinkage import calc_covariance
+from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect_lite.io.partitions import CovarianceStore
+from ldetect_lite.shrinkage import calc_covariance
 
 
 def make_custom_partitioned_store(
@@ -98,7 +98,7 @@ def first_write_wins_pair_value(
     are read in the given (ascending/list) order into one shared mapping, and
     a pair already present in that mapping is never replaced. Deliberately
     reimplemented with plain Python containers here rather than importing
-    anything from ``ldetect2.io``/``ldetect2._util``, so it serves as ground
+    anything from ``ldetect_lite.io``/``ldetect_lite._util``, so it serves as ground
     truth independent of the code under test, not a self-comparison.
     """
     seen: dict[tuple[int, int], float] = {}

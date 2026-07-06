@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import re
+import subprocess
 from pathlib import Path
 
 import yaml

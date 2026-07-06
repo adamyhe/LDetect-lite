@@ -8,7 +8,7 @@ import numpy as np
 import scipy.ndimage as ndimage
 import scipy.signal as sig
 
-from ldetect2._util.logging import log_msg
+from ldetect_lite._util.logging import log_msg
 
 
 class FilterResult(TypedDict):

@@ -1,10 +1,10 @@
-"""Tests for ldetect2._util.binary_search."""
+"""Tests for ldetect_lite._util.binary_search."""
 
 from __future__ import annotations
 
 import pytest
 
-from ldetect2._util.binary_search import (
+from ldetect_lite._util.binary_search import (
     find_ge,
     find_ge_ind,
     find_gt,

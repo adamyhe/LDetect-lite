@@ -11,8 +11,8 @@ ref/cov_matrix/{chrom}/{chrom}.{start}.{end}.gz
 ```
 
 The workflow treats that file as a reference input only and converts it to the
-current ldetect2 HDF5 partition format before running
-`ldetect2 matrix-to-vector`:
+current ldetect-lite HDF5 partition format before running
+`ldetect matrix-to-vector`:
 
 ```text
 work/{chrom}/{chrom}.{start}.{end}.h5

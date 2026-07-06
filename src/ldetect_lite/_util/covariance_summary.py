@@ -8,8 +8,8 @@ from typing import Literal
 
 import numpy as np
 
-from ldetect2.io.covariance_hdf5 import open_covariance_reader
-from ldetect2.io.partitions import CovarianceStore, first_last, get_final_partitions
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
+from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
 
 MiB = 1024 * 1024
 
@@ -140,7 +140,7 @@ def _read_partition_positions(path: Path) -> tuple[np.ndarray, np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. Regenerate covariance "
-            "with `ldetect2 run` or `ldetect2 calc-covariance`."
+            "with `ldetect run` or `ldetect calc-covariance`."
         )
     start, end = _partition_bounds_from_path(path)
     with open_covariance_reader(path, start, end) as reader:

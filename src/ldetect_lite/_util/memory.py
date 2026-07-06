@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from ldetect2._util.logging import log_debug, log_msg
+from ldetect_lite._util.logging import log_debug, log_msg
 
 
 def current_rss_mib() -> float | None:

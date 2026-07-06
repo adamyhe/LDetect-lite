@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for ldetect2 tests."""
+"""Shared pytest fixtures for ldetect-lite tests."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ldetect2.io.partitions import CovarianceStore
+from ldetect_lite.io.partitions import CovarianceStore
 
 # Local cache directory (gitignored).
 DATA_DIR = Path(__file__).parent / "data"

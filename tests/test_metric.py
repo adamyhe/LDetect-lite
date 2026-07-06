@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from ldetect2.io.covariance_hdf5 import write_covariance_partition_hdf5
-from ldetect2.io.partitions import CovarianceStore
-from ldetect2.metric import Metric
+from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
+from ldetect_lite.io.partitions import CovarianceStore
+from ldetect_lite.metric import Metric
 from tests._partition_fixtures import (
     divergent_overlap_partitions,
     first_write_wins_pair_value,
@@ -153,7 +153,7 @@ def test_array_metric_matches_legacy_with_divergent_overlap_pair(
 def test_metric_covariance_loader_does_not_retain_raw_partitions(
     tmp_path: Path,
 ) -> None:
-    from ldetect2._util.covariance_array import (
+    from ldetect_lite._util.covariance_array import (
         load_chromosome_covariance,
         load_metric_covariance,
         metric_from_arrays,
@@ -182,7 +182,7 @@ def test_metric_covariance_loader_does_not_retain_raw_partitions(
 def test_streaming_metric_matches_materialized_array_for_multiple_breakpoints(
     tmp_path: Path,
 ) -> None:
-    from ldetect2._util.covariance_array import (
+    from ldetect_lite._util.covariance_array import (
         load_metric_covariance,
         metric_from_arrays,
         metric_from_files,
@@ -211,8 +211,8 @@ def test_streaming_metric_workers_match_single_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ldetect2._util.covariance_array as covariance_array
-    from ldetect2._util.covariance_array import metric_from_files
+    import ldetect_lite._util.covariance_array as covariance_array
+    from ldetect_lite._util.covariance_array import metric_from_files
 
     loci = [100, 200, 300, 400, 500, 600]
     r2 = {
@@ -255,8 +255,8 @@ def test_high_precision_metric_ignores_supplied_covariance_arrays(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import ldetect2.pipeline as pipeline_mod
-    from ldetect2._util.covariance_array import load_chromosome_covariance
+    import ldetect_lite.pipeline as pipeline_mod
+    from ldetect_lite._util.covariance_array import load_chromosome_covariance
 
     loci = [100, 200, 300, 400, 500]
     store = _make_store(tmp_path, loci, {(200, 400): 0.25}, compact=True)

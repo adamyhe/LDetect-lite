@@ -807,7 +807,7 @@ wheels = [
 ]
 
 [[package]]
-name = "ldetect2"
+name = "ldetect-lite"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -831,6 +831,9 @@ dev = [
 heatmap = [
     { name = "matplotlib" },
 ]
+profiling = [
+    { name = "psutil" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -846,6 +849,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numba", specifier = ">=0.57" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "psutil", marker = "extra == 'profiling'", specifier = ">=5.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
@@ -854,7 +858,7 @@ requires-dist = [
     { name = "snakemake", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "snakemake-executor-plugin-slurm", marker = "extra == 'dev'" },
 ]
-provides-extras = ["heatmap", "dev"]
+provides-extras = ["heatmap", "profiling", "dev"]
 
 [package.metadata.requires-dev]
 dev = [

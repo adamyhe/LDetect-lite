@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from ldetect2._cli.cmd_covariance import register
+from ldetect_lite._cli.cmd_covariance import register
 
 
 def _parse_args(extra: list[str]) -> argparse.Namespace:

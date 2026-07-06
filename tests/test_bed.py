@@ -1,4 +1,4 @@
-"""Tests for ldetect2.io.bed."""
+"""Tests for ldetect_lite.io.bed."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from ldetect2.io.bed import (
+from ldetect_lite.io.bed import (
     read_genome_bed,
     read_single_chrom_bed,
     write_bed,

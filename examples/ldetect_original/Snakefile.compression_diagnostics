@@ -1,7 +1,7 @@
 """Diagnose the covariance-compression codec's performance and exactness on
 real data, at full-genome scale.
 
-Runs `ldetect2 run` twice per chromosome x population on identical filtered
+Runs `ldetect run` twice per chromosome x population on identical filtered
 1000G input -- once with `--covariance-compression lzf` (the prior default)
 and once with `--covariance-compression zstd` (the new default: smaller and
 faster to read/write at equal precision, see
@@ -155,11 +155,11 @@ rule compression_filter_vcf:
 
 
 # ---------------------------------------------------------------------------
-# Dual-mode ldetect2 run: identical input, --covariance-compression lzf vs zstd
+# Dual-mode ldetect run: identical input, --covariance-compression lzf vs zstd
 # ---------------------------------------------------------------------------
 
 
-rule compression_run_ldetect2:
+rule compression_run_ldetect:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=FILT_VCF,
@@ -178,7 +178,7 @@ rule compression_run_ldetect2:
         timing=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
     benchmark:
         str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
-    threads: config.get("ldetect2_job_threads", config.get("workers", 4))
+    threads: config.get("ldetect_job_threads", config.get("workers", 4))
     params:
         output_dir=lambda wc: str(COMPRESSION_ROOT / wc.population / wc.chrom / wc.mode),
         log_dir=str(COMPRESSION_ROOT / "{population}" / "{chrom}" / "logs"),
@@ -197,7 +197,7 @@ rule compression_run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect2 run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 
-from ldetect2._cli.cmd_find_minima import register
-from ldetect2._cli.cmd_run import _resolve_workers
+from ldetect_lite._cli.cmd_find_minima import register
+from ldetect_lite._cli.cmd_run import _resolve_workers
 
 
 def _parse_find_minima_args(extra: list[str]) -> argparse.Namespace:

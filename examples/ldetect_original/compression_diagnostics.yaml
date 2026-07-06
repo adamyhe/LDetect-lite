@@ -16,14 +16,14 @@ subset: fourier_ls
 # other on identical input data -- 0 checks for exact breakpoint agreement.
 tolerance: 0
 
-# Keep internal ldetect2 parallelism conservative unless actively profiling
+# Keep internal ldetect-lite parallelism conservative unless actively profiling
 # on a high-memory machine; this only affects Step 2/Step 4 parallelism
-# inside each mode's `ldetect2 run` invocation, not which modes run
-# concurrently (see ldetect2_job_threads below).
+# inside each mode's `ldetect run` invocation, not which modes run
+# concurrently (see ldetect_job_threads below).
 covariance_cache: compact
 workers: 4
 
 # Snakemake scheduling guard: this rule claims many threads so `--cores 8`
-# still runs only one heavy chromosome x mode job at a time. ldetect2 itself
+# still runs only one heavy chromosome x mode job at a time. ldetect-lite itself
 # still receives workers/local_search_workers above.
-ldetect2_job_threads: 4
+ldetect_job_threads: 4

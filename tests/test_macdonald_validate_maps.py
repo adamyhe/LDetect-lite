@@ -28,7 +28,7 @@ def _write_gz(path: Path, text: str) -> None:
         f.write(text)
 
 
-def test_summarise_map_reads_ldetect2_interpolated_format(tmp_path: Path) -> None:
+def test_summarise_map_reads_ldetect_interpolated_format(tmp_path: Path) -> None:
     module = _load_validate_maps_module()
     map_path = tmp_path / "chr1.tab.gz"
     _write_gz(

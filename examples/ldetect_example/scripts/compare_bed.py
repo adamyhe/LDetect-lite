@@ -13,7 +13,7 @@ import argparse
 import csv
 from pathlib import Path
 
-from ldetect2.io.bed import read_single_chrom_bed
+from ldetect_lite.io.bed import read_single_chrom_bed
 
 
 def main() -> None:

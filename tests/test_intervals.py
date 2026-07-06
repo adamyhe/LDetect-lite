@@ -1,8 +1,8 @@
-"""Tests for ldetect2._util.intervals."""
+"""Tests for ldetect_lite._util.intervals."""
 
 from __future__ import annotations
 
-from ldetect2._util.intervals import (
+from ldetect_lite._util.intervals import (
     boundary_jaccard,
     bp_jaccard,
     intersect_intervals,

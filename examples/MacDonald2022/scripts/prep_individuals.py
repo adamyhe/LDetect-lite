@@ -19,7 +19,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from ldetect2.io.vcf import read_vcf_samples
+from ldetect_lite.io.vcf import read_vcf_samples
 
 
 def read_population_directory_samples(base_url: str, subpops: list[str]) -> set[str]:

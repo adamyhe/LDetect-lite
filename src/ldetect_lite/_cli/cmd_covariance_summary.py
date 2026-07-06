@@ -58,11 +58,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2._util.covariance_summary import (
+    from ldetect_lite._util.covariance_summary import (
         SUMMARY_COLUMNS,
         summarize_covariance,
     )
-    from ldetect2.io.partitions import CovarianceStore
+    from ldetect_lite.io.partitions import CovarianceStore
 
     store = CovarianceStore(root=args.dataset_path)
     partitions, total = summarize_covariance(

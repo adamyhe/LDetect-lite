@@ -71,7 +71,7 @@ def read_bed_boundaries(path: Path, chrom: str) -> list[int]:
 
 
 def hann_smooth(values: np.ndarray, width: int) -> np.ndarray:
-    """Same Hann-window convolution as ldetect2.filters.apply_filter."""
+    """Same Hann-window convolution as ldetect_lite.filters.apply_filter."""
     from scipy import ndimage
 
     window = np.hanning(2 * width + 1)

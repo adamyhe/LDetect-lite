@@ -1,10 +1,10 @@
-"""Tests for ldetect2.io.vcf."""
+"""Tests for ldetect_lite.io.vcf."""
 
 from __future__ import annotations
 
 import subprocess
 
-from ldetect2.io.vcf import read_vcf_samples
+from ldetect_lite.io.vcf import read_vcf_samples
 
 
 def test_read_vcf_samples_invokes_bcftools_query(monkeypatch, tmp_path):

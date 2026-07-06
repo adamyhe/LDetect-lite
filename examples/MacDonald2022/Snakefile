@@ -9,16 +9,16 @@ Pipeline steps:
     1  VCF filtering with bcftools (MAF ≥ 0.01, SNPs only)
     2  Individual list preparation (1000G population dirs ∩ VCF samples)
     2a-2c deCODE map conversion/interpolation -- diagnostic only (regression-
-       checks our own ldetect2 interpolate-maps against MacDonald's published
+       checks our own ldetect interpolate-maps against MacDonald's published
        maps via validate_maps/compare_maps); the EUR block set itself uses
        MacDonald's published deCODE_interpolated_maps directly, same as pyrho.
        compare_maps/compare_maps_point_mode together are an interpolation
-       equivalence test: ldetect2 interpolate-maps --mode interval is a
+       equivalence test: ldetect interpolate-maps --mode interval is a
        direct port of MacDonald's R interpolation scripts and should match
        their published maps almost exactly, while --mode point (the prior
        default) reproduces the interval-shift bug those scripts fixed -- see
        notes/logs/macdonald2022-interpolation-port.md
-    3  LD block detection per chromosome (ldetect2 run)
+    3  LD block detection per chromosome (ldetect run)
     4  Post-processing: centromere removal + small block merging
     5  Genome-wide BED assembly (cat all chromosomes)
 
@@ -364,7 +364,7 @@ rule interpolate_map:
     shell:
         """
         mkdir -p {MAPS_DIR}/interpolated
-        uv run ldetect2 interpolate-maps \
+        uv run ldetect interpolate-maps \
             --snp-file {input.snps} \
             --genetic-map {input.map} \
             --output {output} \
@@ -386,7 +386,7 @@ rule interpolate_map_point:
     shell:
         """
         mkdir -p {MAPS_DIR}/interpolated_point
-        uv run ldetect2 interpolate-maps \
+        uv run ldetect interpolate-maps \
             --snp-file {input.snps} \
             --genetic-map {input.map} \
             --output {output} \
@@ -395,9 +395,9 @@ rule interpolate_map_point:
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Run ldetect2 per chromosome × block set
+# Step 3: Run ldetect-lite per chromosome × block set
 #
-# The shared ldetect2 covariance code applies the covariance cutoff before
+# The shared ldetect-lite covariance code applies the covariance cutoff before
 # adding the diagonal shrinkage term, matching original ldetect behavior and
 # preventing population-monomorphic variants from entering the covariance
 # output. deCODE block sets use the interpolated deCODE map; pyrho block sets
@@ -405,7 +405,7 @@ rule interpolate_map_point:
 # ---------------------------------------------------------------------------
 
 
-rule run_ldetect2:
+rule run_ldetect:
     input:
         genetic_map=block_set_genetic_map,
         vcf=block_set_filtered_vcf,
@@ -415,7 +415,7 @@ rule run_ldetect2:
     output:
         bed=str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.bed"),
     log:
-        run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect2.log"),
+        run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
     benchmark:
         str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.benchmark.tsv")
@@ -433,7 +433,7 @@ rule run_ldetect2:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect2 run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -455,7 +455,7 @@ rule run_ldetect2:
 
 rule postprocess:
     input:
-        bed=rules.run_ldetect2.output.bed,
+        bed=rules.run_ldetect.output.bed,
         vcf=block_set_filtered_vcf,
         centromeres=rules.download_centromeres.output[0],
     output:

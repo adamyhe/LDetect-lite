@@ -1,4 +1,4 @@
-"""Tests for ldetect2.interpolate_maps."""
+"""Tests for ldetect_lite.interpolate_maps."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ldetect2.interpolate_maps import interpolate, interpolate_intervals
+from ldetect_lite.interpolate_maps import interpolate, interpolate_intervals
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -123,9 +123,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2._cli.cmd_run import _resolve_workers
-    from ldetect2.io.partitions import CovarianceStore
-    from ldetect2.pipeline import find_breakpoints
+    from ldetect_lite._cli.cmd_run import _resolve_workers
+    from ldetect_lite.io.partitions import CovarianceStore
+    from ldetect_lite.pipeline import find_breakpoints
 
     metric_workers = _resolve_workers(args.metric_workers, args.workers)
 

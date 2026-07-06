@@ -2,13 +2,13 @@
 
 **Human-oriented reference.** This documents completed, shipped performance work only, for readers who want to understand *why* the pipeline is fast. It is not a task list or a log — in-progress investigation notes and design history live under `notes/logs/`; distilled current-status findings live under `notes/findings/`.
 
-This document summarises the performance improvements applied to `ldetect2` since the initial implementation.
+This document summarises the performance improvements applied to `ldetect-lite` since the initial implementation.
 
 ---
 
 ## 1. Numba JIT for pairwise LD kernel (`shrinkage.py`)
 
-**Affected code:** `_pairwise_ld_impl` in `src/ldetect2/shrinkage.py`
+**Affected code:** `_pairwise_ld_impl` in `src/ldetect_lite/shrinkage.py`
 
 The inner pairwise LD kernel was decorated with `@_jit` (`numba.njit(cache=True)` when Numba is available, no-op otherwise). The vectorised inner loop uses `np.sum(a * b)` instead of an explicit Python loop (Numba does not support `np.dot` on `uint8` arrays via BLAS).
 
@@ -18,11 +18,11 @@ The inner pairwise LD kernel was decorated with `@_jit` (`numba.njit(cache=True)
 
 ## 2. Parallel covariance calculation (`_cli/cmd_run.py`)
 
-**Affected code:** `src/ldetect2/_cli/cmd_run.py`
+**Affected code:** `src/ldetect_lite/_cli/cmd_run.py`
 
 Covariance partitions are fully independent (each writes to its own `{name}.{start}.{end}.h5` file). The sequential loop was replaced with `concurrent.futures.ProcessPoolExecutor`. The tabix spawn + `calc_covariance` call was extracted into a module-level `_calc_partition(...)` function so it is picklable.
 
-**CLI:** `ldetect2 run --workers N`
+**CLI:** `ldetect run --workers N`
 
 **Speedup:** Linear with core count up to the number of partitions (~40 per chromosome).
 
@@ -59,8 +59,8 @@ The original implementation used `decimal.Decimal` at 50-digit precision for all
 `float` is now the default. Decimal precision is opt-in via `--high-precision`:
 
 ```
-ldetect2 find-minima --high-precision ...
-ldetect2 run --high-precision ...
+ldetect find-minima --high-precision ...
+ldetect run --high-precision ...
 ```
 
 Internally controlled by `use_decimal: bool = False` on `LocalSearch.__init__`, `Metric.__init__`, and `find_breakpoints`.
@@ -69,11 +69,11 @@ Internally controlled by `use_decimal: bool = False` on `LocalSearch.__init__`, 
 
 ## 5. Parallel local search (`pipeline.py`)
 
-**Affected code:** `_run_local_search`, `_local_search_worker` in `src/ldetect2/pipeline.py`
+**Affected code:** `_run_local_search`, `_local_search_worker` in `src/ldetect_lite/pipeline.py`
 
 Each breakpoint's local search is independent. The sequential loop over breakpoints was replaced with `ProcessPoolExecutor`. The inner `_run_single` closure was extracted to a module-level `_local_search_worker(...)` function for picklability.
 
-**CLI:** `ldetect2 find-minima --workers N` and `ldetect2 run --local-search-workers N`.
+**CLI:** `ldetect find-minima --workers N` and `ldetect run --local-search-workers N`.
 
 **Speedup:** Linear with core count up to the number of breakpoints (~50–100 per chromosome).
 
@@ -81,7 +81,7 @@ Each breakpoint's local search is independent. The sequential loop over breakpoi
 
 ## 6. Eliminate `math.sqrt` per pair in matrix-to-vector conversion (`matrix_analysis.py`)
 
-**Affected code:** `calc_diag_lean` in `src/ldetect2/matrix_analysis.py`
+**Affected code:** `calc_diag_lean` in `src/ldetect_lite/matrix_analysis.py`
 
 The correlation coefficient was computed as `corr = cov / sqrt(diag_x * diag_y)` and then squared in `_add_corr_coeff`. Since only `r²` is needed, the sqrt is unnecessary:
 
@@ -103,7 +103,7 @@ For a partition with N loci, this eliminates one `math.sqrt` call per off-diagon
 
 ## 7. Indexed HDF5 covariance partition files (`shrinkage.py`, `io/covariance_hdf5.py`, `io/partitions.py`)
 
-**Affected code:** `calc_covariance` in `src/ldetect2/shrinkage.py`; HDF5 readers/writers in `src/ldetect2/io/covariance_hdf5.py`; `read_partition_into_matrix_lean`, `read_partition_into_matrix` in `src/ldetect2/io/covariance.py`; `CovarianceStore.partition_path` in `src/ldetect2/io/partitions.py`
+**Affected code:** `calc_covariance` in `src/ldetect_lite/shrinkage.py`; HDF5 readers/writers in `src/ldetect_lite/io/covariance_hdf5.py`; `read_partition_into_matrix_lean`, `read_partition_into_matrix` in `src/ldetect_lite/io/covariance.py`; `CovarianceStore.partition_path` in `src/ldetect_lite/io/partitions.py`
 
 Partition files are stored as indexed HDF5 files (`.h5`). HDF5 gives chunked reads, persistent row indexes, and a compact schema that supports restartable production runs without materializing full partitions.
 
@@ -123,7 +123,7 @@ write_covariance_partition_hdf5(
 )
 ```
 
-**Compact write side:** `ldetect2 run` defaults to `--covariance-cache compact`, which writes only `lo`, `hi`, `shrink_ld`, diagonal entries, and row indexes. The compact writer streams bounded chunks into HDF5 so large partitions do not need full `i_pos`/`j_pos`/metadata arrays in memory.
+**Compact write side:** `ldetect run` defaults to `--covariance-cache compact`, which writes only `lo`, `hi`, `shrink_ld`, diagonal entries, and row indexes. The compact writer streams bounded chunks into HDF5 so large partitions do not need full `i_pos`/`j_pos`/metadata arrays in memory.
 
 **Read side:** matrix-to-vector, metric, and local-search paths read typed HDF5 arrays and use the `lo_offsets` index for bounded row scans.
 
@@ -139,7 +139,7 @@ write_covariance_partition_hdf5(
 
 ## 8. Local variable caching for hot inner loop (`matrix_analysis.py`)
 
-**Affected code:** `calc_diag_lean` and `calc_diag` in `src/ldetect2/matrix_analysis.py`
+**Affected code:** `calc_diag_lean` and `calc_diag` in `src/ldetect_lite/matrix_analysis.py`
 
 `self.matrix` and `self.locus_list` are attribute lookups that Python resolves via `__getattribute__` on every access. In the innermost loop, these are accessed dozens of times per locus. Binding them to local variables before the outer `while` loop reduces attribute lookup overhead:
 
@@ -158,10 +158,10 @@ while curr_locus <= end_locus:
 
 ## 9. zstd covariance compression (`io/covariance_hdf5.py`)
 
-**Affected code:** `write_covariance_partition_hdf5`, `write_compact_covariance_partition_hdf5_chunks`/`_append` in `src/ldetect2/io/covariance_hdf5.py`
+**Affected code:** `write_covariance_partition_hdf5`, `write_compact_covariance_partition_hdf5_chunks`/`_append` in `src/ldetect_lite/io/covariance_hdf5.py`
 
 `shrink_ld` dominates covariance partition storage (82% of file size in measurement) and barely compresses under `lzf` (compression ratio 0.972). Switched the default HDF5 compression codec to `zstd` (via the new `hdf5plugin` dependency), which strictly dominates both `lzf` and `gzip` at full float64 precision — smaller, faster to write, and faster to read, with no tradeoff.
 
-**CLI:** `--covariance-compression {lzf,zstd}` on `ldetect2 run` and `ldetect2 calc-covariance` (default: `zstd`).
+**CLI:** `--covariance-compression {lzf,zstd}` on `ldetect run` and `ldetect calc-covariance` (default: `zstd`).
 
 **Measured impact:** validated on the full 1000G dataset (22 chromosomes x 3 populations): 66/66 chromosome x population combinations show byte-identical downstream vectors, exact breakpoints, and exact BED boundaries (compression is lossless), a 12.4% covariance-directory size reduction (1000.65 GB -> 876.43 GB), and a 1.2x aggregate wall-clock speedup.

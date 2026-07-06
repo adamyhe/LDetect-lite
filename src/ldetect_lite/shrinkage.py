@@ -12,7 +12,7 @@ from typing import IO, Any, TypeVar
 
 import numpy as np
 
-from ldetect2.io.covariance_hdf5 import (
+from ldetect_lite.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     CovarianceRowChunk,
     write_compact_covariance_partition_hdf5_append,
@@ -545,15 +545,15 @@ def calc_covariance(
         ne: Effective population size.
         cutoff: Pairs whose ``|Ds2| < cutoff`` are not written.
         compact_output: Write the compact restartable cache schema used by
-            ``ldetect2 run``.
+            ``ldetect run``.
         compact_chunk_rows: Approximate maximum compact HDF5 rows to hold while
             filling one bounded output chunk.
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
-            ``ldetect2.io.covariance_hdf5._dataset_compression_kwargs``.
+            ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
     """
-    from ldetect2._util.logging import log_debug
-    from ldetect2._util.memory import log_memory_checkpoint
+    from ldetect_lite._util.logging import log_debug
+    from ldetect_lite._util.memory import log_memory_checkpoint
 
     total_start = time.perf_counter()
     log_memory_checkpoint("calc_covariance_start", debug=True)

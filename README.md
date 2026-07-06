@@ -1,8 +1,8 @@
-# LDetect2
+# LDetect-lite
 
-[![PyPI](https://img.shields.io/pypi/v/ldetect2)](https://pypi.org/project/ldetect2/)
+[![PyPI](https://img.shields.io/pypi/v/ldetect-lite)](https://pypi.org/project/ldetect-lite/)
 [![Tests](https://github.com/adamyhe/ldetect2/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/ldetect2/actions/workflows/tests.yml)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/ldetect2?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/ldetect2)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/ldetect-lite?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/ldetect-lite)
 
 A modern, fast re-implementation of [LDetect](https://bitbucket.org/nygcresearch/ldetect), a method for calculating approximately independent linkage disequilibrium (LD) blocks in the human genome. The algorithm is described in [Berisa & Pickrell, 2016](https://academic.oup.com/bioinformatics/article/32/2/283/1743626).
 
@@ -11,26 +11,28 @@ A modern, fast re-implementation of [LDetect](https://bitbucket.org/nygcresearch
 Install from PyPI via:
 
 ```bash
-pip install ldetect2
+pip install ldetect-lite
 ```
 
 Or, with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv add ldetect2
+uv add ldetect-lite
 ```
 
-The main `ldetect2 run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect2 calc-covariance`, and so must be on PATH.
+This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, and `ldl` — so pick whichever is most convenient; examples below use `ldetect`.
 
-**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect2[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
+The main `ldetect run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect calc-covariance`, and so must be on PATH.
+
+**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
 
 ### Development
 
 Install from source
 
 ```bash
-git clone https://github.com/adamyhe/ldetect2.git
-cd ldetect2
+git clone https://github.com/adamyhe/ldetect-lite.git
+cd ldetect-lite
 uv sync --extra dev
 ```
 
@@ -41,7 +43,7 @@ From a development checkout, run CLI commands through `uv run` so they use the m
 ### End-to-end pipeline
 
 ```bash
-uv run ldetect2 run \
+uv run ldetect run \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --reference-panel 1000G.chr2.vcf.gz \
   --individuals eurinds.txt \
@@ -59,7 +61,7 @@ Options:
 
 - `--ne FLOAT` — effective population size Ne used by the Wen & Stephens shrinkage estimator (default: 11418.0, the CEU/HapMap II value; reproduction configs may override this for non-European populations)
 - `--cov-cutoff FLOAT` — LD pairs with absolute shrinkage correlation below this threshold are not written to disk, reducing storage (default: 1e-7)
-- `--covariance-cache {compact,full}` — partition cache schema for `ldetect2 run` (default: `compact`). Compact caches write only canonical position pairs, `shrink_ld`, diagonals, and lookup indexes, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
+- `--covariance-cache {compact,full}` — partition cache schema for `ldetect run` (default: `compact`). Compact caches write only canonical position pairs, `shrink_ld`, diagonals, and lookup indexes, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
 - `--covariance-compression {lzf,zstd}` — HDF5 compression codec for covariance partitions (default: `zstd`). `zstd` is smaller and faster to read/write than `lzf` at equal precision — see `docs/optimizations.md`.
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
@@ -78,7 +80,7 @@ Each of the five stages (partition, covariance, matrix-to-vector, find-minima, e
 Convert a recombination rate map (e.g. the [deCODE map](https://www.science.org/doi/10.1126/science.aau1043) or [HapMap-interpolated 1000G maps](https://github.com/joepickrell/1000-genomes-genetic-maps)) to per-SNP genetic positions required by steps 1 and 2:
 
 ```bash
-uv run ldetect2 interpolate-maps \
+uv run ldetect interpolate-maps \
   --snp-file snps.bed.gz \
   --genetic-map recombination_map.gz \
   --output chr2.interpolated_genetic_map.gz
@@ -106,8 +108,8 @@ The available breakpoint sets are `fourier` and `uniform` (raw minima from Fouri
 
 ## Known limitations
 
-`ldetect2` reproduces the published Berisa & Pickrell (2016) 1000 Genomes LD blocks exactly for ASN (all 22 autosomes) and AFR (all chromosomes except chr22), and matches EUR block counts and coverage exactly but with shifted internal boundaries on chr8–chr12. These two residual divergences (EUR chr8-12, AFR chr22) are understood to stem from an unidentified upstream input/provenance difference from the original authors' pipeline, not a bug in this implementation — an extensive diagnostic effort ruled out VCF release-version provenance, SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, and reference-BED integrity as causes. See `notes/findings/ldetect-original-reproduction.md` for the full writeup, and `notes/findings/macdonald2022-reproduction.md` for the equivalent status reproducing MacDonald et al. (2022)'s GRCh38 blocks.
+`ldetect-lite` reproduces the published Berisa & Pickrell (2016) 1000 Genomes LD blocks exactly for ASN (all 22 autosomes) and AFR (all chromosomes except chr22), and matches EUR block counts and coverage exactly but with shifted internal boundaries on chr8–chr12. These two residual divergences (EUR chr8-12, AFR chr22) are understood to stem from an unidentified upstream input/provenance difference from the original authors' pipeline, not a bug in this implementation — an extensive diagnostic effort ruled out VCF release-version provenance, SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, and reference-BED integrity as causes. See `notes/findings/ldetect-original-reproduction.md` for the full writeup, and `notes/findings/macdonald2022-reproduction.md` for the equivalent status reproducing MacDonald et al. (2022)'s GRCh38 blocks.
 
 ## Pre-computed LD blocks
 
-Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by 
+Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by [MacDonald et al.](https://www.biorxiv.org/content/10.1101/2022.03.04.483057v2).

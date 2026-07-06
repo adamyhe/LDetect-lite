@@ -40,7 +40,7 @@ def _parse_bed(path: Path) -> list[tuple[str, int, int]]:
 
 def test_matrix_to_vector_positions(example_data_dir, example_store, tmp_path):
     """Output positions should match the reference vector positions exactly."""
-    from ldetect2.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
 
     out_path = tmp_path / "vector.txt.gz"
     MatrixAnalysis("chr2", example_store).calc_diag_lean(out_path)
@@ -54,7 +54,7 @@ def test_matrix_to_vector_positions(example_data_dir, example_store, tmp_path):
 
 def test_matrix_to_vector_values(example_data_dir, example_store, tmp_path):
     """Output values should agree with the reference vector within tolerance."""
-    from ldetect2.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
 
     out_path = tmp_path / "vector.txt.gz"
     MatrixAnalysis("chr2", example_store).calc_diag_lean(out_path)
@@ -79,7 +79,7 @@ def test_matrix_to_vector_values(example_data_dir, example_store, tmp_path):
 
 def test_find_breakpoints_json_structure(example_data_dir, example_store, tmp_path):
     """find_breakpoints must produce valid JSON with expected subsets."""
-    from ldetect2.pipeline import find_breakpoints
+    from ldetect_lite.pipeline import find_breakpoints
 
     out_json = tmp_path / "breakpoints.json"
     ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
@@ -112,7 +112,7 @@ def test_find_breakpoints_fourier_subset_skips_local_search(
     monkeypatch,
 ):
     """Raw Fourier output should not pay local-search cost."""
-    import ldetect2.pipeline as pipeline_mod
+    import ldetect_lite.pipeline as pipeline_mod
 
     def fail_local_search(*args, **kwargs):
         raise AssertionError("local search should be skipped")
@@ -146,7 +146,7 @@ def test_find_breakpoints_fourier_ls_skips_uniform_local_search(
     monkeypatch,
 ):
     """fourier_ls should run only Fourier local search and skip uniform work."""
-    import ldetect2.pipeline as pipeline_mod
+    import ldetect_lite.pipeline as pipeline_mod
 
     calls: list[str] = []
 
@@ -184,7 +184,7 @@ def test_find_breakpoints_uniform_ls_skips_fourier_local_search(
     monkeypatch,
 ):
     """uniform_ls needs uniform data but not Fourier local search."""
-    import ldetect2.pipeline as pipeline_mod
+    import ldetect_lite.pipeline as pipeline_mod
 
     calls: list[str] = []
 
@@ -218,7 +218,7 @@ def test_find_breakpoints_uniform_ls_skips_fourier_local_search(
 
 def test_find_breakpoints_loci_in_range(example_data_dir, example_store, tmp_path):
     """All breakpoint loci must fall within the chromosome range."""
-    from ldetect2.pipeline import find_breakpoints
+    from ldetect_lite.pipeline import find_breakpoints
 
     out_json = tmp_path / "breakpoints.json"
     ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
@@ -243,10 +243,10 @@ def test_find_breakpoints_uses_supplied_covariance_cache(
     monkeypatch,
 ):
     """Cached normal metrics should avoid reloading chromosome arrays."""
-    import ldetect2.local_search as local_search_mod
-    import ldetect2.pipeline as pipeline_mod
-    from ldetect2._util.covariance_array import load_chromosome_covariance
-    from ldetect2.io.partitions import get_final_partitions
+    import ldetect_lite.local_search as local_search_mod
+    import ldetect_lite.pipeline as pipeline_mod
+    from ldetect_lite._util.covariance_array import load_chromosome_covariance
+    from ldetect_lite.io.partitions import get_final_partitions
 
     partitions = get_final_partitions(
         example_store,
@@ -293,9 +293,9 @@ def test_find_breakpoints_uses_supplied_covariance_cache(
 
 def test_full_pipeline_bed_structure(example_store, tmp_path):
     """End-to-end pipeline must produce a BED file with correct structure."""
-    from ldetect2.io.bed import write_bed
-    from ldetect2.matrix_analysis import MatrixAnalysis
-    from ldetect2.pipeline import find_breakpoints
+    from ldetect_lite.io.bed import write_bed
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.pipeline import find_breakpoints
 
     vector_path = tmp_path / "vector.txt.gz"
     MatrixAnalysis("chr2", example_store).calc_diag_lean(vector_path)
@@ -333,9 +333,9 @@ def test_full_pipeline_bed_matches_reference(example_data_dir, example_store, tm
     NOTE: This test verifies numeric reproducibility.  If the algorithm diverges
     from the reference implementation, update the expected values accordingly.
     """
-    from ldetect2.io.bed import write_bed
-    from ldetect2.matrix_analysis import MatrixAnalysis
-    from ldetect2.pipeline import find_breakpoints
+    from ldetect_lite.io.bed import write_bed
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.pipeline import find_breakpoints
 
     vector_path = tmp_path / "vector.txt.gz"
     MatrixAnalysis("chr2", example_store).calc_diag_lean(vector_path)

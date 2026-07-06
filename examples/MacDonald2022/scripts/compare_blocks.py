@@ -25,7 +25,7 @@ import statistics
 import urllib.request
 from pathlib import Path
 
-from ldetect2._util.intervals import (
+from ldetect_lite._util.intervals import (
     block_sizes,
     boundaries,
     boundary_jaccard,
@@ -35,7 +35,7 @@ from ldetect2._util.intervals import (
     offset_stats,
     size_stats,
 )
-from ldetect2.io.bed import read_genome_bed
+from ldetect_lite.io.bed import read_genome_bed
 
 MACDONALDS_BED_BASE_URL = (
     "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38"

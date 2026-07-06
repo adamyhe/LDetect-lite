@@ -61,7 +61,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 
 
 def _run(args: argparse.Namespace) -> int:
-    from ldetect2.shrinkage import calc_covariance
+    from ldetect_lite.shrinkage import calc_covariance
 
     calc_covariance(
         vcf_stream=sys.stdin,

@@ -12,14 +12,17 @@ from typing import TypedDict
 
 import numpy as np
 
-from ldetect2._util.covariance_array import ChromosomeCovariance, CovariancePartition
-from ldetect2._util.logging import log_debug
-from ldetect2._util.memory import log_memory_checkpoint
-from ldetect2.io.covariance_hdf5 import (
+from ldetect_lite._util.covariance_array import (
+    ChromosomeCovariance,
+    CovariancePartition,
+)
+from ldetect_lite._util.logging import log_debug
+from ldetect_lite._util.memory import log_memory_checkpoint
+from ldetect_lite.io.covariance_hdf5 import (
     HDF5CovariancePartitionReader,
     open_covariance_reader,
 )
-from ldetect2.io.partitions import CovarianceStore
+from ldetect_lite.io.partitions import CovarianceStore
 
 MATRIX_TO_VECTOR_CHUNK_ROWS = 1_000_000
 
@@ -518,7 +521,7 @@ def _compute_diag_vector_partition_hdf5(
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. The array-backed "
             "matrix-to-vector path requires HDF5 covariance partitions; "
-            "regenerate covariance with `ldetect2 run` or `ldetect2 calc-covariance`."
+            "regenerate covariance with `ldetect run` or `ldetect calc-covariance`."
         )
 
     _log_vector_checkpoint(f"{checkpoint}_hdf5_open_start")
@@ -817,7 +820,7 @@ def _load_hdf5_partition(
         raise FileNotFoundError(
             f"Covariance partition {path} is missing. The array-backed "
             "matrix-to-vector path requires HDF5 covariance partitions; "
-            "regenerate covariance with `ldetect2 run` or `ldetect2 calc-covariance`."
+            "regenerate covariance with `ldetect run` or `ldetect calc-covariance`."
         )
 
     with open_covariance_reader(path, start, end) as reader:

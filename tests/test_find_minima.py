@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ldetect2.find_minima import FlexibleBoundedAccessor
+from ldetect_lite.find_minima import FlexibleBoundedAccessor
 
 
 def test_flexible_bounded_accessor_caches_width_counts() -> None:

@@ -25,7 +25,7 @@ import argparse
 import statistics
 from pathlib import Path
 
-from ldetect2._util.intervals import (
+from ldetect_lite._util.intervals import (
     block_sizes,
     boundaries,
     boundary_jaccard,
@@ -35,7 +35,7 @@ from ldetect2._util.intervals import (
     offset_stats,
     size_stats,
 )
-from ldetect2.io.bed import read_genome_bed
+from ldetect_lite.io.bed import read_genome_bed
 
 RECALL_TOLERANCES = [10_000, 25_000, 50_000, 100_000, 250_000, 500_000]
 
