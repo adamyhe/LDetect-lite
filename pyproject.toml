@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ldetect-lite"
+name = "LDetect-lite"
 version = "0.1.0"
 description = "Fast calculation of approximately independent LD blocks"
 readme = "README.md"
