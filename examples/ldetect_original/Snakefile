@@ -225,12 +225,11 @@ rule run_ldetect:
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
-        local_search_workers=config.get("local_search_workers", 1),
     shell:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        uv run ldetect run \
+            uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
             --individuals {input.individuals} \
@@ -242,8 +241,7 @@ rule run_ldetect:
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.workers} \
-            --local-search-workers {params.local_search_workers} \
-            > {log.run} 2>&1
+            >{log.run} 2>&1
         """
 
 
@@ -262,9 +260,9 @@ rule combine_beds:
         str(RESULTS / "{population}_LD_blocks.bed"),
     shell:
         """
-        echo -e "#chr\tstart\tstop" > {output}
+        echo -e "#chr\tstart\tstop" >{output}
         for f in {input}; do
-            tail -n +2 "$f" | sed 's/^/chr/' >> {output}
+            tail -n +2 "$f" | sed 's/^/chr/' >>{output}
         done
         """
 
@@ -287,7 +285,7 @@ rule compare_blocks:
         mkdir -p {RESULTS}/compare
         uv run python scripts/compare_blocks.py \
             --ours {input.ours} \
-            --ref  {input.ref} \
+            --ref {input.ref} \
             --output {output} \
             --tolerance {params.tolerance}
         """

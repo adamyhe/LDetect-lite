@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -164,6 +165,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         "--high-precision",
         action="store_true",
         help="Use 50-digit Decimal arithmetic for local search (slower).",
+    )
+    p.add_argument(
+        "--delete-covariance-cache",
+        action="store_true",
+        help=(
+            "Delete this chromosome's covariance partition cache after the run "
+            "completes successfully, to reclaim disk space. Trades away Step "
+            "2's skip-already-computed-partitions restart/resume speedup for "
+            "this chromosome and output directory (default: keep the cache)."
+        ),
     )
     p.set_defaults(func=_run)
 
@@ -370,9 +381,19 @@ def _run(args: argparse.Namespace) -> int:
         name=chrom, loci=loci, snp_first=snp_first, snp_last=snp_last, output=bed_path
     )
 
+    if args.delete_covariance_cache:
+        log_msg(f"Deleting covariance cache: {cov_dir}")
+        _delete_covariance_cache(cov_dir)
+
     log_msg(f"Done. BED file: {bed_path}")
     log_memory_checkpoint("run_end")
     return 0
+
+
+def _delete_covariance_cache(cov_dir: Path) -> None:
+    """Remove a chromosome's covariance partition directory, if present."""
+    if cov_dir.exists():
+        shutil.rmtree(cov_dir)
 
 
 def _count_individuals(path: Path) -> int:
