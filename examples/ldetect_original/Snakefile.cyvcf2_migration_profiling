@@ -1,38 +1,24 @@
-"""Profile the cyvcf2 VCF-I/O migration against the pre-migration baseline
-at real chromosome scale, and characterize the new BCF input path.
+"""Profile the cyvcf2 VCF-I/O migration at real chromosome scale, and
+byte-exactness check VCF vs. BCF input on the same (post-migration) code path.
 
 The migration replaced `calc_covariance`'s `tabix` subprocess + naive
-per-line text parser with `cyvcf2` (see
-notes/logs/covariance-cache-redesign-plan.md and the cyvcf2-vcf-io-migration
-branch) -- correctness was validated with unit tests (synthetic VCF/BCF
-fixtures, an independent naive-parser equivalence oracle), but not yet at
-real chromosome scale, and not for wall-clock/memory cost.
+per-line text parser with `cyvcf2` -- correctness was validated with unit
+tests (synthetic VCF/BCF fixtures, an independent naive-parser equivalence
+oracle), and the parsing-level speedup vs. the pre-migration path was already
+measured with real chromosome data on the covariance-cache-redesign branch.
+This harness does not re-litigate either of those: it runs a single install
+(this branch, via `uv run ldetect`) to record fresh wall-clock/peak-RSS
+numbers, and to check that VCF and BCF input to the *same* code path produce
+byte-exact output -- a real correctness check that needs no second install,
+since BCF support fell out of this migration and had no equivalent before it.
 
-Unlike this directory's other diagnostic Snakefiles (which compare two CLI
-flags of *one* install), there is no flag here to toggle between the old and
-new parser -- the old one was deleted, not kept side by side. So the two
-"modes" this workflow compares are two *separate installs* of two different
-commits, not two flags of one install. See
-cyvcf2_migration_profiling.yaml's docstring for the one-time `git worktree`
-setup this requires (not automated here -- managing git worktrees/venvs from
-inside a Snakemake rule would be unusual and easy to get wrong under
-parallel execution; this is a deliberate, documented manual step instead).
-
-Two things measured:
-    baseline vs cyvcf2  -- identical filtered VCF input, run through the two
-                           installs; checked for byte-exact vector/BED/
-                           breakpoints output (must be identical -- both are
-                           exact computations of the same thing) alongside
-                           wall-clock/peak-RSS via Snakemake's `benchmark:`
-                           directive.
-    cyvcf2_bcf          -- the new install only, against a .bcf/.csi version
-                           of the same filtered input. No baseline
-                           counterpart exists (the old parser never
-                           supported BCF), so this is a standalone
-                           performance characterization, not a correctness
-                           re-check (correctness of BCF-vs-VCF.gz equivalence
-                           is already covered by
-                           test_calc_covariance_bcf_matches_vcf_gz_output).
+Two things measured, both against a single install:
+    vcf vs bcf  -- identical filtered VCF content (one as .vcf.gz/.tbi, one
+                   converted to .bcf/.csi), run through the same `ldetect`
+                   install; checked for byte-exact vector/BED/breakpoints
+                   output (both are exact computations of the same thing)
+                   alongside wall-clock/peak-RSS via Snakemake's `benchmark:`
+                   directive, to characterize any format-level overhead.
 
 Usage:
     cd examples/ldetect_original/
@@ -63,10 +49,10 @@ FILT_VCF = str(
 )
 FILT_BCF = FILT_VCF.replace(".vcf.gz", ".bcf")
 
-MODES = ["baseline", "cyvcf2"]
-MODE_LDETECT_BIN = {
-    "baseline": config["baseline_ldetect_bin"],
-    "cyvcf2": config["new_ldetect_bin"],
+MODES = ["vcf", "bcf"]
+MODE_REFERENCE_PANEL = {
+    "vcf": FILT_VCF,
+    "bcf": FILT_BCF,
 }
 
 wildcard_constraints:
@@ -85,10 +71,6 @@ def pop_ne(population):
 rule all:
     input:
         str(RESULTS / "summary.tsv"),
-        expand(
-            str(RESULTS / "{chrom}" / "logs" / "cyvcf2_bcf.benchmark.tsv"),
-            chrom=CHROMS,
-        ),
 
 
 # ---------------------------------------------------------------------------
@@ -185,15 +167,14 @@ rule cyvcf2_migration_convert_bcf:
 
 
 # ---------------------------------------------------------------------------
-# Two-install ldetect run: identical input, baseline install vs cyvcf2 install
+# Single-install ldetect run: identical content, VCF.gz input vs BCF input
 # ---------------------------------------------------------------------------
 
 
 rule cyvcf2_migration_run_ldetect:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
-        vcf=FILT_VCF,
-        tbi=FILT_VCF + ".tbi",
+        reference_panel=lambda wc: MODE_REFERENCE_PANEL[wc.mode],
         individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
     output:
         bed=str(RESULTS / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
@@ -206,7 +187,6 @@ rule cyvcf2_migration_run_ldetect:
     threads: config.get("workers", 4)
     params:
         output_dir=lambda wc: str(RESULTS / wc.chrom / wc.mode),
-        ldetect_bin=lambda wc: MODE_LDETECT_BIN[wc.mode],
         workers=config.get("workers", 4),
         ne=pop_ne(POPULATION),
         cutoff=config["cov_cutoff"],
@@ -215,51 +195,9 @@ rule cyvcf2_migration_run_ldetect:
         """
         rm -rf {params.output_dir}
         mkdir -p {params.output_dir}
-        {params.ldetect_bin} run \
+        uv run ldetect run \
             --genetic-map {input.genetic_map} \
-            --reference-panel {input.vcf} \
-            --individuals {input.individuals} \
-            --chromosome {wildcards.chrom} \
-            --output-dir {params.output_dir} \
-            --ne {params.ne} \
-            --cov-cutoff {params.cutoff} \
-            --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
-            --subset fourier_ls \
-            --workers {params.workers} \
-            > {log.run} 2>&1
-        """
-
-
-rule cyvcf2_migration_run_ldetect_bcf:
-    input:
-        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
-        bcf=FILT_BCF,
-        csi=FILT_BCF + ".csi",
-        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
-    output:
-        bed=str(RESULTS / "{chrom}" / "cyvcf2_bcf" / "{chrom}-ld-blocks.bed"),
-        breakpoints=str(
-            RESULTS / "{chrom}" / "cyvcf2_bcf" / "breakpoints-{chrom}.json"
-        ),
-    log:
-        run=str(RESULTS / "{chrom}" / "logs" / "cyvcf2_bcf.log"),
-    benchmark:
-        str(RESULTS / "{chrom}" / "logs" / "cyvcf2_bcf.benchmark.tsv")
-    threads: config.get("workers", 4)
-    params:
-        output_dir=lambda wc: str(RESULTS / wc.chrom / "cyvcf2_bcf"),
-        ldetect_bin=config["new_ldetect_bin"],
-        workers=config.get("workers", 4),
-        ne=pop_ne(POPULATION),
-        cutoff=config["cov_cutoff"],
-        n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
-    shell:
-        """
-        rm -rf {params.output_dir}
-        mkdir -p {params.output_dir}
-        {params.ldetect_bin} run \
-            --genetic-map {input.genetic_map} \
-            --reference-panel {input.bcf} \
+            --reference-panel {input.reference_panel} \
             --individuals {input.individuals} \
             --chromosome {wildcards.chrom} \
             --output-dir {params.output_dir} \
@@ -273,25 +211,21 @@ rule cyvcf2_migration_run_ldetect_bcf:
 
 
 # ---------------------------------------------------------------------------
-# Compare baseline vs cyvcf2: exactness (vector/breakpoints/BED) +
-# performance (Snakemake benchmark: wall-clock, peak RSS)
+# Compare vcf vs bcf: exactness (vector/breakpoints/BED) + performance
+# (Snakemake benchmark: wall-clock, peak RSS) -- both from one install.
 # ---------------------------------------------------------------------------
 
 
 rule compare_cyvcf2_migration:
     input:
-        baseline_vector=str(RESULTS / "{chrom}" / "baseline" / "vector-{chrom}.txt.gz"),
-        new_vector=str(RESULTS / "{chrom}" / "cyvcf2" / "vector-{chrom}.txt.gz"),
-        baseline_breakpoints=str(
-            RESULTS / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
-        ),
-        new_breakpoints=str(
-            RESULTS / "{chrom}" / "cyvcf2" / "breakpoints-{chrom}.json"
-        ),
-        baseline_bed=str(RESULTS / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"),
-        new_bed=str(RESULTS / "{chrom}" / "cyvcf2" / "{chrom}-ld-blocks.bed"),
-        baseline_benchmark=str(RESULTS / "{chrom}" / "logs" / "baseline.benchmark.tsv"),
-        new_benchmark=str(RESULTS / "{chrom}" / "logs" / "cyvcf2.benchmark.tsv"),
+        vcf_vector=str(RESULTS / "{chrom}" / "vcf" / "vector-{chrom}.txt.gz"),
+        bcf_vector=str(RESULTS / "{chrom}" / "bcf" / "vector-{chrom}.txt.gz"),
+        vcf_breakpoints=str(RESULTS / "{chrom}" / "vcf" / "breakpoints-{chrom}.json"),
+        bcf_breakpoints=str(RESULTS / "{chrom}" / "bcf" / "breakpoints-{chrom}.json"),
+        vcf_bed=str(RESULTS / "{chrom}" / "vcf" / "{chrom}-ld-blocks.bed"),
+        bcf_bed=str(RESULTS / "{chrom}" / "bcf" / "{chrom}-ld-blocks.bed"),
+        vcf_benchmark=str(RESULTS / "{chrom}" / "logs" / "vcf.benchmark.tsv"),
+        bcf_benchmark=str(RESULTS / "{chrom}" / "logs" / "bcf.benchmark.tsv"),
     output:
         str(RESULTS / "{chrom}" / "compare.tsv"),
     params:
@@ -300,14 +234,14 @@ rule compare_cyvcf2_migration:
         """
         uv run python scripts/compare_cyvcf2_migration.py \
             --chromosome {wildcards.chrom} \
-            --baseline-vector {input.baseline_vector} \
-            --new-vector {input.new_vector} \
-            --baseline-breakpoints {input.baseline_breakpoints} \
-            --new-breakpoints {input.new_breakpoints} \
-            --baseline-bed {input.baseline_bed} \
-            --new-bed {input.new_bed} \
-            --baseline-benchmark {input.baseline_benchmark} \
-            --new-benchmark {input.new_benchmark} \
+            --vcf-vector {input.vcf_vector} \
+            --bcf-vector {input.bcf_vector} \
+            --vcf-breakpoints {input.vcf_breakpoints} \
+            --bcf-breakpoints {input.bcf_breakpoints} \
+            --vcf-bed {input.vcf_bed} \
+            --bcf-bed {input.bcf_bed} \
+            --vcf-benchmark {input.vcf_benchmark} \
+            --bcf-benchmark {input.bcf_benchmark} \
             --subset {params.subset} \
             --output {output}
         """

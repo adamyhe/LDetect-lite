@@ -1,24 +1,11 @@
 # Config for Snakefile.cyvcf2_migration_profiling.
 #
-# baseline_ldetect_bin / new_ldetect_bin point at two *separately installed*
-# `ldetect` entry points -- one built from the last commit before the cyvcf2
-# migration, one from this branch. There is no CLI flag to toggle between
-# the old tabix-subprocess parser and the new cyvcf2 parser (the old one was
-# deleted, not kept side by side), so the two "modes" this workflow compares
-# are two installs, not two flags. One-time setup, from the repo root:
-#
-#   git worktree add ../ldetect-lite-baseline main
-#   uv venv ../ldetect-lite-baseline/.venv
-#   uv pip install --python ../ldetect-lite-baseline/.venv -e ../ldetect-lite-baseline
-#   uv venv .venv-new
-#   uv pip install --python .venv-new -e .
-#
-# then point the two config keys below at
-# ../ldetect-lite-baseline/.venv/bin/ldetect and .venv-new/bin/ldetect.
-# Remove the worktree afterward with `git worktree remove ../ldetect-lite-baseline`.
+# Runs against a single install (this branch, via `uv run ldetect`) -- no
+# separate baseline install needed. The parsing-level speedup vs. the
+# pre-migration tabix/naive-parser path was already validated with real data
+# on the covariance-cache-redesign branch; this harness just records fresh
+# wall-clock/peak-RSS numbers for this branch and cross-checks VCF vs. BCF
+# input byte-exactness (same code path, different input format).
 
 profiling_chromosomes: [21]
 profiling_population: EUR
-
-baseline_ldetect_bin: "../ldetect-lite-baseline/.venv/bin/ldetect"
-new_ldetect_bin: "../ldetect-lite/.venv-new/bin/ldetect"
