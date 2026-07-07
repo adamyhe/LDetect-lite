@@ -41,6 +41,8 @@ This step must be run once per partition. `ldetect run --workers N` runs partiti
 
 `ldetect calc-covariance` reads directly from an indexed `--reference-panel` (`.vcf.gz` with a `.tbi`, or `.bcf` with a `.csi`) via [cyvcf2](https://github.com/brentp/cyvcf2), restricting to `--region` if given. If `--reference-panel` is omitted, it instead reads VCF text from stdin with no region restriction of its own — e.g. `tabix -h 1000G.chr2.vcf.gz chr2:... | ldetect calc-covariance ...` (omitting `--reference-panel`/`--region`), useful for piping in output from arbitrary preprocessing (`bcftools view -i ...`, `zcat`, etc.) rather than a plain indexed file.
 
+For large reference panels, prefer `.bcf`/`.csi` over `.vcf.gz`/`.tbi` — same output, but faster and lower-memory to read (see `docs/optimizations.md`).
+
 Reads phased haplotypes and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect run` defaults to the compact schema described above.
 
 Arguments:

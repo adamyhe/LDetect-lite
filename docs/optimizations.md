@@ -69,13 +69,15 @@ Internally controlled by `use_decimal: bool = False` on `LocalSearch.__init__`, 
 
 ## 5. Parallel local search (`pipeline.py`)
 
-**Affected code:** `_run_local_search`, `_local_search_worker` in `src/ldetect_lite/pipeline.py`
+**Affected code:** `_run_local_search`, `_local_search_worker`, `_local_search_group_worker` in `src/ldetect_lite/pipeline.py`
 
 Each breakpoint's local search is independent. The sequential loop over breakpoints was replaced with `ProcessPoolExecutor`. The inner `_run_single` closure was extracted to a module-level `_local_search_worker(...)` function for picklability.
 
 **CLI:** `ldetect find-minima --workers N` and `ldetect run --local-search-workers N`.
 
 **Speedup:** Linear with core count up to the number of breakpoints (~50–100 per chromosome).
+
+**Memory fix:** the multi-worker path originally submitted one task per breakpoint, each independently loading its own covariance partitions from disk with no sharing. Concurrent breakpoints whose windows fell in the same region redundantly reloaded the same large partition, so peak memory scaled with in-flight *breakpoints*, not workers — this caused an OOM `BrokenProcessPool` crash on a large real-world run. Fixed by reusing the same partition-grouping already used by the single-worker path (`_group_local_search_tasks`): the process pool now submits one task per *group* of breakpoints that share partition bounds (`_local_search_group_worker`), loading each partition once per group and running that group's breakpoints sequentially within the worker, so peak memory scales with concurrent workers, not concurrent breakpoints. Verified to produce identical loci/metrics to the single-worker path (`tests/integration/test_pipeline.py::test_find_breakpoints_multiworker_matches_single_worker`).
 
 ---
 
@@ -165,3 +167,19 @@ while curr_locus <= end_locus:
 **CLI:** `--covariance-compression {lzf,zstd}` on `ldetect run` and `ldetect calc-covariance` (default: `zstd`).
 
 **Measured impact:** validated on the full 1000G dataset (22 chromosomes x 3 populations): 66/66 chromosome x population combinations show byte-identical downstream vectors, exact breakpoints, and exact BED boundaries (compression is lossless), a 12.4% covariance-directory size reduction (1000.65 GB -> 876.43 GB), and a 1.2x aggregate wall-clock speedup.
+
+---
+
+## 10. cyvcf2 VCF/BCF I/O (`shrinkage.py`)
+
+**Affected code:** `calc_covariance` in `src/ldetect_lite/shrinkage.py`; call sites in `src/ldetect_lite/_cli/cmd_run.py` and `src/ldetect_lite/_cli/cmd_covariance.py`
+
+`calc_covariance` previously read genotypes via a per-partition `tabix -h <path> <region>` subprocess piped into a naive per-line text parser (`str.split` on each VCF row). Replaced with [cyvcf2](https://github.com/brentp/cyvcf2), a C-extension VCF/BCF reader backed by htslib: `cyvcf2.VCF(path, samples=...)`, region-restricted via `vcf(region)`. This removes the external `tabix` process spawn on every partition and replaces `str.split`-based genotype parsing with htslib's C bindings. `cyvcf2` is a small dependency (~2.2 MB installed; htslib is statically bundled, no system package required).
+
+Because cyvcf2's region-fetch API is format-agnostic given the right index (`.tbi` for `.vcf.gz`, `.csi` for `.bcf`), BCF input support falls out of the rewrite rather than needing separate code — `ldetect calc-covariance --reference-panel panel.bcf` works with no additional implementation.
+
+This also fixed an untested gap: previously, a requested individual missing from the VCF header silently produced empty output (every row dropped, no error). `calc_covariance` now raises `ValueError` naming every missing individual up front.
+
+**Measured impact:** chr21, EUR panel, full `ldetect run` pipeline. VCF.gz and BCF input (identical content) produced byte-identical output (vector sha256, breakpoints, BED boundaries all exact — 23/23 loci match), confirming BCF correctness at real chromosome scale. BCF input was also faster and lower-memory than VCF.gz: 168.9s vs. 189.2s wall-clock (~11% faster) and 4.21 GB vs. 5.99 GB peak RSS (~30% less), consistent with skipping gzip decompression in favor of BCF's binary encoding. For large reference panels, prefer `.bcf`/`.csi` input over `.vcf.gz`/`.tbi` where practical.
+
+**CLI:** `ldetect calc-covariance --reference-panel PATH --region CHROM:START-END` (direct indexed file); `--reference-panel` omitted reads from stdin instead, unchanged from before.
