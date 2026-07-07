@@ -183,3 +183,19 @@ This also fixed an untested gap: previously, a requested individual missing from
 **Measured impact:** chr21, EUR panel, full `ldetect run` pipeline. VCF.gz and BCF input (identical content) produced byte-identical output (vector sha256, breakpoints, BED boundaries all exact — 23/23 loci match), confirming BCF correctness at real chromosome scale. BCF input was also faster and lower-memory than VCF.gz: 168.9s vs. 189.2s wall-clock (~11% faster) and 4.21 GB vs. 5.99 GB peak RSS (~30% less), consistent with skipping gzip decompression in favor of BCF's binary encoding. For large reference panels, prefer `.bcf`/`.csi` input over `.vcf.gz`/`.tbi` where practical.
 
 **CLI:** `ldetect calc-covariance --reference-panel PATH --region CHROM:START-END` (direct indexed file); `--reference-panel` omitted reads from stdin instead, unchanged from before.
+
+---
+
+## 11. Thread-parallel filter-width search (`find_minima.py`)
+
+**Affected code:** `_find_end`, `_trackback`, `custom_binary_search_with_trackback` in `src/ldetect_lite/find_minima.py`; `find_breakpoints` in `src/ldetect_lite/pipeline.py`
+
+Profiling a real chromosome run (`examples/ldetect_original/plots/EUR-chr21-timeline.pdf`) surfaced a large, previously-uninstrumented single-threaded span between step 3 (matrix-to-vector) and step 4's metric computation: ~34 of ~64 total seconds, flat single-core CPU and RSS. Root cause: `custom_binary_search_with_trackback` (finding the Hanning filter width that yields a target breakpoint count) makes ~40 sequential calls to `apply_filter`, each running `scipy.ndimage.convolve1d` — a direct (non-FFT) convolution costing O(N·width) — at widths in the thousands.
+
+Two of the search's three phases evaluate a boundable, predictable set of candidates per round and were thread-parallelized without changing any numerics: `_find_end` (exponential doubling search) batches up to `search_workers` doubling candidates per round; `_trackback` (coarse/fine refinement sweep) batches each round's candidate window in chunks of `search_workers`. Both apply the exact same first-match-wins decision rule to the concurrently-computed results, in the same order, so the returned width is identical to the sequential result — confirmed empirically that `scipy.ndimage.convolve1d`/`argrelextrema` release the GIL enough for real `ThreadPoolExecutor` speedup (measured ~5x with 8 threads on 8 independent calls).
+
+The core binary search (`find_le_ind`) is **not** parallelized: each step is adaptive on the previous comparison, so it can't be pre-batched the same way without a different (k-ary search) algorithm, and it's a shared utility used elsewhere — out of scope for this pass.
+
+An FFT-based convolution (`scipy.signal.fftconvolve`, O(N log N) instead of O(N·width)) was tried and reverted: it is numerically unsafe for this pipeline. Direct convolution produces bit-identical output across flat/constant stretches of the input vector, so the downstream minima detector's strict `<` comparison never fires there; FFT convolution's rounding error is not shift-invariant and injects distinct noise at every position, breaking exact ties and manufacturing spurious minima (confirmed: 1 real minimum became 23 detected on a synthetic flat-plateau test). Since the search hunts for a width producing an exact minima count, spurious minima anywhere could converge to a materially different breakpoint set. See `notes/logs/multicore-utilization-filter-width-search.md` for the full investigation.
+
+**CLI:** reuses `find_breakpoints`'s existing `workers` parameter (`ldetect find-minima --workers N`, `ldetect run --local-search-workers N`) — safe to share since local search hasn't started yet at the point the filter-width search runs.

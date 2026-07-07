@@ -362,16 +362,18 @@ one series per population, into `results/profiling/`.
 ```bash
 uv run python scripts/profile_run.py \
   --interval 1.0 \
-  --output results/profiling/EUR-chr2.csv \
-  --log-output results/profiling/EUR-chr2.log \
-  -- uv run ldetect run --genetic-map ... --chromosome 2 \
-       --output-dir results/profiling/EUR/2 --workers 4 --local-search-workers 1 ...
+  --output results/profiling/EUR-chr21.csv \
+  --log-output results/profiling/EUR-chr21.log \
+  -- uv run ldetect run --genetic-map data/maps/chr21.interpolated_genetic_map.gz \
+  --reference-panel results/filtered_vcf/EUR/ALL.chr21.phase1_release_v3.20101123.snps_indels_svs.genotypes.population-polymorphic.vcf.gz \
+  --individuals resources/EUR_inds.txt \
+  --chromosome 21 --output-dir results/profiling/EUR/2 --workers 4
 
 uv run python scripts/plot_profile_timeline.py \
-  --csv results/profiling/EUR-chr2.csv \
-  --log results/profiling/EUR-chr2.log \
-  --title "EUR chr2" \
-  --output results/profiling/EUR-chr2-timeline
+  --csv results/profiling/EUR-chr21.csv \
+  --log results/profiling/EUR-chr21.log \
+  --title "EUR chr21" \
+  --output results/profiling/EUR-chr21-timeline
 ```
 
 `profile_run.py` requires the `profiling` extra (`uv sync --extra profiling`,

@@ -91,7 +91,9 @@ def find_breakpoints(
         trackback_delta: Coarse trackback search range.
         trackback_step: Coarse trackback step size.
         init_search_location: Starting width for exponential search.
-        workers: Number of parallel workers for local search (default: 1).
+        workers: Number of parallel workers for local search, and threads for
+            the filter-width search's exponential-search and trackback-
+            refinement passes (default: 1).
         metric_workers: Number of parallel workers for streaming metric row
             passes when not using Decimal arithmetic or an in-memory covariance
             cache (default: 1).
@@ -139,6 +141,7 @@ def find_breakpoints(
         trackback_delta=trackback_delta,
         trackback_step=trackback_step,
         init_search_location=init_search_location,
+        search_workers=workers,
     )
     log_msg(f"Found width: {found_width}")
     log_memory_checkpoint("filter_width_search_end")
