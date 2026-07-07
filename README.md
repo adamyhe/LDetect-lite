@@ -112,6 +112,6 @@ The available breakpoint sets are `fourier` and `uniform` (raw minima from Fouri
 
 ## Pre-computed LD blocks
 
-Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by [MacDonald et al. (2022)](https://www.biorxiv.org/content/10.1101/2022.03.04.483057v2).
+Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by [MacDonald et al., 2022](https://www.biorxiv.org/content/10.1101/2022.03.04.483057v2).
 
 BED files produced by our work will be released once the code base leaves alpha/we finish major breaking updates.
