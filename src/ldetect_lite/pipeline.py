@@ -113,6 +113,7 @@ def find_breakpoints(
     snp_first, snp_last = first_last(chr_name, store, snp_first, snp_last)
 
     # 1. Read vector
+    log_memory_checkpoint("vector_read_start")
     log_msg("Reading vector data")
     raw_vals, raw_x = _read_vector(input_path)
 
@@ -121,6 +122,7 @@ def find_breakpoints(
 
     np_array = np.array(raw_vals[begin_ind : end_ind + 1])
     np_array_x = np.array(raw_x[begin_ind : end_ind + 1])
+    log_memory_checkpoint("vector_read_end")
 
     # 2. Target breakpoint count
     if n_bpoints is None:
@@ -128,6 +130,7 @@ def find_breakpoints(
     log_msg(f"Target breakpoints: {n_bpoints}")
 
     # 3. Binary search for filter width
+    log_memory_checkpoint("filter_width_search_start")
     log_msg("Searching for filter width...")
     found_width = custom_binary_search_with_trackback(
         np_array,
@@ -138,11 +141,14 @@ def find_breakpoints(
         init_search_location=init_search_location,
     )
     log_msg(f"Found width: {found_width}")
+    log_memory_checkpoint("filter_width_search_end")
 
     # 4. Extract minima positions
+    log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
     g = apply_filter(np_array, found_width)
     fourier_loci = get_minima_loc(g, np_array_x)
+    log_memory_checkpoint("minima_extraction_end")
 
     metric_cov = None if use_decimal else covariance_cache
     if metric_cov is not None:

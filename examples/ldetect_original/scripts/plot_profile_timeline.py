@@ -42,6 +42,13 @@ _PHASES = [
     ("step1_start", "step1_end", "Step 1: partition"),
     ("step2_start", "step2_end", "Step 2: covariance"),
     ("step3_start", "step3_end", "Step 3: matrix→vector"),
+    ("vector_read_start", "vector_read_end", "Step 4: read vector"),
+    (
+        "filter_width_search_start",
+        "filter_width_search_end",
+        "Step 4: filter width search",
+    ),
+    ("minima_extraction_start", "minima_extraction_end", "Step 4: minima extraction"),
     ("fourier_metric_start", "fourier_metric_end", "Step 4: fourier metric"),
     ("uniform_metric_start", "uniform_metric_end", "Step 4: uniform metric"),
     (
