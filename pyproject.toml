@@ -26,6 +26,7 @@ dependencies = [
     "numba>=0.57",
     "h5py>=3.10",
     "hdf5plugin>=4.4",
+    "cyvcf2>=0.31",
 ]
 
 [project.optional-dependencies]
@@ -66,10 +67,10 @@ select = ["E", "F", "I", "UP"]
 python_version = "3.11"
 strict = true
 
-# None of these ship inline types or stubs (numba/h5py/hdf5plugin have no
-# py.typed marker; scipy.ndimage/scipy.signal stubs are incomplete upstream).
+# None of these ship inline types or stubs (numba/h5py/hdf5plugin/cyvcf2 have
+# no py.typed marker; scipy.ndimage/scipy.signal stubs are incomplete upstream).
 [[tool.mypy.overrides]]
-module = ["scipy.*", "numba.*", "h5py.*", "hdf5plugin.*"]
+module = ["scipy.*", "numba.*", "h5py.*", "hdf5plugin.*", "cyvcf2.*"]
 ignore_missing_imports = true
 
 [dependency-groups]

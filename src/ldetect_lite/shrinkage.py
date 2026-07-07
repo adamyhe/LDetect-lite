@@ -8,8 +8,9 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import IO, Any, TypeVar
+from typing import Any, TypeVar
 
+import cyvcf2
 import numpy as np
 
 from ldetect_lite.io.covariance_hdf5 import (
@@ -514,7 +515,8 @@ def partition_chromosome(
 
 
 def calc_covariance(
-    vcf_stream: IO[str],
+    vcf_path: Path,
+    region: str | None,
     genetic_map_path: Path,
     individuals_path: Path,
     output_path: Path,
@@ -524,19 +526,23 @@ def calc_covariance(
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
 ) -> None:
-    """Calculate the Wen/Stephens shrinkage LD estimate from a VCF stream.
+    """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
 
-    Reads phased VCF data from *vcf_stream* (typically stdin piped from
-    ``tabix``).  Only bi-allelic, phased genotypes are supported.  Rows with
-    missing (``./. `` or ``.|.``) or unphased (``/``) genotypes are skipped
-    with a warning.
+    Reads phased genotypes via ``cyvcf2``. Only bi-allelic, phased genotypes
+    are supported. Rows with missing (``./.`` or ``.|.``) or unphased (``/``)
+    genotypes are skipped with a warning.
 
     The pairwise LD kernel is JIT-compiled with Numba when available, falling
     back to pure Python otherwise.
 
     Args:
-        vcf_stream: Text stream of VCF lines (``##`` headers, ``#CHROM``, then
-            data rows).
+        vcf_path: Path to a ``.vcf``, ``.vcf.gz``, or ``.bcf`` file, or the
+            literal string ``"-"`` to read from stdin. When *region* is set,
+            *vcf_path* must be indexed (``.tbi`` for ``.vcf.gz``, ``.csi`` for
+            ``.bcf``).
+        region: A ``chrom:start-end`` region string (1-based, inclusive) to
+            restrict reading to via an indexed fetch, or ``None`` to read the
+            whole file/stream sequentially from the start.
         genetic_map_path: Gzipped genetic map (columns: chr, position, cM).
         individuals_path: Plain-text file; one individual ID per line.
         output_path: HDF5 covariance partition output. When ``compact_output``
@@ -551,6 +557,10 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
+
+    Raises:
+        ValueError: If any individual in *individuals_path* is not present in
+            the VCF/BCF header.
     """
     from ldetect_lite._util.logging import log_debug
     from ldetect_lite._util.memory import log_memory_checkpoint
@@ -580,58 +590,51 @@ def calc_covariance(
             parts = raw.strip().split()
             pos2gpos[int(parts[1])] = float(parts[2])
 
-    # --- parse VCF ---
+    # --- parse VCF/BCF ---
+    vcf = cyvcf2.VCF(str(vcf_path), samples=individuals)
+    missing = [ind for ind in individuals if ind not in vcf.samples]
+    if missing:
+        vcf.close()
+        raise ValueError(
+            f"individuals not found in VCF/BCF header: {', '.join(missing)}"
+        )
+    # cyvcf2 subsets to the requested samples but does not guarantee it
+    # preserves the caller's order -- remap columns back to *individuals*
+    # order explicitly rather than relying on it.
+    order = [vcf.samples.index(ind) for ind in individuals]
+
     all_pos: list[int] = []
     all_rs: list[str] = []
     haps: list[list[int]] = []
-    ind2col: dict[str, int] = {}
 
     skipped_unphased = 0
 
-    for raw in vcf_stream:
-        raw = raw.rstrip("\n")
-        if raw.startswith("##"):
-            continue
-        parts = raw.split("\t")
-        if raw.startswith("#CHROM"):
-            for col_idx in range(9, len(parts)):
-                if parts[col_idx] in individuals:
-                    ind2col[parts[col_idx]] = col_idx
+    variants: Iterator[Any] = vcf(region) if region is not None else vcf
+    for variant in variants:
+        pos = variant.POS
+        if pos not in pos2gpos:
             continue
 
-        # Data row
-        pos = int(parts[1])
-        rs = parts[2]
-
+        genotypes = variant.genotypes
         row_haps: list[int] = []
         skip = False
-        for ind in individuals:
-            col = ind2col.get(ind)
-            if col is None:
-                skip = True
-                break
-            gt_field = parts[col].split(":")[0]
-            if "|" not in gt_field:
+        for col in order:
+            allele1, allele2, phased = genotypes[col]
+            if not phased or allele1 < 0 or allele2 < 0:
                 skipped_unphased += 1
                 skip = True
                 break
-            alleles = gt_field.split("|")
-            if "." in alleles:
-                skipped_unphased += 1
-                skip = True
-                break
-            row_haps.append(int(alleles[0]))
-            row_haps.append(int(alleles[1]))
+            row_haps.append(allele1)
+            row_haps.append(allele2)
 
         if skip:
             continue
 
-        if pos not in pos2gpos:
-            continue
-
         all_pos.append(pos)
-        all_rs.append(rs)
+        all_rs.append(variant.ID or ".")
         haps.append(row_haps)
+
+    vcf.close()
 
     if skipped_unphased:
         print(

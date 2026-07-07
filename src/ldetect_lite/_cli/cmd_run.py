@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -29,7 +28,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         "--reference-panel",
         required=True,
         metavar="PATH",
-        help="VCF reference panel path (accessed via tabix).",
+        help=(
+            "VCF/BCF reference panel path (accessed via cyvcf2; must be "
+            "indexed with tabix/bcftools index)."
+        ),
     )
     p.add_argument(
         "--individuals",
@@ -180,39 +182,24 @@ def _calc_partition(
     compression: str,
 ) -> None:
     """
-    Wraps tabix > calc_covariance so we can run as a worker process.
+    Wraps an indexed region fetch > calc_covariance so we can run as a
+    worker process.
     """
     from ldetect_lite._util.memory import log_memory_checkpoint
     from ldetect_lite.shrinkage import calc_covariance
 
     region = f"{chrom}:{start}-{end}"
-    try:
-        tabix_proc = subprocess.Popen(
-            ["tabix", "-h", reference_panel, region],
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "tabix not found. Install htslib and ensure tabix is on PATH."
-        )
-
-    stdout = tabix_proc.stdout
-    if stdout is None:
-        raise RuntimeError("tabix subprocess produced no stdout stream")
-
-    with stdout:
-        calc_covariance(
-            vcf_stream=stdout,
-            genetic_map_path=genetic_map_path,
-            individuals_path=individuals_path,
-            output_path=output_path,
-            ne=ne,
-            cutoff=cutoff,
-            compact_output=compact_output,
-            compression=compression,
-        )
-    tabix_proc.wait()
+    calc_covariance(
+        vcf_path=Path(reference_panel),
+        region=region,
+        genetic_map_path=genetic_map_path,
+        individuals_path=individuals_path,
+        output_path=output_path,
+        ne=ne,
+        cutoff=cutoff,
+        compact_output=compact_output,
+        compression=compression,
+    )
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
 
 
@@ -315,7 +302,7 @@ def _run(args: argparse.Namespace) -> int:
             start, end = futures[fut]
             try:
                 fut.result()
-            except RuntimeError as e:
+            except (RuntimeError, ValueError) as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             log_msg(f"  Partition {start}-{end} done")

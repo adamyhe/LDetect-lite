@@ -1,0 +1,335 @@
+"""Profile the cyvcf2 VCF-I/O migration against the pre-migration baseline
+at real chromosome scale, and characterize the new BCF input path.
+
+The migration replaced `calc_covariance`'s `tabix` subprocess + naive
+per-line text parser with `cyvcf2` (see
+notes/logs/covariance-cache-redesign-plan.md and the cyvcf2-vcf-io-migration
+branch) -- correctness was validated with unit tests (synthetic VCF/BCF
+fixtures, an independent naive-parser equivalence oracle), but not yet at
+real chromosome scale, and not for wall-clock/memory cost.
+
+Unlike this directory's other diagnostic Snakefiles (which compare two CLI
+flags of *one* install), there is no flag here to toggle between the old and
+new parser -- the old one was deleted, not kept side by side. So the two
+"modes" this workflow compares are two *separate installs* of two different
+commits, not two flags of one install. See
+cyvcf2_migration_profiling.yaml's docstring for the one-time `git worktree`
+setup this requires (not automated here -- managing git worktrees/venvs from
+inside a Snakemake rule would be unusual and easy to get wrong under
+parallel execution; this is a deliberate, documented manual step instead).
+
+Two things measured:
+    baseline vs cyvcf2  -- identical filtered VCF input, run through the two
+                           installs; checked for byte-exact vector/BED/
+                           breakpoints output (must be identical -- both are
+                           exact computations of the same thing) alongside
+                           wall-clock/peak-RSS via Snakemake's `benchmark:`
+                           directive.
+    cyvcf2_bcf          -- the new install only, against a .bcf/.csi version
+                           of the same filtered input. No baseline
+                           counterpart exists (the old parser never
+                           supported BCF), so this is a standalone
+                           performance characterization, not a correctness
+                           re-check (correctness of BCF-vs-VCF.gz equivalence
+                           is already covered by
+                           test_calc_covariance_bcf_matches_vcf_gz_output).
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -s Snakefile.cyvcf2_migration_profiling -n
+    uv run snakemake -s Snakefile.cyvcf2_migration_profiling --cores 4
+    uv run snakemake -s Snakefile.cyvcf2_migration_profiling --cores 8 \
+        --config profiling_chromosomes='[21,22,20]'
+"""
+
+from pathlib import Path
+
+configfile: "config.yaml"
+configfile: "cyvcf2_migration_profiling.yaml"
+
+
+CHROMS = [str(c) for c in config["profiling_chromosomes"]]
+POPULATION = config["profiling_population"]
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"]) / "cyvcf2_migration_profiling"
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_VCF = str(
+    RESULTS / "filtered_vcf" / POPULATION / VCF_TMPL.replace(
+        ".vcf.gz", ".population-polymorphic.vcf.gz"
+    )
+)
+FILT_BCF = FILT_VCF.replace(".vcf.gz", ".bcf")
+
+MODES = ["baseline", "cyvcf2"]
+MODE_LDETECT_BIN = {
+    "baseline": config["baseline_ldetect_bin"],
+    "cyvcf2": config["new_ldetect_bin"],
+}
+
+wildcard_constraints:
+    mode="|".join(MODES),
+    chrom="|".join(CHROMS),
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+rule all:
+    input:
+        str(RESULTS / "summary.tsv"),
+        expand(
+            str(RESULTS / "{chrom}" / "logs" / "cyvcf2_bcf.benchmark.tsv"),
+            chrom=CHROMS,
+        ),
+
+
+# ---------------------------------------------------------------------------
+# Self-contained download/prep/filter chain (own rule names -- this workflow
+# does not depend on any other Snakefile's rule graph).
+# ---------------------------------------------------------------------------
+
+
+rule cyvcf2_migration_download_vcf:
+    output:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule cyvcf2_migration_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule cyvcf2_migration_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule cyvcf2_migration_prep_individuals:
+    input:
+        panel=rules.cyvcf2_migration_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule cyvcf2_migration_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+rule cyvcf2_migration_convert_bcf:
+    input:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    output:
+        bcf=FILT_BCF,
+        csi=FILT_BCF + ".csi",
+    shell:
+        """
+        bcftools view -O b -o {output.bcf} {input.vcf}
+        bcftools index -f {output.bcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Two-install ldetect run: identical input, baseline install vs cyvcf2 install
+# ---------------------------------------------------------------------------
+
+
+rule cyvcf2_migration_run_ldetect:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+    output:
+        bed=str(RESULTS / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(RESULTS / "{chrom}" / "{mode}" / "breakpoints-{chrom}.json"),
+        vector=str(RESULTS / "{chrom}" / "{mode}" / "vector-{chrom}.txt.gz"),
+    log:
+        run=str(RESULTS / "{chrom}" / "logs" / "{mode}.log"),
+    benchmark:
+        str(RESULTS / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
+    threads: config.get("workers", 4)
+    params:
+        output_dir=lambda wc: str(RESULTS / wc.chrom / wc.mode),
+        ldetect_bin=lambda wc: MODE_LDETECT_BIN[wc.mode],
+        workers=config.get("workers", 4),
+        ne=pop_ne(POPULATION),
+        cutoff=config["cov_cutoff"],
+        n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
+    shell:
+        """
+        rm -rf {params.output_dir}
+        mkdir -p {params.output_dir}
+        {params.ldetect_bin} run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
+            --subset fourier_ls \
+            --workers {params.workers} \
+            > {log.run} 2>&1
+        """
+
+
+rule cyvcf2_migration_run_ldetect_bcf:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        bcf=FILT_BCF,
+        csi=FILT_BCF + ".csi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+    output:
+        bed=str(RESULTS / "{chrom}" / "cyvcf2_bcf" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(
+            RESULTS / "{chrom}" / "cyvcf2_bcf" / "breakpoints-{chrom}.json"
+        ),
+    log:
+        run=str(RESULTS / "{chrom}" / "logs" / "cyvcf2_bcf.log"),
+    benchmark:
+        str(RESULTS / "{chrom}" / "logs" / "cyvcf2_bcf.benchmark.tsv")
+    threads: config.get("workers", 4)
+    params:
+        output_dir=lambda wc: str(RESULTS / wc.chrom / "cyvcf2_bcf"),
+        ldetect_bin=config["new_ldetect_bin"],
+        workers=config.get("workers", 4),
+        ne=pop_ne(POPULATION),
+        cutoff=config["cov_cutoff"],
+        n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
+    shell:
+        """
+        rm -rf {params.output_dir}
+        mkdir -p {params.output_dir}
+        {params.ldetect_bin} run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.bcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
+            --subset fourier_ls \
+            --workers {params.workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Compare baseline vs cyvcf2: exactness (vector/breakpoints/BED) +
+# performance (Snakemake benchmark: wall-clock, peak RSS)
+# ---------------------------------------------------------------------------
+
+
+rule compare_cyvcf2_migration:
+    input:
+        baseline_vector=str(RESULTS / "{chrom}" / "baseline" / "vector-{chrom}.txt.gz"),
+        new_vector=str(RESULTS / "{chrom}" / "cyvcf2" / "vector-{chrom}.txt.gz"),
+        baseline_breakpoints=str(
+            RESULTS / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
+        ),
+        new_breakpoints=str(
+            RESULTS / "{chrom}" / "cyvcf2" / "breakpoints-{chrom}.json"
+        ),
+        baseline_bed=str(RESULTS / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"),
+        new_bed=str(RESULTS / "{chrom}" / "cyvcf2" / "{chrom}-ld-blocks.bed"),
+        baseline_benchmark=str(RESULTS / "{chrom}" / "logs" / "baseline.benchmark.tsv"),
+        new_benchmark=str(RESULTS / "{chrom}" / "logs" / "cyvcf2.benchmark.tsv"),
+    output:
+        str(RESULTS / "{chrom}" / "compare.tsv"),
+    params:
+        subset="fourier_ls",
+    shell:
+        """
+        uv run python scripts/compare_cyvcf2_migration.py \
+            --chromosome {wildcards.chrom} \
+            --baseline-vector {input.baseline_vector} \
+            --new-vector {input.new_vector} \
+            --baseline-breakpoints {input.baseline_breakpoints} \
+            --new-breakpoints {input.new_breakpoints} \
+            --baseline-bed {input.baseline_bed} \
+            --new-bed {input.new_bed} \
+            --baseline-benchmark {input.baseline_benchmark} \
+            --new-benchmark {input.new_benchmark} \
+            --subset {params.subset} \
+            --output {output}
+        """
+
+
+rule cyvcf2_migration_summary:
+    input:
+        expand(str(RESULTS / "{chrom}" / "compare.tsv"), chrom=CHROMS),
+    output:
+        str(RESULTS / "summary.tsv"),
+    run:
+        import csv
+
+        rows = []
+        fieldnames = None
+        for path in input:
+            with open(path) as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                if fieldnames is None:
+                    fieldnames = reader.fieldnames
+                rows.extend(reader)
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)

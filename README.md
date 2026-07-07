@@ -22,7 +22,7 @@ uv add ldetect-lite
 
 This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, and `ldl` — so pick whichever is most convenient; examples below use `ldetect`.
 
-The main `ldetect run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect calc-covariance`, and so must be on PATH.
+The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. You do still need to *produce* an index alongside your reference panel before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
 **Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
 
