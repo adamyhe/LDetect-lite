@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -11,6 +12,19 @@ from pathlib import Path
 from ldetect_lite.io.covariance_hdf5 import validate_covariance_hdf5
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+
+# Numpy/BLAS/numba read these once at library-init time to size their own
+# internal thread pools. Left unset, they default to the *whole machine's*
+# core count, not --workers -- harmless when a job has the machine to itself,
+# but oversubscribes real CPUs when many jobs run concurrently on a shared
+# node (e.g. several Slurm array tasks on one allocation).
+_THREAD_CAP_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -245,6 +259,16 @@ def _run(args: argparse.Namespace) -> int:
         f"source={Path(ldetect_lite.__file__).resolve()}"
     )
     log_memory_checkpoint("run_start")
+
+    if args.workers > 1 and not any(os.environ.get(v) for v in _THREAD_CAP_ENV_VARS):
+        log_msg(
+            f"Warning: --workers {args.workers} is set but none of "
+            f"{', '.join(_THREAD_CAP_ENV_VARS)} are set in the environment. "
+            "Numpy/BLAS/numba may each size their own thread pools to the "
+            "whole machine instead of --workers, oversubscribing CPUs if "
+            "other jobs are running concurrently on the same node (e.g. "
+            "under Slurm). Consider exporting these to match --workers."
+        )
 
     # ------------------------------------------------------------------ #
     # Step 1: Partition chromosome                                         #

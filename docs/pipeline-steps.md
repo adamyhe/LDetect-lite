@@ -2,6 +2,8 @@
 
 `ldetect run` (see `README.md`) chains all five stages below end-to-end and is the recommended way to run the pipeline. This doc covers running each stage individually — useful for debugging, restarting a partial run, or inspecting intermediate outputs.
 
+Several of these stages accept their own `--workers`/`--metric-workers`. The same BLAS/OMP oversubscription risk described in `README.md` applies here too — but the automatic startup warning is only wired up in `ldetect run`, not these standalone commands, so export `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` yourself to match your worker count if you're driving these directly (e.g. from your own Snakefile rules) on a shared node.
+
 The pipeline has five stages that can be run individually:
 
 ---

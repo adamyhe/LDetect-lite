@@ -73,6 +73,8 @@ Options:
 - `--metric-workers N` — override parallel workers for streaming metric row passes during breakpoint scoring (default: inherit `--workers`)
 - `--high-precision` — use 50-digit Decimal arithmetic for local search instead of the default float path (slower; mainly useful for exact reference comparisons)
 
+If `--workers` is greater than 1 and none of `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` are set, `run` prints a startup warning: numpy/BLAS/numba otherwise size their own internal thread pools to the whole machine's core count, not `--workers`, which oversubscribes real CPUs when multiple `ldetect run` processes share a node (e.g. several jobs on the same Slurm allocation). Export those five variables to match `--workers` to avoid this — see `examples/ldetect_original/Snakefile`'s `run_ldetect` rule for a worked example.
+
 Each of the five stages (partition, covariance, matrix-to-vector, find-minima, extract-bpoints) can also be run individually, along with a `covariance-summary` inspection utility — see `docs/pipeline-steps.md`.
 
 ### Interpolate genetic maps
