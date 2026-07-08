@@ -9,6 +9,7 @@ import numpy as np
 
 from ldetect_lite._cli.cmd_run import (
     _breakpoint_subsets_for_run,
+    _delete_covariance_cache,
     _is_valid_covariance_partition,
     _resolve_workers,
     register,
@@ -111,3 +112,29 @@ def test_stage_worker_override_takes_precedence_over_shared_workers() -> None:
     args = _parse_run_args(["--workers", "4", "--local-search-workers", "1"])
     assert _resolve_workers(args.matrix_workers, args.workers) == 4
     assert _resolve_workers(args.local_search_workers, args.workers) == 1
+
+
+def test_delete_covariance_cache_defaults_to_false() -> None:
+    assert _parse_run_args([]).delete_covariance_cache is False
+
+
+def test_delete_covariance_cache_flag_sets_true() -> None:
+    args = _parse_run_args(["--delete-covariance-cache"])
+    assert args.delete_covariance_cache is True
+
+
+def test_delete_covariance_cache_removes_directory(tmp_path: Path) -> None:
+    cov_dir = tmp_path / "22"
+    cov_dir.mkdir()
+    (cov_dir / "22.100.200.h5").write_bytes(b"")
+    (cov_dir / "22.200.300.h5").write_bytes(b"")
+
+    _delete_covariance_cache(cov_dir)
+
+    assert not cov_dir.exists()
+
+
+def test_delete_covariance_cache_noop_when_missing(tmp_path: Path) -> None:
+    missing = tmp_path / "does-not-exist"
+    _delete_covariance_cache(missing)  # must not raise
+    assert not missing.exists()

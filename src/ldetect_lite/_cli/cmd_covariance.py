@@ -10,7 +10,28 @@ from pathlib import Path
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     p = subparsers.add_parser(
         "calc-covariance",
-        help="Compute Wen/Stephens shrinkage LD from a VCF stream (reads stdin).",
+        help=(
+            "Compute Wen/Stephens shrinkage LD from a VCF/BCF file "
+            "(or stdin if --reference-panel is omitted)."
+        ),
+    )
+    p.add_argument(
+        "--reference-panel",
+        default=None,
+        metavar="PATH",
+        help=(
+            "VCF/BCF reference panel path (indexed with tabix/bcftools index; "
+            "accessed via cyvcf2). If omitted, reads from stdin instead."
+        ),
+    )
+    p.add_argument(
+        "--region",
+        default=None,
+        metavar="CHROM:START-END",
+        help=(
+            "Restrict to this region via an indexed fetch. Requires "
+            "--reference-panel; omit to read the whole file/stream."
+        ),
     )
     p.add_argument(
         "--genetic-map",
@@ -63,13 +84,23 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
 def _run(args: argparse.Namespace) -> int:
     from ldetect_lite.shrinkage import calc_covariance
 
-    calc_covariance(
-        vcf_stream=sys.stdin,
-        genetic_map_path=args.genetic_map,
-        individuals_path=args.individuals,
-        output_path=args.output,
-        ne=args.ne,
-        cutoff=args.cutoff,
-        compression=args.covariance_compression,
-    )
+    if args.region is not None and args.reference_panel is None:
+        print("Error: --region requires --reference-panel", file=sys.stderr)
+        return 1
+
+    vcf_path = Path(args.reference_panel) if args.reference_panel else Path("-")
+    try:
+        calc_covariance(
+            vcf_path=vcf_path,
+            region=args.region,
+            genetic_map_path=args.genetic_map,
+            individuals_path=args.individuals,
+            output_path=args.output,
+            ne=args.ne,
+            cutoff=args.cutoff,
+            compression=args.covariance_compression,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
     return 0

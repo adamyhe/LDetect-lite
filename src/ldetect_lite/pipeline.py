@@ -91,7 +91,9 @@ def find_breakpoints(
         trackback_delta: Coarse trackback search range.
         trackback_step: Coarse trackback step size.
         init_search_location: Starting width for exponential search.
-        workers: Number of parallel workers for local search (default: 1).
+        workers: Number of parallel workers for local search, and threads for
+            the filter-width search's exponential-search and trackback-
+            refinement passes (default: 1).
         metric_workers: Number of parallel workers for streaming metric row
             passes when not using Decimal arithmetic or an in-memory covariance
             cache (default: 1).
@@ -113,6 +115,7 @@ def find_breakpoints(
     snp_first, snp_last = first_last(chr_name, store, snp_first, snp_last)
 
     # 1. Read vector
+    log_memory_checkpoint("vector_read_start")
     log_msg("Reading vector data")
     raw_vals, raw_x = _read_vector(input_path)
 
@@ -121,6 +124,7 @@ def find_breakpoints(
 
     np_array = np.array(raw_vals[begin_ind : end_ind + 1])
     np_array_x = np.array(raw_x[begin_ind : end_ind + 1])
+    log_memory_checkpoint("vector_read_end")
 
     # 2. Target breakpoint count
     if n_bpoints is None:
@@ -128,6 +132,7 @@ def find_breakpoints(
     log_msg(f"Target breakpoints: {n_bpoints}")
 
     # 3. Binary search for filter width
+    log_memory_checkpoint("filter_width_search_start")
     log_msg("Searching for filter width...")
     found_width = custom_binary_search_with_trackback(
         np_array,
@@ -136,13 +141,17 @@ def find_breakpoints(
         trackback_delta=trackback_delta,
         trackback_step=trackback_step,
         init_search_location=init_search_location,
+        search_workers=workers,
     )
     log_msg(f"Found width: {found_width}")
+    log_memory_checkpoint("filter_width_search_end")
 
     # 4. Extract minima positions
+    log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
     g = apply_filter(np_array, found_width)
     fourier_loci = get_minima_loc(g, np_array_x)
+    log_memory_checkpoint("minima_extraction_end")
 
     metric_cov = None if use_decimal else covariance_cache
     if metric_cov is not None:
@@ -458,6 +467,58 @@ def _local_search_worker(
         return breakpoint_loci[idx], None
 
 
+def _local_search_group_worker(
+    chr_name: str,
+    partition_bounds: tuple[tuple[int, int], ...],
+    group: list[tuple[int, int, int]],
+    breakpoint_loci: list[int],
+    total_sum: decimal.Decimal | float | int,
+    total_n: decimal.Decimal | float | int,
+    store: CovarianceStore,
+    use_decimal: bool,
+    subset_name: str,
+) -> list[tuple[int, tuple[int, _LocalSearchDetails | None]]]:
+    """Load one partition group once, then run its breakpoints sequentially.
+
+    Module-level (like :func:`_local_search_worker`) so it can be submitted
+    to :class:`ProcessPoolExecutor`. One call handles a whole group from
+    :func:`_group_local_search_tasks`, so a worker loads each partition once
+    no matter how many of its assigned breakpoints share it.
+    """
+    group_hdf5_partitions = tuple(
+        local_search_hdf5_partition(chr_name, store, start, end)
+        for start, end in partition_bounds
+    )
+    group_cache = ChromosomeCovariance(
+        loci=np.array([], dtype=np.int64),
+        i_pos=np.array([], dtype=np.int64),
+        j_pos=np.array([], dtype=np.int64),
+        r2=np.array([], dtype=np.float64),
+        partitions=partition_bounds,
+        partition_arrays=(),
+    )
+    return [
+        (
+            idx,
+            _local_search_worker(
+                chr_name,
+                start,
+                stop,
+                idx,
+                breakpoint_loci,
+                total_sum,
+                total_n,
+                store,
+                use_decimal,
+                covariance_cache=group_cache,
+                local_search_hdf5_partitions=group_hdf5_partitions,
+                subset_name=subset_name,
+            ),
+        )
+        for idx, start, stop in group
+    ]
+
+
 def _run_local_search(
     chr_name: str,
     breakpoint_loci: list[int],
@@ -592,7 +653,7 @@ def _run_local_search(
                     )
                     if idx == 0:
                         log_memory_checkpoint(f"{subset_name}_breakpoint0_end")
-    else:
+    elif use_decimal:
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(
@@ -613,6 +674,38 @@ def _run_local_search(
             for fut in as_completed(futures):
                 idx = futures[fut]
                 results[idx] = fut.result()
+    else:
+        # Group breakpoints that need the same covariance partitions (same
+        # grouping used by the single-worker path above) and submit one task
+        # per *group*, not per breakpoint. Each worker loads its group's
+        # partitions once and reuses them for every breakpoint in the group,
+        # instead of every concurrent breakpoint independently reloading
+        # overlapping partitions -- which previously let per-worker memory
+        # scale with in-flight *breakpoints* rather than in-flight *workers*,
+        # and could exhaust memory (see notes/logs on the OOM crash this
+        # fixed) when many concurrent tasks touched the same large partition.
+        grouped_tasks = _group_local_search_tasks(
+            chr_name, tasks, breakpoint_loci, store
+        )
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            group_futures = [
+                pool.submit(
+                    _local_search_group_worker,
+                    chr_name,
+                    partition_bounds,
+                    group,
+                    breakpoint_loci,
+                    total_sum,
+                    total_n,
+                    store,
+                    use_decimal,
+                    subset_name,
+                )
+                for partition_bounds, group in grouped_tasks
+            ]
+            for group_fut in as_completed(group_futures):
+                for idx, result in group_fut.result():
+                    results[idx] = result
 
     new_loci = [results[i][0] for i in range(len(breakpoint_loci))]
     new_metrics = [results[i][1] for i in range(len(breakpoint_loci))]

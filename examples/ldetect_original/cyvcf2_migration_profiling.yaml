@@ -1,0 +1,11 @@
+# Config for Snakefile.cyvcf2_migration_profiling.
+#
+# Runs against a single install (this branch, via `uv run ldetect`) -- no
+# separate baseline install needed. The parsing-level speedup vs. the
+# pre-migration tabix/naive-parser path was already validated with real data
+# on the covariance-cache-redesign branch; this harness just records fresh
+# wall-clock/peak-RSS numbers for this branch and cross-checks VCF vs. BCF
+# input byte-exactness (same code path, different input format).
+
+profiling_chromosomes: [21]
+profiling_population: EUR

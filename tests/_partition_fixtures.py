@@ -10,7 +10,7 @@ against the exact same duplicate/cross-partition-overlap scenarios.
 
 from __future__ import annotations
 
-from io import StringIO
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +18,16 @@ import numpy as np
 from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
 from ldetect_lite.io.partitions import CovarianceStore
 from ldetect_lite.shrinkage import calc_covariance
+
+
+def _write_indexed_vcf(path: Path, lines: list[str]) -> Path:
+    """Write VCF text, bgzip it, and build a .tbi index. Returns the .vcf.gz path."""
+    raw_path = path.with_suffix(".vcf")
+    raw_path.write_text("\n".join(lines) + "\n")
+    subprocess.run(["bgzip", "-f", str(raw_path)], check=True)
+    gz_path = path.with_suffix(".vcf.gz")
+    subprocess.run(["tabix", "-f", "-p", "vcf", str(gz_path)], check=True)
+    return gz_path
 
 
 def make_custom_partitioned_store(
@@ -119,8 +129,9 @@ def build_two_overlapping_partitions_with_duplicate_position(
     """Run ``calc_covariance`` twice on overlapping VCF slices sharing a
     duplicated physical position inside their overlap zone.
 
-    Mimics two ``tabix``-sliced partitions of one source VCF: partition A
-    covers ``[100, 400]`` and partition B covers ``[250, 600]``; both slices
+Mimics two region-sliced partitions of one shared source VCF (matching how
+    ``_calc_partition`` slices one reference panel per partition): partition A
+    covers ``[100, 400]`` and partition B covers ``[250, 600]``; both regions
     include the same two same-POS=300 records (mirroring
     ``_duplicate_position_vcf_stream`` in ``test_shrinkage.py``), so both
     independently exercise ``calc_covariance``'s duplicate-position dedup
@@ -136,11 +147,12 @@ def build_two_overlapping_partitions_with_duplicate_position(
         for pos in (100, 200, 300, 400, 500, 600):
             f.write(f"1 {pos} {pos / 100_000:.6f}\n")
 
-    header = (
-        "##fileformat=VCFv4.2\n"
-        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT"
-        "\tsample_a\tsample_b\n"
-    )
+    header_lines = [
+        "##fileformat=VCFv4.2",
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+        "##contig=<ID=1>",
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample_a\tsample_b",
+    ]
     # Loci: 100, 200, 300 (duplicate: rs_dup_a + rs_dup_b), 400, 500, 600.
     rows = {
         100: "1\t100\trs_100\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|0",
@@ -162,10 +174,6 @@ def build_two_overlapping_partitions_with_duplicate_position(
         return body
 
     partitions = [(100, 400), (250, 600)]
-    slice_positions = {
-        (100, 400): [100, 200, 300, 400],
-        (250, 600): [300, 400, 500, 600],
-    }
 
     root = tmp_path / "cov"
     chrom_dir = root / chrom
@@ -174,11 +182,18 @@ def build_two_overlapping_partitions_with_duplicate_position(
         for start, end in partitions:
             f.write(f"{start} {end}\n")
 
+    # One shared source VCF spanning every partition, region-sliced per
+    # partition below -- mirrors production (`_calc_partition` slices one
+    # reference panel via `region`, not separately pre-sliced streams).
+    vcf_path = _write_indexed_vcf(
+        tmp_path / "combined",
+        [*header_lines, *_rows_for([100, 200, 300, 400, 500, 600])],
+    )
+
     for start, end in partitions:
-        body = "\n".join(_rows_for(slice_positions[(start, end)]))
-        vcf_stream = StringIO(f"{header}{body}\n")
         calc_covariance(
-            vcf_stream=vcf_stream,
+            vcf_path=vcf_path,
+            region=f"1:{start}-{end}",
             genetic_map_path=map_path,
             individuals_path=individuals_path,
             output_path=chrom_dir / f"{chrom}.{start}.{end}.h5",

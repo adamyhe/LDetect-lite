@@ -236,6 +236,50 @@ def test_find_breakpoints_loci_in_range(example_data_dir, example_store, tmp_pat
     assert not out_of_range, f"Loci out of range: {out_of_range}"
 
 
+def test_find_breakpoints_multiworker_matches_single_worker(
+    example_data_dir, example_store, tmp_path
+):
+    """Multi-worker local search must match single-worker output exactly.
+
+    Regression test for the grouped-partition ProcessPoolExecutor path in
+    ``_run_local_search``: workers submit one task per shared-partition group
+    (loaded once per group) rather than one task per breakpoint, to avoid
+    concurrent breakpoints redundantly reloading the same large partition.
+    Grouping must not change results.
+    """
+    from ldetect_lite.pipeline import find_breakpoints
+
+    ref_vector = example_data_dir / "vector/vector-EUR-chr2-39967768-40067768.txt.gz"
+
+    single_json = tmp_path / "breakpoints_single.json"
+    find_breakpoints(
+        input_path=ref_vector,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=single_json,
+        workers=1,
+    )
+
+    multi_json = tmp_path / "breakpoints_multi.json"
+    find_breakpoints(
+        input_path=ref_vector,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=multi_json,
+        workers=4,
+    )
+
+    single_data = json.loads(single_json.read_text())
+    multi_data = json.loads(multi_json.read_text())
+    for subset in ("fourier_ls", "uniform_ls"):
+        assert multi_data[subset]["loci"] == single_data[subset]["loci"], (
+            f"{subset} loci differ between workers=1 and workers=4"
+        )
+        assert multi_data[subset]["metric"] == single_data[subset]["metric"]
+
+
 def test_find_breakpoints_uses_supplied_covariance_cache(
     example_data_dir,
     example_store,

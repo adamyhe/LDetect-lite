@@ -215,6 +215,11 @@ rule legacy_run_ldetect_full:
     shell:
         """
         mkdir -p {params.log_dir}
+        export OMP_NUM_THREADS={params.workers}
+        export OPENBLAS_NUM_THREADS={params.workers}
+        export MKL_NUM_THREADS={params.workers}
+        export NUMEXPR_NUM_THREADS={params.workers}
+        export NUMBA_NUM_THREADS={params.workers}
         /usr/bin/time -v -o {log.timing} \
         uv run ldetect run \
             --genetic-map {input.genetic_map} \

@@ -2,6 +2,8 @@
 
 `ldetect run` (see `README.md`) chains all five stages below end-to-end and is the recommended way to run the pipeline. This doc covers running each stage individually — useful for debugging, restarting a partial run, or inspecting intermediate outputs.
 
+Several of these stages accept their own `--workers`/`--metric-workers`. The same BLAS/OMP oversubscription risk described in `README.md` applies here too — but the automatic startup warning is only wired up in `ldetect run`, not these standalone commands, so export `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` yourself to match your worker count if you're driving these directly (e.g. from your own Snakefile rules) on a shared node.
+
 The pipeline has five stages that can be run individually:
 
 ---
@@ -26,21 +28,28 @@ Arguments:
 
 ---
 
-**Step 2 — Calculate covariance** from a phased VCF (reads stdin):
+**Step 2 — Calculate covariance** from a phased VCF/BCF partition:
 
 ```bash
-tabix -h 1000G.chr2.vcf.gz chr2:39967768-40067768 | \
-  ldetect calc-covariance \
-    --genetic-map chr2.interpolated_genetic_map.gz \
-    --individuals eurinds.txt \
-    --output cov_matrix/chr2/chr2.39967768.40067768.h5
+ldetect calc-covariance \
+  --reference-panel 1000G.chr2.vcf.gz \
+  --region chr2:39967768-40067768 \
+  --genetic-map chr2.interpolated_genetic_map.gz \
+  --individuals eurinds.txt \
+  --output cov_matrix/chr2/chr2.39967768.40067768.h5
 ```
 
 This step must be run once per partition. `ldetect run --workers N` runs partitions in parallel automatically.
 
-Reads phased haplotypes from a VCF stream and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect run` defaults to the compact schema described above.
+`ldetect calc-covariance` reads directly from an indexed `--reference-panel` (`.vcf.gz` with a `.tbi`, or `.bcf` with a `.csi`) via [cyvcf2](https://github.com/brentp/cyvcf2), restricting to `--region` if given. If `--reference-panel` is omitted, it instead reads VCF text from stdin with no region restriction of its own — e.g. `tabix -h 1000G.chr2.vcf.gz chr2:... | ldetect calc-covariance ...` (omitting `--reference-panel`/`--region`), useful for piping in output from arbitrary preprocessing (`bcftools view -i ...`, `zcat`, etc.) rather than a plain indexed file.
+
+For large reference panels, prefer `.bcf`/`.csi` over `.vcf.gz`/`.tbi` — same output, but faster and lower-memory to read (see `docs/optimizations.md`).
+
+Reads phased haplotypes and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect run` defaults to the compact schema described above.
 
 Arguments:
+- `--reference-panel PATH` — VCF/BCF reference panel path, indexed with `tabix -p vcf` or `bcftools index`. If omitted, reads from stdin instead.
+- `--region CHROM:START-END` — restrict to this region via an indexed fetch. Requires `--reference-panel`; omit to read the whole file/stream.
 - `--genetic-map PATH` — gzipped 3-column map used to convert physical positions to genetic distances (cM) for the shrinkage estimator
 - `--individuals PATH` — plain-text file with one individual ID per line; only these samples are extracted from the VCF
 - `--ne FLOAT` — effective population size for the shrinkage estimator (default: 11418.0)

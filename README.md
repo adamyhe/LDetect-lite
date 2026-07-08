@@ -22,7 +22,7 @@ uv add ldetect-lite
 
 This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, and `ldl` — so pick whichever is most convenient; examples below use `ldetect`.
 
-The main `ldetect run` pipeline also requires [htslib](https://www.htslib.org/). Specifically, `tabix` is used to stream VCF files to `ldetect calc-covariance`, and so must be on PATH.
+The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the VCF/BCFs must be indexed before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
 **Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
 
@@ -73,6 +73,8 @@ Options:
 - `--metric-workers N` — override parallel workers for streaming metric row passes during breakpoint scoring (default: inherit `--workers`)
 - `--high-precision` — use 50-digit Decimal arithmetic for local search instead of the default float path (slower; mainly useful for exact reference comparisons)
 
+If `--workers` is greater than 1 and none of `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` are set, `run` prints a startup warning: numpy/BLAS/numba otherwise size their own internal thread pools to the whole machine's core count, not `--workers`, which oversubscribes real CPUs when multiple `ldetect run` processes share a node (e.g. several jobs on the same Slurm allocation). Export those five variables to match `--workers` to avoid this — see `examples/ldetect_original/Snakefile`'s `run_ldetect` rule for a worked example.
+
 Each of the five stages (partition, covariance, matrix-to-vector, find-minima, extract-bpoints) can also be run individually, along with a `covariance-summary` inspection utility — see `docs/pipeline-steps.md`.
 
 ### Interpolate genetic maps
@@ -112,6 +114,6 @@ The available breakpoint sets are `fourier` and `uniform` (raw minima from Fouri
 
 ## Pre-computed LD blocks
 
-Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by [MacDonald et al. (2022)](https://www.biorxiv.org/content/10.1101/2022.03.04.483057v2).
+Pre-computed BED files for 1000 Genomes reference populations are available from in hg19 coordinates from the [original LDetect data repository](https://bitbucket.org/nygcresearch/ldetect-data) and in hg38 coordinates from a more recent effort by [MacDonald et al., 2022](https://www.biorxiv.org/content/10.1101/2022.03.04.483057v2).
 
 BED files produced by our work will be released once the code base leaves alpha/we finish major breaking updates.

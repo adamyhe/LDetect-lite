@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
+import os
+import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -11,6 +12,19 @@ from pathlib import Path
 from ldetect_lite.io.covariance_hdf5 import validate_covariance_hdf5
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+
+# Numpy/BLAS/numba read these once at library-init time to size their own
+# internal thread pools. Left unset, they default to the *whole machine's*
+# core count, not --workers -- harmless when a job has the machine to itself,
+# but oversubscribes real CPUs when many jobs run concurrently on a shared
+# node (e.g. several Slurm array tasks on one allocation).
+_THREAD_CAP_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -29,7 +43,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         "--reference-panel",
         required=True,
         metavar="PATH",
-        help="VCF reference panel path (accessed via tabix).",
+        help=(
+            "VCF/BCF reference panel path (accessed via cyvcf2; must be "
+            "indexed with tabix/bcftools index)."
+        ),
     )
     p.add_argument(
         "--individuals",
@@ -163,6 +180,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         action="store_true",
         help="Use 50-digit Decimal arithmetic for local search (slower).",
     )
+    p.add_argument(
+        "--delete-covariance-cache",
+        action="store_true",
+        help=(
+            "Delete this chromosome's covariance partition cache after the run "
+            "completes successfully, to reclaim disk space. Trades away Step "
+            "2's skip-already-computed-partitions restart/resume speedup for "
+            "this chromosome and output directory (default: keep the cache)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -180,39 +207,24 @@ def _calc_partition(
     compression: str,
 ) -> None:
     """
-    Wraps tabix > calc_covariance so we can run as a worker process.
+    Wraps an indexed region fetch > calc_covariance so we can run as a
+    worker process.
     """
     from ldetect_lite._util.memory import log_memory_checkpoint
     from ldetect_lite.shrinkage import calc_covariance
 
     region = f"{chrom}:{start}-{end}"
-    try:
-        tabix_proc = subprocess.Popen(
-            ["tabix", "-h", reference_panel, region],
-            stdout=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "tabix not found. Install htslib and ensure tabix is on PATH."
-        )
-
-    stdout = tabix_proc.stdout
-    if stdout is None:
-        raise RuntimeError("tabix subprocess produced no stdout stream")
-
-    with stdout:
-        calc_covariance(
-            vcf_stream=stdout,
-            genetic_map_path=genetic_map_path,
-            individuals_path=individuals_path,
-            output_path=output_path,
-            ne=ne,
-            cutoff=cutoff,
-            compact_output=compact_output,
-            compression=compression,
-        )
-    tabix_proc.wait()
+    calc_covariance(
+        vcf_path=Path(reference_panel),
+        region=region,
+        genetic_map_path=genetic_map_path,
+        individuals_path=individuals_path,
+        output_path=output_path,
+        ne=ne,
+        cutoff=cutoff,
+        compact_output=compact_output,
+        compression=compression,
+    )
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
 
 
@@ -247,6 +259,16 @@ def _run(args: argparse.Namespace) -> int:
         f"source={Path(ldetect_lite.__file__).resolve()}"
     )
     log_memory_checkpoint("run_start")
+
+    if args.workers > 1 and not any(os.environ.get(v) for v in _THREAD_CAP_ENV_VARS):
+        log_msg(
+            f"Warning: --workers {args.workers} is set but none of "
+            f"{', '.join(_THREAD_CAP_ENV_VARS)} are set in the environment. "
+            "Numpy/BLAS/numba may each size their own thread pools to the "
+            "whole machine instead of --workers, oversubscribing CPUs if "
+            "other jobs are running concurrently on the same node (e.g. "
+            "under Slurm). Consider exporting these to match --workers."
+        )
 
     # ------------------------------------------------------------------ #
     # Step 1: Partition chromosome                                         #
@@ -315,7 +337,7 @@ def _run(args: argparse.Namespace) -> int:
             start, end = futures[fut]
             try:
                 fut.result()
-            except RuntimeError as e:
+            except (RuntimeError, ValueError) as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
             log_msg(f"  Partition {start}-{end} done")
@@ -383,9 +405,19 @@ def _run(args: argparse.Namespace) -> int:
         name=chrom, loci=loci, snp_first=snp_first, snp_last=snp_last, output=bed_path
     )
 
+    if args.delete_covariance_cache:
+        log_msg(f"Deleting covariance cache: {cov_dir}")
+        _delete_covariance_cache(cov_dir)
+
     log_msg(f"Done. BED file: {bed_path}")
     log_memory_checkpoint("run_end")
     return 0
+
+
+def _delete_covariance_cache(cov_dir: Path) -> None:
+    """Remove a chromosome's covariance partition directory, if present."""
+    if cov_dir.exists():
+        shutil.rmtree(cov_dir)
 
 
 def _count_individuals(path: Path) -> int:
