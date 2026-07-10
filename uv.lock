@@ -884,15 +884,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pyyaml" },
-    { name = "ruff" },
-    { name = "snakemake" },
-    { name = "snakemake-executor-plugin-slurm" },
-]
 heatmap = [
     { name = "matplotlib" },
 ]
@@ -902,8 +893,13 @@ profiling = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
+    { name = "ruff" },
+    { name = "snakemake" },
+    { name = "snakemake-executor-plugin-slurm" },
 ]
 
 [package.metadata]
@@ -912,24 +908,22 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.10" },
     { name = "hdf5plugin", specifier = ">=4.4" },
     { name = "matplotlib", marker = "extra == 'heatmap'", specifier = ">=3.7" },
-    { name = "mypy", marker = "extra == 'dev'" },
     { name = "numba", specifier = ">=0.57" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "psutil", marker = "extra == 'profiling'", specifier = ">=5.9" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'" },
-    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'dev'" },
     { name = "scipy", specifier = ">=1.10" },
-    { name = "snakemake", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "snakemake-executor-plugin-slurm", marker = "extra == 'dev'" },
 ]
-provides-extras = ["heatmap", "profiling", "dev"]
+provides-extras = ["heatmap", "profiling"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-cov", specifier = ">=7.1.0" },
+    { name = "mypy" },
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest-cov" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "ruff" },
+    { name = "snakemake", specifier = ">=8.0" },
+    { name = "snakemake-executor-plugin-slurm" },
 ]
 
 [[package]]

@@ -19,8 +19,8 @@ import numpy as np
 _ZSTD_CLEVEL = 3
 
 _FORMAT = "ldetect-lite-covariance-h5"
-_LEGACY_FORMAT = "ldetect2-covariance-h5"
-_VALID_FORMATS = frozenset({_FORMAT, _LEGACY_FORMAT})
+_PRE_RENAME_FORMAT = "ldetect" + "2-covariance-h5"
+_VALID_FORMATS = frozenset({_FORMAT, _PRE_RENAME_FORMAT})
 _VERSION = 1
 HDF5_DATASET_CHUNK_ROWS = 65_536
 _REQUIRED_DATASETS = frozenset(

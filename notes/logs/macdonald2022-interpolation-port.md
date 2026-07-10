@@ -16,7 +16,7 @@ divergence itself was never identified.
 
 ## Root cause
 
-`src/ldetect2/interpolate_maps.py::interpolate()` is a port of
+`src/ldetect_lite/interpolate_maps.py::interpolate()` is a port of
 `joepickrell/1000-genomes-genetic-maps`'s **point**-based linear
 interpolator: it expects discrete `(position, cM)` points and interpolates
 between the two bracketing points.
@@ -49,11 +49,11 @@ the previously-measured, previously-unexplained MAE.
 
 ## Fix
 
-Added `interpolate_intervals()` in `src/ldetect2/interpolate_maps.py`, a
+Added `interpolate_intervals()` in `src/ldetect_lite/interpolate_maps.py`, a
 direct port of the R script's `interpThat`/`follow` logic, as an
 alternative to `interpolate()` (not a replacement — `interpolate()` is
 still correct for true point-sampled genetic maps). Exposed via
-`ldetect2 interpolate-maps --mode {point,interval}` (default `point`,
+`ldetect-lite interpolate-maps --mode {point,interval}` (default `point`,
 preserving prior behavior). The diagnostic `interpolate_map` Snakemake
 rule in `examples/MacDonald2022/Snakefile` (used by `validate_maps`/
 `compare_maps`; the real EUR pipeline downloads MacDonald's published map

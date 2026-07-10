@@ -26,7 +26,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tabix
 
       - name: Install dependencies
-        run: uv sync --extra dev --extra heatmap
+        run: uv sync --group dev --extra heatmap
 
       - name: Lint (ruff)
         run: uv run ruff check src tests

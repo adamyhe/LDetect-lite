@@ -1,4 +1,4 @@
-# ldetect2 Implementation Plan
+# ldetect-lite Implementation Plan
 
 **Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
 
@@ -6,15 +6,15 @@ This is mostly a historical document.
 
 ## Context
 
-Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldetect2/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:
+Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldetect_lite/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:
 
-- All logic lives under `src/ldetect2/` as importable modules
-- Single unified `ldetect2` CLI via stdlib argparse (no extra dependency)
+- All logic lives under `src/ldetect_lite/` as importable modules
+- Single unified `ldetect-lite` CLI via stdlib argparse (no extra dependency)
 - Replace `commanderline` library
 - Replace global config dict (`flat_file_consts.py`) with a `CovarianceStore` dataclass
 - Rename cryptic module names (E03→`matrix_analysis`, E05→`find_minima`, E07→`metric`, E08→`local_search`)
 - Intermediate breakpoint output switches from `.pickle` → `.json`
-- A top-level `ldetect2 run` command chains all five steps end-to-end
+- A top-level `ldetect-lite run` command chains all five steps end-to-end
 - Python 3.11+, type annotations throughout
 - Covariance partitions are indexed HDF5 files (`.h5`), with a compact cache schema for restartable production runs and a full schema for debugging/heatmaps.
 
@@ -23,19 +23,19 @@ Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldet
 ## Module Layout
 
 ```
-src/ldetect2/
+src/ldetect_lite/
 ├── __init__.py
 ├── _cli/
 │   ├── __init__.py
 │   ├── main.py                  # ArgumentParser + add_subparsers(); main() entry point
-│   ├── cmd_partition.py         # ldetect2 partition-chromosome
-│   ├── cmd_covariance.py        # ldetect2 calc-covariance
-│   ├── cmd_covariance_summary.py # ldetect2 covariance-summary
-│   ├── cmd_matrix_to_vector.py  # ldetect2 matrix-to-vector
-│   ├── cmd_find_minima.py       # ldetect2 find-minima
-│   ├── cmd_extract_bpoints.py   # ldetect2 extract-bpoints
-│   ├── cmd_interpolate_maps.py  # ldetect2 interpolate-maps
-│   └── cmd_run.py               # ldetect2 run  (chains all five steps)
+│   ├── cmd_partition.py         # ldetect-lite partition-chromosome
+│   ├── cmd_covariance.py        # ldetect-lite calc-covariance
+│   ├── cmd_covariance_summary.py # ldetect-lite covariance-summary
+│   ├── cmd_matrix_to_vector.py  # ldetect-lite matrix-to-vector
+│   ├── cmd_find_minima.py       # ldetect-lite find-minima
+│   ├── cmd_extract_bpoints.py   # ldetect-lite extract-bpoints
+│   ├── cmd_interpolate_maps.py  # ldetect-lite interpolate-maps
+│   └── cmd_run.py               # ldetect-lite run  (chains all five steps)
 ├── io/
 │   ├── __init__.py
 │   ├── partitions.py            # CovarianceStore, read_partitions, relevant_subpartitions, first_last
@@ -68,7 +68,7 @@ src/ldetect2/
 The `return_conf(path)` / `input_config: dict` pattern couples every function to an opaque blob. Replace with:
 
 ```python
-# src/ldetect2/io/partitions.py
+# src/ldetect_lite/io/partitions.py
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -99,7 +99,7 @@ Vector output delimiter is always `\t` (hardcoded in writer functions). Image ou
 
 ### `partition-chromosome` (was P00_00)
 ```
-ldetect2 partition-chromosome
+ldetect-lite partition-chromosome
     --genetic-map PATH       required; gzipped TSV (position, genetic_position)
     --n-individuals INT      required; individuals in reference panel
     --output PATH            required
@@ -111,7 +111,7 @@ ldetect2 partition-chromosome
 ### `calc-covariance` (was P00_01)
 Reads VCF from stdin (pipe from tabix).
 ```
-ldetect2 calc-covariance
+ldetect-lite calc-covariance
     --genetic-map PATH       required
     --individuals PATH       required; one individual ID per line
     --output PATH            required; HDF5 covariance partition
@@ -121,7 +121,7 @@ ldetect2 calc-covariance
 
 ### `covariance-summary`
 ```
-ldetect2 covariance-summary
+ldetect-lite covariance-summary
     --dataset-path PATH      required; root of covariance matrix directory
     --name TEXT              required; chromosome name e.g. chr2
     --snp-first INT          optional; auto-detected from partitions if omitted
@@ -132,7 +132,7 @@ ldetect2 covariance-summary
 
 ### `matrix-to-vector` (was P01)
 ```
-ldetect2 matrix-to-vector
+ldetect-lite matrix-to-vector
     --dataset-path PATH      required; root of covariance matrix directory
     --name TEXT              required; chromosome name e.g. chr2
     --output PATH            required; gzipped (position, corr_sum) TSV
@@ -145,7 +145,7 @@ ldetect2 matrix-to-vector
 
 ### `find-minima` (was P02)
 ```
-ldetect2 find-minima
+ldetect-lite find-minima
     --input PATH             required; gzipped vector from matrix-to-vector
     --chr-name TEXT          required
     --dataset-path PATH      required
@@ -165,7 +165,7 @@ ldetect2 find-minima
 
 ### `extract-bpoints` (was P03)
 ```
-ldetect2 extract-bpoints
+ldetect-lite extract-bpoints
     --name TEXT              required
     --dataset-path PATH      required
     --breakpoints PATH       required; .json from find-minima
@@ -176,7 +176,7 @@ ldetect2 extract-bpoints
 ### `run` (new — chains all five steps)
 Writes restartable intermediates under `--output-dir`.
 ```
-ldetect2 run
+ldetect-lite run
     --genetic-map PATH       required
     --reference-panel PATH   required; VCF accessed via tabix
     --individuals PATH       required
@@ -198,7 +198,7 @@ ldetect2 run
 
 ### `interpolate-maps` (from joepickrell scripts)
 ```
-ldetect2 interpolate-maps
+ldetect-lite interpolate-maps
     --snp-file PATH          required; BED file of SNP positions
     --genetic-map PATH       required; gzipped recombination map
     --output PATH            required; gzipped (rs_id, position, genetic_position) TSV
@@ -214,7 +214,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "ldetect2"
+name = "ldetect-lite"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -229,10 +229,10 @@ heatmap = ["matplotlib>=3.7"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy", "snakemake>=8.0", "snakemake-executor-plugin-slurm", "pyyaml>=6.0"]
 
 [project.scripts]
-ldetect2 = "ldetect2._cli.main:main"
+ldetect-lite = "ldetect_lite._cli.main:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/ldetect2"]
+packages = ["src/ldetect_lite"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -252,7 +252,7 @@ No Click/Typer — CLI uses stdlib argparse only.
 1. `pyproject.toml`
 2. All `__init__.py` files to establish package structure
 3. `_util/binary_search.py` — direct port of `baselib/binary_search.py` + type annotations; zero logic change
-4. `_util/logging.py` — `log_msg(msg: str) -> None` wrapping `logging.getLogger("ldetect2")`; replaces `print_log_msg`
+4. `_util/logging.py` — `log_msg(msg: str) -> None` wrapping `logging.getLogger("ldetect-lite")`; replaces `print_log_msg`
 5. `io/partitions.py` — `CovarianceStore` dataclass, `read_partitions()`, `relevant_subpartitions()`, `first_last()`
 
 ### Phase 2 — I/O layer

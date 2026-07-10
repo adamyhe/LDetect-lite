@@ -5,8 +5,8 @@
 Run commands from:
 
 ```bash
-cd /Users/adamhe/github/ldetect2/examples/MacDonald2022
-export UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache
+cd /Users/adamhe/github/ldetect-lite/examples/MacDonald2022
+export UV_CACHE_DIR=/Users/adamhe/github/ldetect-lite/.uv-cache
 ```
 
 ## Generate EUR diagnostics
@@ -227,12 +227,12 @@ A source comparison found:
 - The Hanning filter, extrema detection, breakpoint-count formula, width
   search, and local-search intervals are structurally equivalent.
 - Legacy metric and local-search calculations always use 50-digit
-  `decimal.Decimal`. `ldetect2` defaults to the faster float/array path unless
+  `decimal.Decimal`. `ldetect-lite` defaults to the faster float/array path unless
   `--high-precision` is supplied.
 - Legacy chromosome partitioning hardcodes `Ne=11418` in
   `P00_00_partition_chromosome.py`; the covariance script separately accepts
   population-specific `Ne`.
-- `ldetect2 run` currently passes the requested population `Ne` into both
+- `ldetect-lite run` currently passes the requested population `Ne` into both
   partitioning and covariance.
 
 For EUR, the partition `Ne` is 11418 either way. The most focused EUR chr9

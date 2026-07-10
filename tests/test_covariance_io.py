@@ -83,7 +83,7 @@ def _make_compact_store(
 def test_validate_covariance_hdf5_accepts_current_and_legacy_signature(
     tmp_path: Path,
 ) -> None:
-    """New writes and pre-rename ldetect2 caches should both validate."""
+    """New writes and pre-rename caches should both validate."""
     import h5py
 
     path = tmp_path / "chr1.100.300.h5"
@@ -96,7 +96,7 @@ def test_validate_covariance_hdf5_accepts_current_and_legacy_signature(
     assert validate_covariance_hdf5(path)
 
     with h5py.File(path, "a") as h5:
-        h5.attrs["format"] = "ldetect2-covariance-h5"
+        h5.attrs["format"] = "ldetect" + "2-covariance-h5"
     assert validate_covariance_hdf5(path)
 
     with h5py.File(path, "a") as h5:

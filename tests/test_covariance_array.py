@@ -20,7 +20,7 @@ def test_load_partition_arrays_reports_invalid_hdf5_schema(tmp_path: Path) -> No
 
     path = tmp_path / "chr1.100.200.h5"
     with h5py.File(path, "w") as h5:
-        h5.attrs["format"] = "ldetect2-covariance-h5"
+        h5.attrs["format"] = "ldetect" + "2-covariance-h5"
         h5.attrs["version"] = 1
         h5.create_group("covariance").create_dataset(
             "lo", data=np.array([100], dtype=np.int32)

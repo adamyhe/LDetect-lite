@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "LDetect-lite"
+name = "ldetect-lite"
 version = "0.2.1"
 description = "Fast calculation of approximately independent LD blocks"
 readme = "README.md"
@@ -13,9 +13,12 @@ authors = [{ name = "Adam He" }]
 keywords = ["bioinformatics", "LD", "linkage-disequilibrium", "GWAS"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Console",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
@@ -29,9 +32,17 @@ dependencies = [
     "cyvcf2>=0.31",
 ]
 
+[project.urls]
+Homepage = "https://github.com/adamyhe/ldetect-lite"
+Repository = "https://github.com/adamyhe/ldetect-lite"
+Issues = "https://github.com/adamyhe/ldetect-lite/issues"
+Changelog = "https://github.com/adamyhe/ldetect-lite/releases"
+
 [project.optional-dependencies]
 heatmap = ["matplotlib>=3.7"]
 profiling = ["psutil>=5.9"]
+
+[dependency-groups]
 dev = [
     "pytest>=7.0",
     "pytest-cov",
@@ -58,7 +69,7 @@ markers = [
 
 [tool.ruff]
 src = ["src"]
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
@@ -72,6 +83,3 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["scipy.*", "numba.*", "h5py.*", "hdf5plugin.*", "cyvcf2.*"]
 ignore_missing_imports = true
-
-[dependency-groups]
-dev = ["pytest>=9.0.2", "pytest-cov>=7.1.0"]
