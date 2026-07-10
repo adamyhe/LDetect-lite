@@ -130,10 +130,10 @@ _reference/ldetect_original/ldetect/pipeline_elements/E08_local_search.py
 The current implementation lives at:
 
 ```text
-src/ldetect2/local_search.py
+src/ldetect_lite/local_search.py
 ```
 
-The dictionary/Decimal path in `src/ldetect2/local_search.py` is intentionally
+The dictionary/Decimal path in `src/ldetect_lite/local_search.py` is intentionally
 very close to the legacy `init_search_lean()` and `search()` implementation.
 The main search loops match the legacy method:
 
@@ -190,7 +190,7 @@ Validation run:
 ```text
 uv run pytest tests/test_metric.py tests/test_local_search.py
 uv run pytest tests/test_local_search.py tests/integration/test_pipeline.py
-uv run ruff check src/ldetect2/local_search.py tests/test_local_search.py
+uv run ruff check src/ldetect_lite/local_search.py tests/test_local_search.py
 ```
 
 ## EUR Retest and Population-Specific Hypothesis

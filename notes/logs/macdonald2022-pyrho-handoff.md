@@ -480,16 +480,16 @@ differences") explains the razor-thin margins. Investigated four angles:
 
 1. **Window-bound computation.** Compared legacy's actual local-search
    driver (`_reference/ldetect_original/ldetect/examples/P02_minima_pipeline.py`,
-   `run_local_search_complete`) against `src/ldetect2/pipeline.py`'s
+   `run_local_search_complete`) against `src/ldetect_lite/pipeline.py`'s
    `_run_local_search`/`_midpoint`. **No deviation** — both compute every
    breakpoint's search window from the same raw, un-refined candidate list;
    legacy's sequential Python loop never feeds a refined position back as
-   input to a later window, so it's architecturally equivalent to ldetect2's
+   input to a later window, so it's architecturally equivalent to ldetect-lite's
    independent/parallelizable task-list construction, not a materially
    different (e.g. sequential-refinement) algorithm.
 2. **Metric formula and tie-breaking.** The `sum(r²)/N_zero` formula and
    incremental update logic are identical to legacy and identical between
-   ldetect2's own Decimal (`search()`) and float-vectorized (`_search_array()`)
+   ldetect-lite's own Decimal (`search()`) and float-vectorized (`_search_array()`)
    paths. No deadband/tolerance exists anywhere — any strictly-better
    metric, however marginal, moves the breakpoint. This is a genuine design
    property (zero-tolerance greedy optimization), not a bug, but it does
@@ -531,7 +531,7 @@ differences") explains the razor-thin margins. Investigated four angles:
 
 Two latent code defects were found along the way, unrelated to explaining
 the current observations but real — **both fixed and covered by regression
-tests this session** (`src/ldetect2/local_search.py`,
+tests this session** (`src/ldetect_lite/local_search.py`,
 `tests/test_local_search.py`): (a) `search()`'s and `_search_array()`'s
 left-search tie-break logic never refreshed `min_distance_right` after a
 left-tie win, so a chain of *exact* ties could resolve to the farthest
@@ -770,7 +770,7 @@ is the best implementation baseline for direct comparisons.
 
 Two relevant differences from the current port were found:
 
-1. Legacy metric and local search always use 50-digit `Decimal`; `ldetect2`
+1. Legacy metric and local search always use 50-digit `Decimal`; `ldetect-lite`
    defaults to float unless `--high-precision` is requested. Test this on EUR
    chr9 using the same covariance/vector intermediates.
 2. ~~Legacy partitioning hardcodes `Ne=11418`, even when covariance later uses
@@ -798,7 +798,7 @@ reference if these need regenerating (e.g. after a code change):
 
 ```bash
 cd examples/MacDonald2022
-UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache \
+UV_CACHE_DIR=/Users/adamhe/github/ldetect-lite/.uv-cache \
 uv run snakemake --cores 1 \
   results/compare/raw/pyrho_AFR_boundary_offsets.tsv \
   results/compare/raw/pyrho_EAS_boundary_offsets.tsv \
@@ -872,7 +872,7 @@ in `notes/findings/ldetect-original-reproduction.md`).
 
 The root-cause investigation for the *interpolation* half of this bug (the
 off-by-one interval-vs-point interpolation bug in
-`src/ldetect2/interpolate_maps.py`, independent of the map-source-switch
+`src/ldetect_lite/interpolate_maps.py`, independent of the map-source-switch
 workaround below) has its own full writeup in
 `notes/logs/macdonald2022-interpolation-port.md`.
 
@@ -889,8 +889,8 @@ MacDonald's own published already-interpolated maps
 `download_pyrho_map`) — no interpolation-method mismatch is possible by
 construction. For the deCODE-sourced `EUR` block set, the same function
 instead points at `MAPS_DIR/interpolated/chr{chrom}.tab.gz`, produced by
-*our own* `interpolate_map` rule → `ldetect2 interpolate-maps` →
-`src/ldetect2/interpolate_maps.py` (a Python port of
+*our own* `interpolate_map` rule → `ldetect-lite interpolate-maps` →
+`src/ldetect_lite/interpolate_maps.py` (a Python port of
 `joepickrell/1000-genomes-genetic-maps/scripts/interpolate_maps.py`) run
 against the raw deCODE supplementary file (`aau1043_datas3.gz`).
 
@@ -908,7 +908,7 @@ Confirmed this is a drop-in, no-reformatting substitution: both
 `deCODE_interpolated_maps/chr{N}.tab.gz` and the already-working
 `pyrho_interpolated_maps/{pop}/chr{N}.tab.gz` are tab-separated
 `chr, pos, cM` (no header, no rs_id column). The map-consuming code
-(`src/ldetect2/shrinkage.py`, `partition_chromosome`/`calc_covariance`)
+(`src/ldetect_lite/shrinkage.py`, `partition_chromosome`/`calc_covariance`)
 only ever reads `parts[1]` (position) and `parts[2]` (cM) via a
 whitespace-generic `.split()` — column 0's content is never inspected, and
 SNP matching to the VCF is done purely by physical position. So the pyrho
@@ -947,21 +947,21 @@ old `download_decode_map`/`convert_decode_map`/`interpolate_map` rules and
 `interpolate_maps.py` module were deliberately **not removed** — they're
 still exercised by the `validate_maps`/`compare_maps` diagnostic rules
 (which need *our own* interpolation output to compare/regression-check
-against MacDonald's), and `interpolate_maps.py`/`ldetect2 interpolate-maps`
+against MacDonald's), and `interpolate_maps.py`/`ldetect-lite interpolate-maps`
 is a documented, independently-tested public CLI command, not
 MacDonald2022-specific. Verified via `snakemake -n`/`--lint`, full unit
 suite (178 passed), and a `--forceall`-scoped dry run confirming
-`run_ldetect2` for `EUR` now takes `data/maps/decode_interpolated_maps/chr{N}.tab.gz`
+`run_ldetect_lite` for `EUR` now takes `data/maps/decode_interpolated_maps/chr{N}.tab.gz`
 as input; confirmed pyrho block sets' job graph is completely unaffected.
 
 **Caveat found while verifying:** locally, a plain (unforced) dry run
 targeting the final `EUR` outputs does *not* show the new download rule or
-`run_ldetect2` as needing to rerun, because this local checkout is missing
+`run_ldetect_lite` as needing to rerun, because this local checkout is missing
 the intermediate files entirely (`results/EUR/chr*/`, `data/filtered/`,
 etc. were never synced back — only final aggregated outputs were). This is
 a local-sandbox artifact, not a real risk on the actual remote host: there,
 Snakemake has real provenance metadata from the original run and will
-correctly detect that `run_ldetect2`'s declared input set changed. Still,
+correctly detect that `run_ldetect_lite`'s declared input set changed. Still,
 to guarantee a correct rerun without relying on implicit staleness
 detection, delete the stale EUR-specific outputs first (this does not
 touch `data/maps/interpolated/`, which the diagnostic rules still need, or
@@ -1063,7 +1063,7 @@ exist publicly.
 Static checks:
 
 ```bash
-UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache \
+UV_CACHE_DIR=/Users/adamhe/github/ldetect-lite/.uv-cache \
 uv run ruff check examples/MacDonald2022/scripts
 ```
 
@@ -1071,7 +1071,7 @@ MacDonald dry-run:
 
 ```bash
 cd examples/MacDonald2022
-UV_CACHE_DIR=/Users/adamhe/github/ldetect2/.uv-cache \
+UV_CACHE_DIR=/Users/adamhe/github/ldetect-lite/.uv-cache \
 uv run snakemake -n \
   --shared-fs-usage input-output persistence software-deployment sources \
   --config chromosomes='[22]'

@@ -40,7 +40,7 @@ two passes while avoiding peak memory stacking during local search.
 Files changed:
 
 ```text
-src/ldetect2/pipeline.py
+src/ldetect_lite/pipeline.py
 ```
 
 ## Major Remaining Bottlenecks
@@ -131,6 +131,6 @@ The regression tests currently enforce:
 ```text
 uv run pytest tests/test_metric.py tests/test_local_search.py tests/test_shrinkage.py
 uv run pytest tests/integration/test_pipeline.py
-uv run ruff check src/ldetect2 tests
+uv run ruff check src/ldetect_lite tests
 cd examples/ldetect_original && uv run snakemake -n --config chromosomes='[22]'
 ```

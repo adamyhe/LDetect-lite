@@ -66,12 +66,12 @@ chunked/streaming memory optimizations — no longer a live constraint.)
 **2026-06-21 — legacy downstream diagnostic (most informative finding of this
 period).** Ran copied legacy downstream scripts
 (`results/legacy_diagnostics/EUR/{8,9,10,11,12,13}/compare/`) on covariance
-data derived from the **same** ldetect2-generated full covariance partitions,
-testing whether the EUR chr8-12 mismatch originates in ldetect2's downstream
+data derived from the **same** ldetect-lite-generated full covariance partitions,
+testing whether the EUR chr8-12 mismatch originates in ldetect-lite's downstream
 steps (matrix-to-vector, minima selection, local search) rather than upstream
 of covariance:
 
-| chrom | ldetect2-vs-ref | legacy-vs-ref | ldetect2-vs-legacy |
+| chrom | ldetect-lite-vs-ref | legacy-vs-ref | ldetect-lite-vs-legacy |
 | --- | ---: | ---: | ---: |
 | chr8 | 0.4105 | 0.4211 | 0.8737 |
 | chr9 | 0.3467 | 0.3467 | 0.8800 |
@@ -80,16 +80,16 @@ of covariance:
 | chr12 | 0.3614 | 0.3855 | 0.8795 |
 | chr13 | 1.0000 | 0.9365 | 0.9365 |
 
-The legacy run is not bit-identical to ldetect2 (vector SHA256 hashes differ
+The legacy run is not bit-identical to ldetect-lite (vector SHA256 hashes differ
 on every checked chromosome; final loci are not all identical), but **legacy
-and ldetect2 are much closer to each other than either is to the published
+and ldetect-lite are much closer to each other than either is to the published
 reference on chr8-12** — and running actual legacy downstream code on the
 same covariance data still does **not** reproduce the published chr8-12
 reference. The chr13 result is a useful caveat against over-trusting this
-diagnostic as a perfect oracle (ldetect2 matches chr13 exactly, but the
+diagnostic as a perfect oracle (ldetect-lite matches chr13 exactly, but the
 copied legacy diagnostic is only 0.9365 concordant with the reference there)
 — but it's still informative because it fails in the *same direction* as
-ldetect2 on chr8-12 given the same input covariance. **Conclusion carried
+ldetect-lite on chr8-12 given the same input covariance. **Conclusion carried
 forward: the chr8-12 mismatch is not primarily a downstream (post-covariance)
 implementation bug in either codebase — the best remaining explanation is an
 upstream provenance/input/covariance difference between current public
@@ -134,7 +134,7 @@ chr22 has one extra block and a localized boundary disagreement.
 **Update 2026-07-03: AFR chr11 is resolved — see "Supplementary PDF obtained"
 below.** The "126 ref blocks" figure below is a parsing artifact of two
 corrupted rows in the published reference BED file (`"None"` literal instead
-of a real coordinate at exactly the boundary ldetect2 was flagged for
+of a real coordinate at exactly the boundary ldetect-lite was flagged for
 emitting an "extra" boundary at). Our output is very likely correct there;
 treat AFR chr11 as no longer an open divergence. AFR chr22 remains open.
 
@@ -149,7 +149,7 @@ Interpretation:
 
 - AFR chr11 looks like a small count-level discrepancy rather than a shifted
   chromosome-wide run. Reference boundaries are all matched at 100 kb, but
-  ldetect2 emits one additional internal boundary at `109897792`, about
+  ldetect-lite emits one additional internal boundary at `109897792`, about
   1.07 Mb from the nearest reference boundary (`108823642`). Coverage endpoints
   are identical: `70855-134946452`.
 - AFR chr22 has one additional block and several boundaries displaced beyond
@@ -333,7 +333,7 @@ The position-set comparison only sees which SNP positions are *called*, not
 genotype or phasing content at *shared* positions. That is the main gap,
 since 1000G Phase 1 v1->v2->v3 differ mainly in re-phasing/re-imputation, not
 just which sites are called, and phasing feeds directly into the Wen &
-Stephens shrinkage covariance in `ldetect2.shrinkage`.
+Stephens shrinkage covariance in `ldetect_lite.shrinkage`.
 
 Added `scripts/compare_vcf_ld.py`: for a deterministic, evenly-spaced sample
 of nearby SNP pairs at positions shared between a baseline and candidate VCF,
@@ -444,7 +444,7 @@ arbitrary with respect to variant type, and can differ between VCF releases
 or between the "all"/"snps" views of the same release.
 
 Fix: keep only the *first* record per position (`if pos in haps: continue`
-before parsing), matching how `ldetect2.shrinkage.calc_covariance` resolves
+before parsing), matching how `ldetect_lite.shrinkage.calc_covariance` resolves
 the same situation when it streams a VCF (see the "Duplicate-position /
 cross-partition equivalence" section below) — `bcftools query -R` traverses
 the same on-disk sorted/indexed file order as `calc_covariance`'s own
@@ -518,7 +518,7 @@ substantially more expensive than anything tried so far.
 
 ### Duplicate/multiallelic-position handling: prior work exists on other branches, correcting an initial overclaim
 
-`ldetect2.shrinkage.calc_covariance` (`src/ldetect2/shrinkage.py:634-654` on
+`ldetect_lite.shrinkage.calc_covariance` (`src/ldetect_lite/shrinkage.py:634-654` on
 `ldetect-original-fix`) deduplicates VCF rows by physical position while
 parsing: it keeps the *first* row seen at a given `POS` and drops the rest,
 logging the dropped count. This was initially flagged here as a "real,
@@ -556,7 +556,7 @@ too strong; both parts need correction:**
    first-VCF-encountered duplicate variant's row for any given neighbor `r`
    is always written — and therefore always kept — before the second
    duplicate's row for that same `r`. That means legacy's dict-overwrite
-   dedup and ldetect2's parse-time "keep first, drop rest" dedup select the
+   dedup and ldetect-lite's parse-time "keep first, drop rest" dedup select the
    *same* surviving variant and should produce the *same* LD values for
    cross-position pairs. `notes/covariance-streaming-cache-implementation-note.md`
    (a design-only branch, also forked from `2e7579d`) independently documents
@@ -593,7 +593,7 @@ either.
    so their code is not a trustworthy oracle and pulling from it risks
    importing a different, undiscovered problem instead of resolving this one.
    Instead, write a small standalone script (in `examples/ldetect_original/scripts/`,
-   independent of `src/ldetect2`) that parses one divergent chromosome's
+   independent of `src/ldetect_lite`) that parses one divergent chromosome's
    partition VCF twice — once reproducing `calc_covariance`'s current
    keep-first-drop-rest dedup, once with a from-scratch "retain every row,
    canonicalize with first-row-wins per `(lo, hi)` pair" implementation
@@ -602,7 +602,7 @@ either.
    with fresh, purpose-built code instead of a legacy oracle port or
    another branch's code.
 3. Only after (1) and (2) come back inconclusive is it worth running the full
-   `ldetect2 run` pipeline end-to-end on an old VCF release (v1/old2011) for
+   `ldetect-lite run` pipeline end-to-end on an old VCF release (v1/old2011) for
    one divergent chromosome. The position-set diagnostic already shows the
    divergent chromosomes are indistinguishable from the exact-match control by
    which release is used, so a blind full-pipeline VCF swap is unlikely to fix
@@ -617,7 +617,7 @@ Date: 2026-07-02
 
 Item 2 above ("settle the duplicate-position question empirically") is now
 closed. Direct comparison of legacy `_reference/ldetect_original/ldetect/` code
-against current `src/ldetect2` (branch `ldetect-original-fix`), followed by new
+against current `src/ldetect_lite` (branch `ldetect-original-fix`), followed by new
 regression tests, both point the same way: **duplicate-VCF-position and
 cross-partition-overlap handling in the current codebase are legacy-faithful,
 not the source of the EUR chr8-12/AFR chr11/chr22 divergence.**
@@ -643,7 +643,7 @@ not the source of the EUR chr8-12/AFR chr11/chr22 divergence.**
   always kept, before the second duplicate's row for that same `r`. So
   first-write-wins always resolves to "use the first-VCF-encountered
   duplicate's genotype data for every neighbor" — which is exactly what
-  `ldetect2.shrinkage.calc_covariance` (`shrinkage.py:634-657`) already does
+  `ldetect_lite.shrinkage.calc_covariance` (`shrinkage.py:634-657`) already does
   by dropping every row after the first at a given `POS`, before computing
   anything. Same outcome via a different mechanism (upfront drop vs.
   downstream insert-once), not a divergence.
@@ -659,7 +659,7 @@ computed by two adjacent, overlapping partitions):
   `_util/vector_array.py` both use the same "midpoint" boundary
   (`floor((partitions[p][1] + partitions[p+1][0]) / 2)`).
   These are two intentionally different legacy-faithful conventions (one per
-  algorithm), not an internal inconsistency in `ldetect2`.
+  algorithm), not an internal inconsistency in `ldetect-lite`.
 - Which *value* wins for a redundant pair is decided by a shared primitive,
   `io/covariance.py::_insert_lean_values` (`if hi not in matrix[lo]:
   matrix[lo][hi] = shrink`) — plain partition-read-order first-write-wins,
@@ -698,7 +698,7 @@ computed by two adjacent, overlapping partitions):
   divergent_overlap_partitions`) where the redundant pair has genuinely
   different values (`0.7` vs `0.2`) in each partition, cross-checked against
   an independent from-scratch oracle (`first_write_wins_pair_value`, plain
-  Python, no imports from `ldetect2`). Both pass.
+  Python, no imports from `ldetect_lite`). Both pass.
 - `tests/test_duplicate_overlap_integration.py` — the one combination flagged
   as untested anywhere: a duplicate VCF position that also sits inside a
   cross-partition overlap zone, exercised through real (not hand-typed)
@@ -724,7 +724,7 @@ Date: 2026-07-03
 While the alternate-source-rerun pipeline runs, audited implicit
 preprocessing/provenance assumptions that were never surfaced as an explicit
 hypothesis to test (as opposed to another empirical diagnostic). Method: read
-the actual legacy code/config, compare against what `ldetect2`/the example
+the actual legacy code/config, compare against what `ldetect-lite`/the example
 pipelines do today, and use the existing success/failure pattern (ASN exact
 genome-wide; EUR chr1-7/13-22 and AFR chr1-10/12-21 exact; EUR chr8-12 and
 AFR chr11/chr22 the only failures) as a control on each candidate.
@@ -734,8 +734,8 @@ AFR chr11/chr22 the only failures) as a control on each candidate.
 `_reference/ldetect_original/ldetect/examples/P00_00_partition_chromosome.py`
 line 53 hardcodes `exp(-4.0*11418.0*df/(2.0*nind))` — literally `11418.0`,
 not a parameter — for the partition-boundary-extension step, for *every*
-population including AFR and ASN. Current `ldetect2`
-(`src/ldetect2/_cli/cmd_run.py::_run()`,
+population including AFR and ASN. Current `ldetect-lite`
+(`src/ldetect_lite/_cli/cmd_run.py::_run()`,
 `partition_chromosome(..., ne=args.ne)`) instead passes the population-
 specific `--ne` into that same step (17469 for AFR, 14269 for ASN) — a real,
 previously-unverified divergence from legacy for every non-EUR population.
@@ -745,7 +745,7 @@ substitution (Ne=14269 instead of legacy's implicit 11418 for partition
 boundaries) and still reproduces exactly, genome-wide, on every chromosome.
 If this substitution meaningfully shifted boundary placement, ASN should show
 some symptom too — it shows none. No further action; not a candidate root
-cause, but worth documenting since nobody had actually checked `ldetect2`'s
+cause, but worth documenting since nobody had actually checked `ldetect-lite`'s
 own behavior here before (only speculated about it, in
 `notes/logs/local-search-divergence-asn22.md`).
 
@@ -902,7 +902,7 @@ previously unreachable via automated web fetch) and provided it directly.
 - Mean segment size: *"For the published blocks, we used 10^4 SNPs for the
   mean segment size"* — matches `n_snps_bw_bpoints=10000`, our existing
   default — confirmed correct.
-- Shrinkage/covariance formula (Section 1) matches `ldetect2.shrinkage`'s
+- Shrinkage/covariance formula (Section 1) matches `ldetect_lite.shrinkage`'s
   implementation exactly (population-scaled recombination rate in the
   exponential decay term, sample-size normalization).
 - No new information on exact 1000G release version or population
@@ -933,10 +933,10 @@ BED file itself, not in our pipeline or in the off-by-one theory.**
 
 Investigation: `AFR_fourier_ls-all.bed` has 128 raw rows for chr11 (matches
 our own `results/AFR_LD_blocks.bed`'s 128 rows for chr11 exactly), but
-`ldetect2.io.bed.read_genome_bed()` (used by `compare_blocks.py`) parses only
+`ldetect_lite.io.bed.read_genome_bed()` (used by `compare_blocks.py`) parses only
 126 valid blocks for chr11 — it silently drops 2 malformed rows that fail the
 "is this a valid integer coordinate" check
-(`src/ldetect2/io/bed.py::_iter_bed_records`, correct, defensive behavior).
+(`src/ldetect_lite/io/bed.py::_iter_bed_records`, correct, defensive behavior).
 Found the actual malformed rows:
 
 ```text
@@ -986,7 +986,7 @@ Date: 2026-07-03
 Audited all three reference files (and our own genome-wide outputs, for
 comparison) for gaps, overlaps, zero/negative-length blocks, out-of-order
 boundaries, and duplicate rows (parsing with the same permissive-but-safe
-logic as `ldetect2.io.bed`, skipping the harmless header row).
+logic as `ldetect_lite.io.bed`, skipping the harmless header row).
 
 ```text
 REF AFR: 1 issue  — chr11: GAP of 2,224,928 bp (108823642 -> 111048570)
@@ -1009,7 +1009,7 @@ in this direction.
 
 Date: 2026-07-03
 
-`Snakefile.alternate_source_rerun` completed (21 full `ldetect2 run` executions:
+`Snakefile.alternate_source_rerun` completed (21 full `ldetect-lite run` executions:
 v1/v2/old2011 x EUR chr8/9/10/11/12 x AFR chr11/22). This is the direct
 empirical test the earlier `compare_ld_sets` diagnostic could only infer from
 sampled positions/LD pairs. Extracted the 21 real per-chromosome result rows
@@ -1187,12 +1187,12 @@ changes the picture:
   including in whatever flat regions caused chr10's divergence. Two
   numerically distinct arithmetic implementations, given the *same* upstream
   vector, do not disagree — so flatness alone is not enough to make the
-  boundary choice implementation-sensitive within `ldetect2`.
+  boundary choice implementation-sensitive within `ldetect-lite`.
 - **The legacy-downstream diagnostic (2026-06-21) goes further**: running
-  the actual copied legacy scripts (not ldetect2) on the *same*
-  ldetect2-generated covariance data for EUR chr7-13 also failed to
+  the actual copied legacy scripts (not ldetect-lite) on the *same*
+  ldetect-lite-generated covariance data for EUR chr7-13 also failed to
   reproduce the published chr8-12 reference, while agreeing closely with
-  ldetect2's own output (0.82-0.96 concordance) — far closer to each other
+  ldetect-lite's own output (0.82-0.96 concordance) — far closer to each other
   than either is to the reference. Two independently-implemented codebases,
   given the same covariance/vector input, converge on close-to-the-same
   wrong answer relative to the reference.
@@ -1238,13 +1238,13 @@ ends up:
 
 - **Resolved** (not a real divergence): AFR chr11 — a data-corruption bug in
   the published reference BED itself (two rows with a literal `"None"`
-  coordinate at exactly the boundary ldetect2 was flagged for).
+  coordinate at exactly the boundary ldetect-lite was flagged for).
 - **Ruled out** as explanations for EUR chr8-12 / AFR chr22: VCF
   release-version provenance (four documented releases plus the
   undocumented `merged_umich` snapshot, tested both by sampling diagnostics
   and full end-to-end pipeline reruns), SNP-only vs. all-variant filtering,
   genetic map family (HapMap vs. OMNI), `Ne` assignment,
-  duplicate-position/cross-partition handling in `ldetect2` (proven
+  duplicate-position/cross-partition handling in `ldetect-lite` (proven
   equivalent to legacy with new regression tests), sample/panel provenance,
   and reference-BED structural integrity (audited genome-wide and per
   chromosome). Multiallelic ALT-trimming order was deprioritized rather than

@@ -17,8 +17,8 @@ uv sync
 # Install with heatmap support (matplotlib, required for --generate-heatmap)
 uv sync --extra heatmap
 
-# Install dev extras (pytest, ruff, mypy, snakemake — needed for examples/)
-uv sync --extra dev
+# Install the dev dependency group (pytest, ruff, mypy, snakemake; needed for examples/)
+uv sync --group dev
 
 # Run unit tests only (fast)
 uv run pytest -m "not integration"
@@ -85,7 +85,7 @@ The package is under `src/ldetect_lite/`. Key modules:
 - **Genetic map**: gzipped TSV, columns: `chr  position  genetic_position_cM`
 - **Covariance matrix**: indexed HDF5 partition file (`.h5`); `full` schema also readable/writable as the reference's gzipped space-delimited 8-column flat format (`i_id  j_id  i_pos  j_pos  i_gpos  j_gpos  naive_ld  shrink_ld`) via the legacy `io/covariance.py` path
 - **Partition file**: space-delimited `start end` pairs, one per line
-- **Reference panel**: phased VCF piped via `tabix`
+- **Reference panel**: indexed phased VCF/BCF read by `cyvcf2`; region queries require a `.tbi`/`.csi` index
 - **Breakpoint JSON** (from `find-minima`): `{"n_bpoints", "found_width", "computed_subsets", "skipped_subsets", "fourier"/"fourier_ls"/"uniform"/"uniform_ls": {"loci": [...], "metric": {"sum", "N_nonzero", "N_zero"}}}`. `metric.sum`/`N_zero` are stored as strings to preserve precision (relevant when `--high-precision` produces Decimal values).
 
 ## Repository Layout Beyond `src/`
