@@ -2,48 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, TypedDict, TypeVar
+from typing import TypedDict
 
 import numpy as np
-import scipy.ndimage as ndimage
 import scipy.signal as sig
+from numba import njit
 
 from ldetect_lite._util.logging import log_msg
 
-_F = TypeVar("_F", bound=Callable[..., Any])
-
-try:
-    from numba import njit
-
-    _HAVE_NUMBA = True
-    _numba_nogil_decorator = njit(nogil=True, fastmath=True, cache=True)
-
-    def _njit_nogil(fn: _F) -> _F:
-        """JIT-compile with the GIL released.
-
-        ``nogil=True`` is required, not just a perf nicety: `find_minima.py`'s
-        `_find_end`/`_trackback` run this convolution concurrently from
-        multiple Python threads (`ThreadPoolExecutor`), which only overlaps
-        real work if the GIL is actually released during the call.
-
-        ``fastmath=True`` is also required for a *speed win at all*: without
-        it, LLVM does not auto-vectorize `_convolve1d_reflect`'s reduction
-        loop and the compiled kernel is ~2x *slower* than
-        `scipy.ndimage.convolve1d` (measured); with it, ~2x *faster*. This
-        permits floating-point reassociation within the compiled loop, but
-        that reassociation is fixed at compile time and applied identically
-        at every output position -- it does not compromise the flat-region
-        safety property (verified: a constant input run still produces
-        bit-identical output at every position), unlike the FFT-based
-        convolution that was tried and reverted (docs/optimizations.md #11).
-        """
-        return _numba_nogil_decorator(fn)  # type: ignore[no-any-return]
-except ImportError:
-    _HAVE_NUMBA = False
-
-    def _njit_nogil(fn: _F) -> _F:
-        return fn
+_njit_nogil = njit(nogil=True, fastmath=True, cache=True)
 
 
 @_njit_nogil
@@ -124,17 +91,8 @@ def apply_filter(np_init_array: np.ndarray, width: int) -> FilterResult:
     """
     window = np.hanning(2 * width + 1)
     kernel = window / window.sum()
-    if _HAVE_NUMBA:
-        arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
-        smoothed = _convolve1d_reflect(arr, kernel)
-    else:
-        # Numba is a hard dependency (pyproject.toml), so this path should be
-        # unreachable in a correctly-installed environment. But falling back
-        # to an un-jitted `_convolve1d_reflect` here would be catastrophic
-        # (a pure-Python O(N*width) triple-nested loop, ~10^8 iterations at
-        # production widths) rather than just slower -- fall back to the
-        # original scipy implementation instead, which is merely non-optimal.
-        smoothed = ndimage.convolve1d(np_init_array, kernel)
+    arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
+    smoothed = _convolve1d_reflect(arr, kernel)
 
     minima_ind = sig.argrelextrema(smoothed, np.less)[0]
     minima_vals = [smoothed[i] for i in minima_ind]

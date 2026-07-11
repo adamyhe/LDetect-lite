@@ -232,21 +232,3 @@ def test_convolve1d_reflect_releases_gil():
     t.join()
     assert during > 1000
 
-
-def test_apply_filter_falls_back_to_scipy_when_numba_unavailable(monkeypatch):
-    """If numba is missing (should be unreachable -- it's a hard dependency,
-    pyproject.toml), `apply_filter` must fall back to the original
-    `scipy.ndimage.convolve1d` call, not an un-jitted `_convolve1d_reflect`
-    (a pure-Python O(N*width) loop -- catastrophically slow at production
-    widths, not just non-optimal)."""
-    import ldetect_lite.filters as filters_mod
-
-    monkeypatch.setattr(filters_mod, "_HAVE_NUMBA", False)
-
-    width = 5
-    window = np.hanning(2 * width + 1)
-    kernel = window / window.sum()
-    expected = ndimage.convolve1d(_ARR, kernel)
-
-    result = apply_filter(_ARR, width)
-    np.testing.assert_array_equal(result["filtered"], expected)

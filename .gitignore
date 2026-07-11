@@ -3,6 +3,8 @@
 _reference
 tests/data/
 data/
+benchmarks/data/
+benchmarks/results/
 **/.snakemake/
 examples/*/results/
 examples/*/data/

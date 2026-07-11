@@ -10,7 +10,7 @@ This document summarises the performance improvements applied to `ldetect-lite` 
 
 **Affected code:** `_pairwise_ld_impl` in `src/ldetect_lite/shrinkage.py`
 
-The inner pairwise LD kernel was decorated with `@_jit` (`numba.njit(cache=True)` when Numba is available, no-op otherwise). The vectorised inner loop uses `np.sum(a * b)` instead of an explicit Python loop (Numba does not support `np.dot` on `uint8` arrays via BLAS).
+The inner pairwise LD kernel is decorated with `numba.njit(cache=True)`. The vectorised inner loop uses `np.sum(a * b)` instead of an explicit Python loop (Numba does not support `np.dot` on `uint8` arrays via BLAS).
 
 **Measured speedup:** ~50× over pure Python on a 200-SNP × 400-haplotype matrix. Numba compilation (~300 ms first run) is disk-cached via `cache=True`, so subsequent calls pay no compile cost.
 
@@ -218,7 +218,7 @@ A genuinely near-tied edge case was found and fixed during validation, not in pr
 
 **Measured impact:** ~2x per-call speedup over `scipy.ndimage.convolve1d` at realistic widths (8,000-18,000), multiplicative with #11's ~5x threading speedup — combined ~10x over the original sequential-scipy baseline on an 8-candidate batch, measured on real chr21-scale synthetic data. Verified exact minima-index equivalence to scipy (not just numerical closeness) on the flat-plateau fixtures, 80 randomized realistic-noise trials, and the full existing test suite unmodified.
 
-**Fallback if numba is unavailable**: `apply_filter` checks `_HAVE_NUMBA` and calls `scipy.ndimage.convolve1d` directly in that case, rather than an un-jitted `_convolve1d_reflect` (a pure-Python O(N·width) triple-nested loop — ~10^8 iterations at production widths, catastrophically slow rather than just non-optimal). Numba is a hard dependency (`pyproject.toml`), so this path should be unreachable in a correctly-installed environment, but the fallback should degrade to "non-optimal," not "unusable," if it's ever hit. Covered by `test_apply_filter_falls_back_to_scipy_when_numba_unavailable` (monkeypatches `_HAVE_NUMBA`, since actually uninstalling numba isn't practical in CI).
+Numba is a required dependency, so the production code imports `numba.njit` directly and fails at import time if the environment is incomplete. There is no pure-Python convolution fallback; an un-jitted `_convolve1d_reflect` would be a catastrophic O(N·width) Python loop at production widths.
 
 **CLI:** no change; transparent to `apply_filter`'s callers.
 
@@ -235,3 +235,18 @@ Fixed at the Snakemake level, not inside the library: every rule that invokes `l
 **Evidence this matters:** two chromosomes (AFR chr4, chr11) in a 66-row full-replication comparison initially looked like real multi-worker regressions (slower wall-clock, lower core utilization than the general trend). Traced via log timestamps to Slurm scheduling both jobs to start at the identical second — genuine machine contention, confirmed by unrelated/untouched phases (`step3`, `fourier_metric`) also running 7-8x slower under contention, and by a clean 1.7x win when AFR chr4 was re-run in isolation under a 4-CPU cap. That isolated re-run still showed a single ~1-2s sample hitting `cpu_percent_sum=1905%` on a 4-CPU allocation, timed exactly to `_run_local_search`'s `ProcessPoolExecutor` startup — consistent with BLAS/numba worker processes sizing thread pools to the full node rather than the 4-CPU allocation, and a plausible amplifier of the contention above when many such jobs share one Slurm allocation.
 
 **CLI:** no new flags; behavior is driven entirely by `--workers` and the ambient environment.
+
+---
+
+## 14. Low-risk shrinkage-kernel cleanup (`shrinkage.py`)
+
+**Affected code:** `_pairwise_ld_impl`, compact pair kernels, `_genetic_stop_bounds_impl`, and `calc_covariance` genotype ingestion in `src/ldetect_lite/shrinkage.py`
+
+The Wen-Stephens estimator itself is unchanged, but the implementation now avoids several repeated operations in the hot covariance path:
+
+- shared shrinkage arithmetic is factored into an inlined Numba helper used by the full, compact, and counting kernels;
+- constant terms such as `(1 - theta)^2`, the decay scale, inverse haplotype count, and diagonal adjustment are computed once per kernel call instead of once per pair;
+- genetic stop bounds use the log-derived genetic-distance threshold equivalent to `exp(-scale * distance) < cutoff`, avoiding an exponential in the bounds pass while preserving the `cutoff <= 0` no-early-stop behavior;
+- sample-name remapping during VCF/BCF ingestion uses a dictionary rather than repeated `list.index()` calls, and haplotype rows are preallocated before filling.
+
+These changes reduce duplicate code and scalar work without changing output schema or the shrinkage formula. Verified by `tests/test_shrinkage.py` and the non-integration test suite.
