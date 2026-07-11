@@ -9,6 +9,9 @@ partition twice:
 
 For every partition it compares the compact HDF5 row keys, shrinkage values,
 diagonal index, and lower-locus index before recording timing results.
+It also samples process RSS during each covariance call; with
+``--include-chromosome-mode`` it reports chromosome-load peak RSS, retained
+packed-cache bytes, and per-partition chromosome-mode RSS.
 
 Examples:
 
@@ -16,6 +19,9 @@ Examples:
 
     uv run python benchmarks/bench_bitpacked_full_genome.py \\
       --population EUR --chromosomes 22 --max-partitions-per-chrom 2
+
+    uv run python benchmarks/bench_bitpacked_full_genome.py \\
+      --population EUR --chromosomes 21 22 --include-chromosome-mode
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -39,6 +46,7 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from ldetect_lite._util.memory import current_rss_mib, max_rss_mib  # noqa: E402
 from ldetect_lite.io.covariance_hdf5 import open_covariance_reader  # noqa: E402
 from ldetect_lite.shrinkage import (  # noqa: E402
     ChromosomeGenotypes,
@@ -90,6 +98,12 @@ class PartitionResult:
     chromosome_bitpacked_seconds: float
     chromosome_load_seconds: float
     chromosome_speedup_vs_partition_bitpacked: float
+    uint8_peak_rss_mib: float
+    bitpacked_peak_rss_mib: float
+    chromosome_load_peak_rss_mib: float
+    chromosome_peak_rss_mib: float
+    chromosome_uint8_bytes: int
+    chromosome_packed_bytes: int
     uint8_prepare_seconds: float
     uint8_vcf_seconds: float
     uint8_array_seconds: float
@@ -117,6 +131,37 @@ class PartitionResult:
     chromosome_exact: bool
     max_abs_diff: float
     chromosome_max_abs_diff: float
+
+
+class RssSampler:
+    """Sample current RSS in a background thread during one benchmark section."""
+
+    def __init__(self, interval_seconds: float = 0.05) -> None:
+        self.interval_seconds = interval_seconds
+        self.peak_mib: float = 0.0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> RssSampler:
+        self._sample_once()
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._stop.set()
+        self._thread.join()
+        self._sample_once()
+
+    def _sample_once(self) -> None:
+        rss = current_rss_mib()
+        if rss is None:
+            rss = max_rss_mib()
+        if rss is not None:
+            self.peak_mib = max(self.peak_mib, rss)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            self._sample_once()
 
 
 def parse_args() -> argparse.Namespace:
@@ -337,23 +382,31 @@ def run_chromosome(
 
     chromosome_genotypes: ChromosomeGenotypes | None = None
     chromosome_load_seconds = 0.0
+    chromosome_load_peak_rss_mib = 0.0
+    chromosome_uint8_bytes = 0
+    chromosome_packed_bytes = 0
     if args.include_chromosome_mode:
         print(f"  Loading chr{chrom} {population} once for chromosome mode", flush=True)
         load_profile: dict[str, float] = {}
         load_start = time.perf_counter()
-        chromosome_genotypes = load_chromosome_genotypes(
-            vcf_path=filtered_vcf,
-            chrom=chrom,
-            genetic_map_path=map_path,
-            individuals_path=individuals_path,
-            storage="packed",
-            profile=load_profile,
-        )
+        with RssSampler() as sampler:
+            chromosome_genotypes = load_chromosome_genotypes(
+                vcf_path=filtered_vcf,
+                chrom=chrom,
+                genetic_map_path=map_path,
+                individuals_path=individuals_path,
+                storage="packed",
+                profile=load_profile,
+            )
         chromosome_load_seconds = time.perf_counter() - load_start
+        chromosome_load_peak_rss_mib = sampler.peak_mib
+        chromosome_uint8_bytes = int(load_profile.get("uint8_bytes", 0.0))
+        chromosome_packed_bytes = int(load_profile.get("packed_bytes", 0.0))
         print(
             "  chromosome load "
             f"n_snps={int(load_profile.get('n_snps', 0.0))} "
-            f"seconds={chromosome_load_seconds:.3f}",
+            f"seconds={chromosome_load_seconds:.3f} "
+            f"peak_rss_mib={chromosome_load_peak_rss_mib:.1f}",
             flush=True,
         )
 
@@ -378,6 +431,11 @@ def run_chromosome(
                 chromosome_load_seconds=(
                     chromosome_load_seconds if idx == 1 else 0.0
                 ),
+                chromosome_load_peak_rss_mib=(
+                    chromosome_load_peak_rss_mib if idx == 1 else 0.0
+                ),
+                chromosome_uint8_bytes=chromosome_uint8_bytes if idx == 1 else 0,
+                chromosome_packed_bytes=chromosome_packed_bytes if idx == 1 else 0,
             )
         )
     return results
@@ -558,6 +616,9 @@ def benchmark_partition(
     args: argparse.Namespace,
     chromosome_genotypes: ChromosomeGenotypes | None,
     chromosome_load_seconds: float,
+    chromosome_load_peak_rss_mib: float,
+    chromosome_uint8_bytes: int,
+    chromosome_packed_bytes: int,
 ) -> PartitionResult:
     out_dir = args.results_dir / population / f"chr{chrom}" / "partitions"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -566,7 +627,7 @@ def benchmark_partition(
     uint8_path.unlink(missing_ok=True)
     bitpacked_path.unlink(missing_ok=True)
 
-    uint8_seconds, uint8_profile = time_calc_covariance(
+    uint8_seconds, uint8_profile, uint8_peak_rss_mib = time_calc_covariance(
         vcf_path=filtered_vcf,
         region=f"{chrom}:{start}-{end}",
         map_path=map_path,
@@ -578,7 +639,7 @@ def benchmark_partition(
         compression=args.compression,
         ld_kernel="uint8",
     )
-    bitpacked_seconds, bitpacked_profile = time_calc_covariance(
+    bitpacked_seconds, bitpacked_profile, bitpacked_peak_rss_mib = time_calc_covariance(
         vcf_path=filtered_vcf,
         region=f"{chrom}:{start}-{end}",
         map_path=map_path,
@@ -591,11 +652,12 @@ def benchmark_partition(
         ld_kernel="bitpacked",
     )
     chromosome_bitpacked_seconds = 0.0
+    chromosome_peak_rss_mib = 0.0
     chromosome_profile: dict[str, float] = {}
     chromosome_bitpacked_path = out_dir / f"chr{chrom}.{start}.{end}.chromosome.h5"
     chromosome_bitpacked_path.unlink(missing_ok=True)
     if chromosome_genotypes is not None:
-        chromosome_bitpacked_seconds, chromosome_profile = (
+        chromosome_bitpacked_seconds, chromosome_profile, chromosome_peak_rss_mib = (
             time_calc_covariance_from_genotypes(
                 genotypes=chromosome_genotypes,
                 start=start,
@@ -654,6 +716,12 @@ def benchmark_partition(
             if chromosome_bitpacked_seconds
             else 0.0
         ),
+        uint8_peak_rss_mib=uint8_peak_rss_mib,
+        bitpacked_peak_rss_mib=bitpacked_peak_rss_mib,
+        chromosome_load_peak_rss_mib=chromosome_load_peak_rss_mib,
+        chromosome_peak_rss_mib=chromosome_peak_rss_mib,
+        chromosome_uint8_bytes=chromosome_uint8_bytes,
+        chromosome_packed_bytes=chromosome_packed_bytes,
         uint8_prepare_seconds=profile_value(uint8_profile, "prepare_seconds"),
         uint8_vcf_seconds=profile_value(uint8_profile, "vcf_seconds"),
         uint8_array_seconds=profile_value(uint8_profile, "array_seconds"),
@@ -710,26 +778,27 @@ def time_calc_covariance(
     compact_chunk_rows: int,
     compression: str,
     ld_kernel: str,
-) -> tuple[float, dict[str, float]]:
+) -> tuple[float, dict[str, float], float]:
     profile: dict[str, float] = {}
     start_time = time.perf_counter()
-    calc_covariance(
-        vcf_path=vcf_path,
-        region=region,
-        genetic_map_path=map_path,
-        individuals_path=individuals_path,
-        output_path=output_path,
-        ne=ne,
-        cutoff=cutoff,
-        compact_output=True,
-        compact_chunk_rows=compact_chunk_rows,
-        compression=compression,
-        ld_kernel=ld_kernel,
-        profile=profile,
-    )
+    with RssSampler() as sampler:
+        calc_covariance(
+            vcf_path=vcf_path,
+            region=region,
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            output_path=output_path,
+            ne=ne,
+            cutoff=cutoff,
+            compact_output=True,
+            compact_chunk_rows=compact_chunk_rows,
+            compression=compression,
+            ld_kernel=ld_kernel,
+            profile=profile,
+        )
     seconds = time.perf_counter() - start_time
     profile.setdefault("total_seconds", seconds)
-    return seconds, profile
+    return seconds, profile, sampler.peak_mib
 
 
 def time_calc_covariance_from_genotypes(
@@ -742,24 +811,25 @@ def time_calc_covariance_from_genotypes(
     cutoff: float,
     compact_chunk_rows: int,
     compression: str,
-) -> tuple[float, dict[str, float]]:
+) -> tuple[float, dict[str, float], float]:
     profile: dict[str, float] = {}
     start_time = time.perf_counter()
-    calc_covariance_from_genotypes(
-        genotypes,
-        start,
-        end,
-        output_path,
-        ne=ne,
-        cutoff=cutoff,
-        compact_chunk_rows=compact_chunk_rows,
-        compression=compression,
-        ld_kernel="bitpacked",
-        profile=profile,
-    )
+    with RssSampler() as sampler:
+        calc_covariance_from_genotypes(
+            genotypes,
+            start,
+            end,
+            output_path,
+            ne=ne,
+            cutoff=cutoff,
+            compact_chunk_rows=compact_chunk_rows,
+            compression=compression,
+            ld_kernel="bitpacked",
+            profile=profile,
+        )
     seconds = time.perf_counter() - start_time
     profile.setdefault("total_seconds", seconds)
-    return seconds, profile
+    return seconds, profile, sampler.peak_mib
 
 
 def compare_outputs(
@@ -834,6 +904,12 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
     total_chromosome_bitpacked_bytes = sum(
         result.chromosome_bitpacked_bytes for result in results
     )
+    total_chromosome_uint8_bytes = sum(
+        result.chromosome_uint8_bytes for result in results
+    )
+    total_chromosome_packed_bytes = sum(
+        result.chromosome_packed_bytes for result in results
+    )
     total_uint8_prepare = sum(result.uint8_prepare_seconds for result in results)
     total_bitpacked_prepare = sum(
         result.bitpacked_prepare_seconds for result in results
@@ -858,6 +934,16 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
     total_chromosome_write_io = sum(
         result.chromosome_write_io_seconds for result in results
     )
+    peak_uint8_rss = max((result.uint8_peak_rss_mib for result in results), default=0.0)
+    peak_bitpacked_rss = max(
+        (result.bitpacked_peak_rss_mib for result in results), default=0.0
+    )
+    peak_chromosome_load_rss = max(
+        (result.chromosome_load_peak_rss_mib for result in results), default=0.0
+    )
+    peak_chromosome_rss = max(
+        (result.chromosome_peak_rss_mib for result in results), default=0.0
+    )
     return {
         "n_partitions": len(results),
         "all_exact": all(result.exact for result in results),
@@ -876,9 +962,16 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
         "total_uint8_bytes": total_uint8_bytes,
         "total_bitpacked_bytes": total_bitpacked_bytes,
         "total_chromosome_bitpacked_bytes": total_chromosome_bitpacked_bytes,
+        "total_chromosome_uint8_cache_bytes": total_chromosome_uint8_bytes,
+        "total_chromosome_packed_cache_bytes": total_chromosome_packed_bytes,
         "overall_byte_ratio": (
             total_bitpacked_bytes / total_uint8_bytes if total_uint8_bytes else None
         ),
+        "peak_uint8_rss_mib": peak_uint8_rss,
+        "peak_bitpacked_rss_mib": peak_bitpacked_rss,
+        "peak_chromosome_load_rss_mib": peak_chromosome_load_rss,
+        "peak_chromosome_partition_rss_mib": peak_chromosome_rss,
+        "process_max_rss_mib": max_rss_mib(),
         "total_uint8_prepare_seconds": total_uint8_prepare,
         "total_bitpacked_prepare_seconds": total_bitpacked_prepare,
         "total_uint8_vcf_seconds": total_uint8_vcf,
