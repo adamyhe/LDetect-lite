@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,8 +39,8 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
-from ldetect_lite.shrinkage import (
+from ldetect_lite.io.covariance_hdf5 import open_covariance_reader  # noqa: E402
+from ldetect_lite.shrinkage import (  # noqa: E402
     _compact_pair_chunks_single_pass,
     _compact_pair_chunks_single_pass_bitpacked,
     _genetic_stop_bounds_impl,
@@ -51,10 +52,13 @@ from ldetect_lite.shrinkage import (
 DEFAULT_DATA_DIR = REPO_ROOT / "benchmarks/data/bitpacked_full_genome"
 DEFAULT_RESULTS_DIR = REPO_ROOT / "benchmarks/results/bitpacked_full_genome"
 
-VCF_BASE_URL = "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521"
-VCF_TEMPLATE = "ALL.chr{chrom}.phase1_release_v3.20101123.snps_indels_svs.genotypes.vcf.gz"
+VCF_BASE_URL = "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521"
+VCF_TEMPLATE = (
+    "ALL.chr{chrom}.phase1_release_v3.20101123."
+    "snps_indels_svs.genotypes.vcf.gz"
+)
 PANEL_URL = (
-    "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/"
+    "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20110521/"
     "phase1_integrated_calls.20101123.ALL.panel"
 )
 MAP_BASE_URL = (
@@ -322,7 +326,11 @@ def ensure_raw_vcf(data_dir: Path, chrom: str, *, force: bool) -> Path:
     filename = VCF_TEMPLATE.format(chrom=chrom)
     raw_vcf = raw_dir / filename
     download(f"{VCF_BASE_URL}/{filename}", raw_vcf, force=force)
-    download(f"{VCF_BASE_URL}/{filename}.tbi", raw_vcf.with_suffix(raw_vcf.suffix + ".tbi"), force=force)
+    download(
+        f"{VCF_BASE_URL}/{filename}.tbi",
+        raw_vcf.with_suffix(raw_vcf.suffix + ".tbi"),
+        force=force,
+    )
     return raw_vcf
 
 
@@ -340,7 +348,11 @@ def download(url: str, path: Path, *, force: bool) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     print(f"Downloading {url}", flush=True)
-    urllib.request.urlretrieve(url, tmp_path)
+    try:
+        urllib.request.urlretrieve(url, tmp_path)
+    except urllib.error.URLError as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to download {url} -> {path}: {exc}") from exc
     tmp_path.replace(path)
 
 
@@ -401,7 +413,11 @@ def ensure_filtered_vcf(
     filtered_dir = data_dir / "filtered" / population
     filtered_dir.mkdir(parents=True, exist_ok=True)
     filtered_vcf = filtered_dir / f"chr{chrom}.{population}.biallelic.mac1.vcf.gz"
-    if filtered_vcf.exists() and filtered_vcf.with_suffix(filtered_vcf.suffix + ".tbi").exists() and not force:
+    if (
+        filtered_vcf.exists()
+        and filtered_vcf.with_suffix(filtered_vcf.suffix + ".tbi").exists()
+        and not force
+    ):
         return filtered_vcf
 
     tmp_path = filtered_vcf.with_suffix(filtered_vcf.suffix + ".tmp")
@@ -510,7 +526,12 @@ def benchmark_partition(
         compression=args.compression,
         ld_kernel="bitpacked",
     )
-    exact, n_rows, max_abs_diff = compare_outputs(uint8_path, bitpacked_path, start, end)
+    exact, n_rows, max_abs_diff = compare_outputs(
+        uint8_path,
+        bitpacked_path,
+        start,
+        end,
+    )
     uint8_bytes = uint8_path.stat().st_size if uint8_path.exists() else 0
     bitpacked_bytes = bitpacked_path.stat().st_size if bitpacked_path.exists() else 0
 
@@ -526,7 +547,9 @@ def benchmark_partition(
         n_rows=n_rows,
         uint8_seconds=uint8_seconds,
         bitpacked_seconds=bitpacked_seconds,
-        speedup=uint8_seconds / bitpacked_seconds if bitpacked_seconds else float("inf"),
+        speedup=(
+            uint8_seconds / bitpacked_seconds if bitpacked_seconds else float("inf")
+        ),
         uint8_bytes=uint8_bytes,
         bitpacked_bytes=bitpacked_bytes,
         byte_ratio=bitpacked_bytes / uint8_bytes if uint8_bytes else float("nan"),
@@ -572,7 +595,11 @@ def compare_outputs(
     end: int,
 ) -> tuple[bool, int, float]:
     if not uint8_path.exists() or not bitpacked_path.exists():
-        return (not uint8_path.exists() and not bitpacked_path.exists(), 0, float("nan"))
+        return (
+            not uint8_path.exists() and not bitpacked_path.exists(),
+            0,
+            float("nan"),
+        )
 
     with open_covariance_reader(uint8_path, start, end) as reader:
         uint8_rows = reader.read_all()
