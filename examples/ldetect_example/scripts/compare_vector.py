@@ -16,6 +16,12 @@ import csv
 import gzip
 from pathlib import Path
 
+GENOMIC_FIG_WIDTH = 7.2
+GENOMIC_LEFT = 0.12
+GENOMIC_RIGHT = 0.98
+REFERENCE_COLOR = "#0057b8"
+LDETECT_LITE_COLOR = "#d62728"
+
 
 def read_vector(path: Path) -> dict[int, float]:
     opener = gzip.open(path, "rt") if path.suffix in (".gz", ".gzip") else open(path)
@@ -83,7 +89,7 @@ def main() -> None:
         writer = csv.writer(f, delimiter="\t")
         writer.writerows(rows)
     if args.plot is not None:
-        write_plot(ours, ref, shared, args.plot)
+        write_plot(ours, ref, shared, args.ref, args.plot)
     if args.require_exact and (
         only_ours != 0 or only_ref != 0 or exact_match != len(shared)
     ):
@@ -99,6 +105,7 @@ def write_plot(
     ours: dict[int, float],
     ref: dict[int, float],
     shared: list[int],
+    ref_path: Path,
     path: Path,
 ) -> None:
     configure_matplotlib_cache(path)
@@ -106,36 +113,50 @@ def write_plot(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import FuncFormatter
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    x = list(range(len(shared)))
+    x = shared
     ref_values = [ref[p] for p in shared]
     ours_values = [ours[p] for p in shared]
     diffs = [ours[p] - ref[p] for p in shared]
-    rel_diffs = [
-        (ours[p] - ref[p]) / max(abs(ref[p]), 1e-30)
-        for p in shared
-    ]
 
-    fig, axes = plt.subplots(
-        3, 1, figsize=(7.4, 4.5), sharex=True, constrained_layout=True
+    fig, axes = plt.subplots(2, 1, figsize=(GENOMIC_FIG_WIDTH, 3.2), sharex=True)
+    axes[0].plot(x, ref_values, label="reference", linewidth=1.5, color=REFERENCE_COLOR)
+    axes[0].plot(
+        x,
+        ours_values,
+        label="ldetect-lite",
+        linewidth=1,
+        linestyle="--",
+        color=LDETECT_LITE_COLOR,
     )
-    axes[0].plot(x, ref_values, label="reference", linewidth=1.5)
-    axes[0].plot(x, ours_values, label="ldetect-lite", linewidth=1, linestyle="--")
     axes[0].set_ylabel("diagonal sum")
     axes[0].set_title("Matrix-to-vector output")
     axes[0].legend()
 
-    axes[1].plot(x, diffs, linewidth=1)
+    axes[1].plot(x, diffs, linewidth=1, color=LDETECT_LITE_COLOR)
     axes[1].axhline(0.0, color="black", linewidth=0.8)
+    axes[1].set_xlabel("chr2 (hg19)")
     axes[1].set_ylabel("difference")
-
-    axes[2].plot(x, rel_diffs, linewidth=1)
-    axes[2].axhline(0.0, color="black", linewidth=0.8)
-    axes[2].set_xlabel("shared locus index")
-    axes[2].set_ylabel("relative difference")
+    xlim = fixture_xlim_from_path(ref_path) or (min(shared), max(shared))
+    axes[1].set_xlim(*xlim)
+    axes[1].xaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{int(value):,}"))
+    fig.subplots_adjust(left=GENOMIC_LEFT, right=GENOMIC_RIGHT, hspace=0.38)
     fig.savefig(path, dpi=160)
     plt.close(fig)
+
+
+def fixture_xlim_from_path(path: Path) -> tuple[int, int] | None:
+    name = path.name
+    for suffix in (".txt.gz", ".txt", ".gz"):
+        if name.endswith(suffix):
+            name = name.removesuffix(suffix)
+            break
+    parts = name.split("-")
+    if len(parts) >= 2 and parts[-2].isdigit() and parts[-1].isdigit():
+        return int(parts[-2]), int(parts[-1])
+    return None
 
 
 def configure_matplotlib_cache(path: Path) -> None:

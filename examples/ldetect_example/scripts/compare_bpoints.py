@@ -133,7 +133,7 @@ def write_plot(ours_data: dict, ref_data: dict, ref_path: Path, path: Path) -> N
         ax.eventplot(
             [ref_loci, our_loci],
             lineoffsets=[1, 0],
-            colors=["#d62728", "#0057b8"],
+            colors=["#0057b8", "#d62728"],
             linewidths=1.9,
         )
         ax.set_yticks([0, 1], ["ours", "ref"])

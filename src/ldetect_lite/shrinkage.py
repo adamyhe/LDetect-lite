@@ -617,6 +617,32 @@ def _compact_pair_chunks_single_pass_bitpacked(
         i_start = i_stop
 
 
+def _profile_next_chunks(
+    row_chunks: Iterator[CovarianceRowChunk],
+    profile: dict[str, float] | None,
+) -> Iterator[CovarianceRowChunk]:
+    """Measure generator ``next()`` time, which is the streamed pair kernel."""
+    if profile is None:
+        yield from row_chunks
+        return
+
+    iterator = iter(row_chunks)
+    while True:
+        start = time.perf_counter()
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            profile["chunk_seconds"] = (
+                profile.get("chunk_seconds", 0.0) + time.perf_counter() - start
+            )
+            return
+        profile["chunk_seconds"] = (
+            profile.get("chunk_seconds", 0.0) + time.perf_counter() - start
+        )
+        profile["n_chunks"] = profile.get("n_chunks", 0.0) + 1.0
+        yield chunk
+
+
 # ---------------------------------------------------------------------------
 # Chromosome partitioning  (was P00_00_partition_chromosome.py)
 # ---------------------------------------------------------------------------
@@ -704,6 +730,7 @@ def calc_covariance(
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
     ld_kernel: str = "uint8",
+    profile: dict[str, float] | None = None,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
 
@@ -738,6 +765,8 @@ def calc_covariance(
         ld_kernel: Pair-count backend for compact covariance output. ``"uint8"``
             is the established backend; ``"bitpacked"`` packs haplotypes into
             ``uint64`` words and uses popcounts for pairwise intersections.
+        profile: Optional mutable timing dictionary populated with coarse
+            stage timings for benchmark/profiling callers.
 
     Raises:
         ValueError: If any individual in *individuals_path* is not present in
@@ -755,6 +784,7 @@ def calc_covariance(
         raise ValueError("ld_kernel='bitpacked' currently requires compact_output=True")
 
     # --- read individuals ---
+    prep_start = time.perf_counter()
     individuals: list[str] = []
     with open(individuals_path) as f:
         for line in f:
@@ -775,8 +805,11 @@ def calc_covariance(
         for raw in gf:
             parts = raw.strip().split()
             pos2gpos[int(parts[1])] = float(parts[2])
+    if profile is not None:
+        profile["prepare_seconds"] = time.perf_counter() - prep_start
 
     # --- parse VCF/BCF ---
+    vcf_start = time.perf_counter()
     vcf = cyvcf2.VCF(str(vcf_path), samples=individuals)
     missing = [ind for ind in individuals if ind not in vcf.samples]
     if missing:
@@ -824,6 +857,10 @@ def calc_covariance(
         haps.append(row_haps)
 
     vcf.close()
+    if profile is not None:
+        profile["vcf_seconds"] = time.perf_counter() - vcf_start
+        profile["n_snps"] = float(len(all_pos))
+        profile["n_haps"] = float(n_haps)
 
     if skipped_unphased:
         print(
@@ -875,6 +912,8 @@ def calc_covariance(
         f"n_snps={hap_mat.shape[0]} n_haps={hap_mat.shape[1]} "
         f"seconds={time.perf_counter() - array_start:.3f}"
     )
+    if profile is not None:
+        profile["array_seconds"] = time.perf_counter() - array_start
     log_memory_checkpoint("calc_covariance_arrays_built", debug=True)
 
     pos_arr = np.array(all_pos, dtype=np.int32)
@@ -888,6 +927,8 @@ def calc_covariance(
             if ld_kernel == "bitpacked":
                 pack_start = time.perf_counter()
                 packed_hap_mat = _pack_haplotypes_impl(hap_mat)
+                if profile is not None:
+                    profile["pack_seconds"] = time.perf_counter() - pack_start
                 log_debug(
                     "calc_covariance haplotypes_bitpacked "
                     f"n_words={packed_hap_mat.shape[1]} "
@@ -919,6 +960,9 @@ def calc_covariance(
                     cutoff,
                     compact_chunk_rows,
                 )
+                if profile is not None:
+                    profile["pack_seconds"] = 0.0
+            row_chunks = _profile_next_chunks(row_chunks, profile)
             n_pairs = write_compact_covariance_partition_hdf5_append(
                 output_path,
                 positions=pos_arr,
@@ -926,6 +970,14 @@ def calc_covariance(
                 chunk_rows=compact_chunk_rows,
                 compression=compression,
             )
+            if profile is not None:
+                write_total = time.perf_counter() - write_start
+                profile["write_total_seconds"] = write_total
+                profile["write_io_seconds"] = max(
+                    0.0, write_total - profile.get("chunk_seconds", 0.0)
+                )
+                profile["n_pairs"] = float(n_pairs)
+                profile["total_seconds"] = time.perf_counter() - total_start
             dataset_chunk_rows = HDF5_DATASET_CHUNK_ROWS if n_pairs else 0
             log_debug(
                 "calc_covariance compact_hdf5_written "

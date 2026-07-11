@@ -84,6 +84,20 @@ class PartitionResult:
     uint8_seconds: float
     bitpacked_seconds: float
     speedup: float
+    uint8_prepare_seconds: float
+    uint8_vcf_seconds: float
+    uint8_array_seconds: float
+    uint8_pack_seconds: float
+    uint8_chunk_seconds: float
+    uint8_write_io_seconds: float
+    uint8_write_total_seconds: float
+    bitpacked_prepare_seconds: float
+    bitpacked_vcf_seconds: float
+    bitpacked_array_seconds: float
+    bitpacked_pack_seconds: float
+    bitpacked_chunk_seconds: float
+    bitpacked_write_io_seconds: float
+    bitpacked_write_total_seconds: float
     uint8_bytes: int
     bitpacked_bytes: int
     byte_ratio: float
@@ -502,7 +516,7 @@ def benchmark_partition(
     uint8_path.unlink(missing_ok=True)
     bitpacked_path.unlink(missing_ok=True)
 
-    uint8_seconds = time_calc_covariance(
+    uint8_seconds, uint8_profile = time_calc_covariance(
         vcf_path=filtered_vcf,
         region=f"{chrom}:{start}-{end}",
         map_path=map_path,
@@ -514,7 +528,7 @@ def benchmark_partition(
         compression=args.compression,
         ld_kernel="uint8",
     )
-    bitpacked_seconds = time_calc_covariance(
+    bitpacked_seconds, bitpacked_profile = time_calc_covariance(
         vcf_path=filtered_vcf,
         region=f"{chrom}:{start}-{end}",
         map_path=map_path,
@@ -550,12 +564,36 @@ def benchmark_partition(
         speedup=(
             uint8_seconds / bitpacked_seconds if bitpacked_seconds else float("inf")
         ),
+        uint8_prepare_seconds=profile_value(uint8_profile, "prepare_seconds"),
+        uint8_vcf_seconds=profile_value(uint8_profile, "vcf_seconds"),
+        uint8_array_seconds=profile_value(uint8_profile, "array_seconds"),
+        uint8_pack_seconds=profile_value(uint8_profile, "pack_seconds"),
+        uint8_chunk_seconds=profile_value(uint8_profile, "chunk_seconds"),
+        uint8_write_io_seconds=profile_value(uint8_profile, "write_io_seconds"),
+        uint8_write_total_seconds=profile_value(
+            uint8_profile, "write_total_seconds"
+        ),
+        bitpacked_prepare_seconds=profile_value(bitpacked_profile, "prepare_seconds"),
+        bitpacked_vcf_seconds=profile_value(bitpacked_profile, "vcf_seconds"),
+        bitpacked_array_seconds=profile_value(bitpacked_profile, "array_seconds"),
+        bitpacked_pack_seconds=profile_value(bitpacked_profile, "pack_seconds"),
+        bitpacked_chunk_seconds=profile_value(bitpacked_profile, "chunk_seconds"),
+        bitpacked_write_io_seconds=profile_value(
+            bitpacked_profile, "write_io_seconds"
+        ),
+        bitpacked_write_total_seconds=profile_value(
+            bitpacked_profile, "write_total_seconds"
+        ),
         uint8_bytes=uint8_bytes,
         bitpacked_bytes=bitpacked_bytes,
         byte_ratio=bitpacked_bytes / uint8_bytes if uint8_bytes else float("nan"),
         exact=exact,
         max_abs_diff=max_abs_diff,
     )
+
+
+def profile_value(profile: dict[str, float], key: str) -> float:
+    return float(profile.get(key, 0.0))
 
 
 def time_calc_covariance(
@@ -570,7 +608,8 @@ def time_calc_covariance(
     compact_chunk_rows: int,
     compression: str,
     ld_kernel: str,
-) -> float:
+) -> tuple[float, dict[str, float]]:
+    profile: dict[str, float] = {}
     start_time = time.perf_counter()
     calc_covariance(
         vcf_path=vcf_path,
@@ -584,8 +623,11 @@ def time_calc_covariance(
         compact_chunk_rows=compact_chunk_rows,
         compression=compression,
         ld_kernel=ld_kernel,
+        profile=profile,
     )
-    return time.perf_counter() - start_time
+    seconds = time.perf_counter() - start_time
+    profile.setdefault("total_seconds", seconds)
+    return seconds, profile
 
 
 def compare_outputs(
@@ -653,6 +695,24 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
     total_bitpacked = sum(result.bitpacked_seconds for result in results)
     total_uint8_bytes = sum(result.uint8_bytes for result in results)
     total_bitpacked_bytes = sum(result.bitpacked_bytes for result in results)
+    total_uint8_prepare = sum(result.uint8_prepare_seconds for result in results)
+    total_bitpacked_prepare = sum(
+        result.bitpacked_prepare_seconds for result in results
+    )
+    total_uint8_vcf = sum(result.uint8_vcf_seconds for result in results)
+    total_bitpacked_vcf = sum(result.bitpacked_vcf_seconds for result in results)
+    total_uint8_array = sum(result.uint8_array_seconds for result in results)
+    total_bitpacked_array = sum(result.bitpacked_array_seconds for result in results)
+    total_uint8_pack = sum(result.uint8_pack_seconds for result in results)
+    total_bitpacked_pack = sum(result.bitpacked_pack_seconds for result in results)
+    total_uint8_chunk = sum(result.uint8_chunk_seconds for result in results)
+    total_bitpacked_chunk = sum(
+        result.bitpacked_chunk_seconds for result in results
+    )
+    total_uint8_write_io = sum(result.uint8_write_io_seconds for result in results)
+    total_bitpacked_write_io = sum(
+        result.bitpacked_write_io_seconds for result in results
+    )
     return {
         "n_partitions": len(results),
         "all_exact": all(result.exact for result in results),
@@ -665,6 +725,23 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
         "overall_byte_ratio": (
             total_bitpacked_bytes / total_uint8_bytes if total_uint8_bytes else None
         ),
+        "total_uint8_prepare_seconds": total_uint8_prepare,
+        "total_bitpacked_prepare_seconds": total_bitpacked_prepare,
+        "total_uint8_vcf_seconds": total_uint8_vcf,
+        "total_bitpacked_vcf_seconds": total_bitpacked_vcf,
+        "total_uint8_array_seconds": total_uint8_array,
+        "total_bitpacked_array_seconds": total_bitpacked_array,
+        "total_uint8_pack_seconds": total_uint8_pack,
+        "total_bitpacked_pack_seconds": total_bitpacked_pack,
+        "total_uint8_chunk_seconds": total_uint8_chunk,
+        "total_bitpacked_chunk_seconds": total_bitpacked_chunk,
+        "chunk_speedup": (
+            total_uint8_chunk / total_bitpacked_chunk
+            if total_bitpacked_chunk
+            else None
+        ),
+        "total_uint8_write_io_seconds": total_uint8_write_io,
+        "total_bitpacked_write_io_seconds": total_bitpacked_write_io,
         "max_abs_diff": max((result.max_abs_diff for result in results), default=0.0),
     }
 
