@@ -32,3 +32,12 @@ def test_covariance_compression_defaults_to_zstd() -> None:
 def test_covariance_compression_accepts_lzf() -> None:
     args = _parse_args(["--covariance-compression", "lzf"])
     assert args.covariance_compression == "lzf"
+
+
+def test_ld_kernel_defaults_to_uint8() -> None:
+    assert _parse_args([]).ld_kernel == "uint8"
+
+
+def test_ld_kernel_accepts_bitpacked() -> None:
+    args = _parse_args(["--ld-kernel", "bitpacked"])
+    assert args.ld_kernel == "bitpacked"

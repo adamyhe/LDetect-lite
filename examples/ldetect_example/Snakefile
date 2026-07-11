@@ -3,22 +3,22 @@
 Reproduces the original ldetect EUR chr2 example from:
     Berisa & Pickrell (2016), https://bitbucket.org/nygcresearch/ldetect
 
-Reference data (chr2:39967768-40067768, 379 EUR individuals) is downloaded
-from BitBucket. The original VCF is not publicly archived, so this example
-starts from the reference covariance matrix in the legacy 8-column gzipped text
-format. The workflow converts that reference-only .gz file to the current
-ldetect-lite HDF5 partition format before any ldetect-lite command consumes it.
+Reference downstream intermediates are downloaded from BitBucket. The workflow
+fetches the matching 1000 Genomes Phase 1 interval, filters it to the example
+EUR individuals, computes covariance from the VCF with the established JIT
+backend, and compares each downstream stage to the original LDetect artifacts.
 
 Pipeline steps:
     0  Download reference intermediates from BitBucket
-    1  Stage reference covariance as ldetect-lite HDF5 (example-only compatibility)
-    2  Stage reference partition file
-    3  Run matrix-to-vector   (compare vs reference vector)
-    4  Run find-minima         (compare vs reference breakpoints)
-    5  Run extract-bpoints     (compare vs reference BED)
-    6  Run partition-chromosome with reference genetic map
+    1  Fetch/filter the matching 1000G VCF interval
+    2  Compute covariance from VCF (JIT uint8 backend)
+    3  Stage reference partition file
+    4  Run matrix-to-vector   (compare vs reference vector)
+    5  Run find-minima         (compare vs reference breakpoints)
+    6  Run extract-bpoints     (compare vs reference BED)
+    7  Run partition-chromosome with reference genetic map
        (note: reference file has only 1 window; full-chr2 output won't match)
-    7  Aggregate comparison report
+    8  Aggregate comparison report
 
 Usage:
     cd examples/ldetect_example/
@@ -31,10 +31,12 @@ from pathlib import Path
 configfile: "config.yaml"
 
 CHROM     = config["chromosome"]
+VCF_CHROM = CHROM[3:] if str(CHROM).startswith("chr") else CHROM
 START     = config["region_start"]
 END       = config["region_end"]
 N_INDS    = config["n_individuals"]
 NE        = config["ne"]
+COV_CUTOFF = config["cov_cutoff"]
 N_SNPS    = config["n_snps_bw_bpoints"]
 SUBSET    = config["subset"]
 BB_BASE   = config["bitbucket_base"]
@@ -54,11 +56,16 @@ REF_BED      = REF_DIR / f"bed/EUR-{CHROM}-{N_SNPS}-{START}-{END}.bed"
 
 # Our pipeline outputs
 WORK_H5     = WORK_DIR / f"{CHROM}/{CHROM}.{START}.{END}.h5"
+WORK_VCF    = WORK_DIR / f"vcf/1000G.phase1.EUR.{VCF_CHROM}.{START}-{END}.vcf.gz"
+WORK_BCF    = WORK_DIR / f"vcf/1000G.phase1.EUR.{VCF_CHROM}.{START}-{END}.bcf"
 WORK_PARTS  = WORK_DIR / f"{CHROM}_partitions.txt"
 WORK_VECTOR = WORK_DIR / f"vector-{CHROM}.txt.gz"
 WORK_BPTS   = WORK_DIR / f"breakpoints-{CHROM}.json"
 WORK_BED    = WORK_DIR / f"{CHROM}-ld-blocks.bed"
 WORK_GEN_PARTS = WORK_DIR / f"generated_partitions/{CHROM}_partitions"
+PLOTS_DIR = RES_DIR / "plots"
+MPLCONFIG_DIR = RES_DIR / ".mplconfig"
+XDG_CACHE_DIR = RES_DIR / ".cache"
 
 
 # ---------------------------------------------------------------------------
@@ -67,9 +74,17 @@ WORK_GEN_PARTS = WORK_DIR / f"generated_partitions/{CHROM}_partitions"
 
 rule all:
     input:
+        str(RES_DIR / "compare_covariance.tsv"),
+        str(RES_DIR / "compare_staged_partitions.tsv"),
         str(RES_DIR / "compare_vector.tsv"),
         str(RES_DIR / "compare_bpoints.tsv"),
         str(RES_DIR / "compare_bed.tsv"),
+        str(RES_DIR / "compare_generated_partitions.tsv"),
+        str(PLOTS_DIR / "covariance.svg"),
+        str(PLOTS_DIR / "vector.svg"),
+        str(PLOTS_DIR / "breakpoints.svg"),
+        str(PLOTS_DIR / "bed.svg"),
+        str(PLOTS_DIR / "generated_partitions.svg"),
 
 
 # ---------------------------------------------------------------------------
@@ -110,18 +125,58 @@ rule download_ref:
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Stage reference covariance as ldetect-lite HDF5
+# Step 1: Fetch/filter 1000G VCF
 # ---------------------------------------------------------------------------
 
-rule convert_ref_covariance:
+rule prepare_1000g_vcf:
     input:
-        str(REF_COV_GZ),
+        individuals = str(REF_INDS),
+    output:
+        vcf = str(WORK_VCF),
+        tbi = str(WORK_VCF) + ".tbi",
+        bcf = str(WORK_BCF),
+        csi = str(WORK_BCF) + ".csi",
+    shell:
+        """
+        uv run python scripts/prepare_1000g_region.py \
+            --individuals {input.individuals} \
+            --chrom {VCF_CHROM} \
+            --start {START} \
+            --end {END} \
+            --output-vcf {output.vcf} \
+            --output-bcf {output.bcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Calculate covariance from VCF (established JIT uint8 path)
+# ---------------------------------------------------------------------------
+
+rule calc_covariance:
+    input:
+        vcf = str(WORK_VCF),
+        tbi = str(WORK_VCF) + ".tbi",
+        genetic_map = str(REF_MAP),
+        individuals = str(REF_INDS),
     output:
         str(WORK_H5),
     shell:
         """
         mkdir -p $(dirname {output})
-        uv run python scripts/convert_covariance.py --input {input} --output {output}
+        export OMP_NUM_THREADS=1
+        export OPENBLAS_NUM_THREADS=1
+        export MKL_NUM_THREADS=1
+        export NUMEXPR_NUM_THREADS=1
+        export NUMBA_NUM_THREADS=1
+        uv run ldetect calc-covariance \
+            --reference-panel {input.vcf} \
+            --region {VCF_CHROM}:{START}-{END} \
+            --genetic-map {input.genetic_map} \
+            --individuals {input.individuals} \
+            --output {output} \
+            --ne {NE} \
+            --cutoff {COV_CUTOFF} \
+            --ld-kernel uint8
         """
 
 
@@ -238,14 +293,42 @@ rule compare_vector:
         ours = str(WORK_VECTOR),
         ref  = str(REF_VECTOR),
     output:
-        str(RES_DIR / "compare_vector.tsv"),
+        tsv = str(RES_DIR / "compare_vector.tsv"),
+        plot = str(PLOTS_DIR / "vector.svg"),
     shell:
         """
-        mkdir -p {RES_DIR}
-        uv run python scripts/compare_vector.py \
+        mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
+        export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
+        export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
+        uv run --extra heatmap python scripts/compare_vector.py \
             --ours {input.ours} \
             --ref  {input.ref} \
-            --output {output}
+            --output {output.tsv} \
+            --plot {output.plot} \
+            --atol 1e-12 \
+            --require-equivalent
+        """
+
+
+rule compare_covariance:
+    input:
+        ours = str(WORK_H5),
+        ref = str(REF_COV_GZ),
+    output:
+        tsv = str(RES_DIR / "compare_covariance.tsv"),
+        plot = str(PLOTS_DIR / "covariance.svg"),
+    shell:
+        """
+        mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
+        export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
+        export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
+        uv run --extra heatmap python scripts/compare_covariance.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output.tsv} \
+            --plot {output.plot} \
+            --atol 1e-12 \
+            --require-equivalent
         """
 
 
@@ -254,13 +337,19 @@ rule compare_bpoints:
         ours = str(WORK_BPTS),
         ref  = str(REF_BPOINTS),
     output:
-        str(RES_DIR / "compare_bpoints.tsv"),
+        tsv = str(RES_DIR / "compare_bpoints.tsv"),
+        plot = str(PLOTS_DIR / "breakpoints.svg"),
     shell:
         """
-        uv run python scripts/compare_bpoints.py \
+        mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
+        export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
+        export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
+        uv run --extra heatmap python scripts/compare_bpoints.py \
             --ours {input.ours} \
             --ref  {input.ref} \
-            --output {output}
+            --output {output.tsv} \
+            --plot {output.plot} \
+            --require-exact
         """
 
 
@@ -269,26 +358,53 @@ rule compare_bed:
         ours = str(WORK_BED),
         ref  = str(REF_BED),
     output:
-        str(RES_DIR / "compare_bed.tsv"),
+        tsv = str(RES_DIR / "compare_bed.tsv"),
+        plot = str(PLOTS_DIR / "bed.svg"),
     shell:
         """
-        uv run python scripts/compare_bed.py \
+        mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
+        export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
+        export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
+        uv run --extra heatmap python scripts/compare_bed.py \
             --ours {input.ours} \
             --ref  {input.ref} \
-            --output {output}
+            --output {output.tsv} \
+            --plot {output.plot} \
+            --require-exact
         """
 
 
-rule compare_partitions:
+rule compare_staged_partitions:
     input:
-        ours = str(WORK_GEN_PARTS),
+        ours = str(WORK_PARTS),
         ref  = str(REF_PARTS),
     output:
-        str(RES_DIR / "compare_partitions.tsv"),
+        str(RES_DIR / "compare_staged_partitions.tsv"),
     shell:
         """
         uv run python scripts/compare_partitions.py \
             --ours {input.ours} \
             --ref  {input.ref} \
-            --output {output}
+            --output {output} \
+            --require-exact
+        """
+
+
+rule compare_generated_partitions:
+    input:
+        ours = str(WORK_GEN_PARTS),
+        ref  = str(REF_PARTS),
+    output:
+        tsv = str(RES_DIR / "compare_generated_partitions.tsv"),
+        plot = str(PLOTS_DIR / "generated_partitions.svg"),
+    shell:
+        """
+        mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
+        export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
+        export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
+        uv run --extra heatmap python scripts/compare_partitions.py \
+            --ours {input.ours} \
+            --ref  {input.ref} \
+            --output {output.tsv} \
+            --plot {output.plot}
         """

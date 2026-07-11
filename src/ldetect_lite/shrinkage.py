@@ -48,6 +48,40 @@ def _shrink_ld_values(
     return d_naive, ds2
 
 
+@njit(cache=True, inline="always")
+def _popcount64(x: np.uint64) -> np.int64:
+    """Portable uint64 popcount for Numba kernels."""
+    m1 = np.uint64(0x5555555555555555)
+    m2 = np.uint64(0x3333333333333333)
+    m4 = np.uint64(0x0F0F0F0F0F0F0F0F)
+    h01 = np.uint64(0x0101010101010101)
+    x = x - ((x >> np.uint64(1)) & m1)
+    x = (x & m2) + ((x >> np.uint64(2)) & m2)
+    x = (x + (x >> np.uint64(4))) & m4
+    return np.int64((x * h01) >> np.uint64(56))
+
+
+@njit(cache=True)
+def _pack_haplotypes_impl(hap_mat: np.ndarray) -> np.ndarray:
+    """Pack a 0/1 haplotype matrix into uint64 words.
+
+    Haplotype index ``k`` maps to word ``k // 64`` and bit ``k % 64``.
+    Unused high bits in the final word remain zero.
+    """
+    n_snps = hap_mat.shape[0]
+    n_haps = hap_mat.shape[1]
+    n_words = (n_haps + 63) // 64
+    packed = np.zeros((n_snps, n_words), dtype=np.uint64)
+    one = np.uint64(1)
+    for i in range(n_snps):
+        for k in range(n_haps):
+            if hap_mat[i, k] != 0:
+                word = k // 64
+                bit = k - word * 64
+                packed[i, word] |= one << np.uint64(bit)
+    return packed
+
+
 @njit(cache=True)
 def _count_pairwise_ld_impl(
     hap_mat: np.ndarray,
@@ -369,6 +403,78 @@ def _pairwise_ld_compact_chunk_impl(
     return i, ii[:cnt], jj[:cnt], ds2_arr[:cnt]
 
 
+@njit(cache=True)
+def _pairwise_ld_compact_chunk_bitpacked_impl(
+    packed_hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    n_haps: int,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    i_start: int,
+    target_rows: int,
+    capacity: int,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    inv_n_total = 1.0 / float(n_haps)
+    n_snps = packed_hap_mat.shape[0]
+    n_words = packed_hap_mat.shape[1]
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
+    diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
+
+    ii = np.empty(capacity, dtype=np.int32)
+    jj = np.empty(capacity, dtype=np.int32)
+    ds2_arr = np.empty(capacity, dtype=np.float64)
+
+    cnt = 0
+    i = i_start
+    while i < n_snps:
+        gpos1 = gpos_arr[i]
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        for j in range(i, j_stop):
+            if i == j:
+                n11 = n1x
+            else:
+                n11_count = np.int64(0)
+                for word in range(n_words):
+                    n11_count += _popcount64(
+                        packed_hap_mat[i, word] & packed_hap_mat[j, word]
+                    )
+                n11 = float(n11_count)
+            nx1 = hap_sums[j]
+            _, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
+
+            if math.fabs(ds2) < cutoff:
+                continue
+
+            if i == j:
+                ds2 += diag_adjust
+
+            ii[cnt] = i
+            jj[cnt] = j
+            ds2_arr[cnt] = ds2
+            cnt += 1
+
+        i += 1
+        if cnt >= target_rows:
+            break
+
+    return i, ii[:cnt], jj[:cnt], ds2_arr[:cnt]
+
+
 def _compact_pair_chunks(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -467,6 +573,50 @@ def _compact_pair_chunks_single_pass(
         i_start = i_stop
 
 
+def _compact_pair_chunks_single_pass_bitpacked(
+    packed_hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    pos_arr: np.ndarray,
+    n_haps: int,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    chunk_rows: int,
+) -> Iterator[CovarianceRowChunk]:
+    """Yield compact covariance rows from a bit-packed haplotype matrix."""
+    target_rows = max(int(chunk_rows), 1)
+    capacity = target_rows + packed_hap_mat.shape[0]
+    i_start = 0
+    n_snps = packed_hap_mat.shape[0]
+    while i_start < n_snps:
+        i_stop, ii, jj, shrink_ld = _pairwise_ld_compact_chunk_bitpacked_impl(
+            packed_hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            n_haps,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            i_start,
+            target_rows,
+            capacity,
+        )
+        if ii.size:
+            yield CovarianceRowChunk(
+                lo=pos_arr[ii],
+                hi=pos_arr[jj],
+                shrink_ld=shrink_ld,
+            )
+        if i_stop <= i_start:
+            raise RuntimeError("bitpacked compact chunk generation did not advance")
+        i_start = i_stop
+
+
 # ---------------------------------------------------------------------------
 # Chromosome partitioning  (was P00_00_partition_chromosome.py)
 # ---------------------------------------------------------------------------
@@ -553,6 +703,7 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
+    ld_kernel: str = "uint8",
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
 
@@ -584,6 +735,9 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
+        ld_kernel: Pair-count backend for compact covariance output. ``"uint8"``
+            is the established backend; ``"bitpacked"`` packs haplotypes into
+            ``uint64`` words and uses popcounts for pairwise intersections.
 
     Raises:
         ValueError: If any individual in *individuals_path* is not present in
@@ -594,6 +748,11 @@ def calc_covariance(
 
     total_start = time.perf_counter()
     log_memory_checkpoint("calc_covariance_start", debug=True)
+
+    if ld_kernel not in {"uint8", "bitpacked"}:
+        raise ValueError("ld_kernel must be one of: uint8, bitpacked")
+    if ld_kernel == "bitpacked" and not compact_output:
+        raise ValueError("ld_kernel='bitpacked' currently requires compact_output=True")
 
     # --- read individuals ---
     individuals: list[str] = []
@@ -726,10 +885,29 @@ def calc_covariance(
     if compact_output and assume_sorted_unique_rows:
         write_start = time.perf_counter()
         try:
-            n_pairs = write_compact_covariance_partition_hdf5_append(
-                output_path,
-                positions=pos_arr,
-                row_chunks=_compact_pair_chunks_single_pass(
+            if ld_kernel == "bitpacked":
+                pack_start = time.perf_counter()
+                packed_hap_mat = _pack_haplotypes_impl(hap_mat)
+                log_debug(
+                    "calc_covariance haplotypes_bitpacked "
+                    f"n_words={packed_hap_mat.shape[1]} "
+                    f"seconds={time.perf_counter() - pack_start:.3f}"
+                )
+                row_chunks = _compact_pair_chunks_single_pass_bitpacked(
+                    packed_hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    n_haps,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                )
+            else:
+                row_chunks = _compact_pair_chunks_single_pass(
                     hap_mat,
                     gpos_arr,
                     hap_sums,
@@ -740,7 +918,11 @@ def calc_covariance(
                     theta,
                     cutoff,
                     compact_chunk_rows,
-                ),
+                )
+            n_pairs = write_compact_covariance_partition_hdf5_append(
+                output_path,
+                positions=pos_arr,
+                row_chunks=row_chunks,
                 chunk_rows=compact_chunk_rows,
                 compression=compression,
             )
@@ -751,6 +933,7 @@ def calc_covariance(
                 f"dataset_chunk_rows={dataset_chunk_rows} "
                 f"write_chunk_rows={compact_chunk_rows} "
                 "single_pass=true "
+                f"ld_kernel={ld_kernel} "
                 f"seconds={time.perf_counter() - write_start:.3f} "
                 f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
             )
