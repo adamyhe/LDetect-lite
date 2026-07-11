@@ -107,6 +107,24 @@ def test_ld_kernel_accepts_bitpacked() -> None:
     assert args.ld_kernel == "bitpacked"
 
 
+def test_covariance_mode_defaults_to_partition() -> None:
+    assert _parse_run_args([]).covariance_mode == "partition"
+
+
+def test_covariance_mode_accepts_chromosome() -> None:
+    args = _parse_run_args(["--covariance-mode", "chromosome"])
+    assert args.covariance_mode == "chromosome"
+
+
+def test_profile_covariance_defaults_to_none() -> None:
+    assert _parse_run_args([]).profile_covariance is None
+
+
+def test_profile_covariance_accepts_path() -> None:
+    args = _parse_run_args(["--profile-covariance", "profile.tsv"])
+    assert args.profile_covariance == Path("profile.tsv")
+
+
 def test_stage_workers_default_to_none_and_inherit_shared_workers() -> None:
     args = _parse_run_args(["--workers", "4"])
     assert args.matrix_workers is None

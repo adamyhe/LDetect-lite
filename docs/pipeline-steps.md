@@ -39,7 +39,7 @@ ldetect calc-covariance \
   --output cov_matrix/chr2/chr2.39967768.40067768.h5
 ```
 
-This step must be run once per partition. `ldetect run --workers N` runs partitions in parallel automatically.
+This standalone step must be run once per partition. `ldetect run --workers N` runs partitions in parallel automatically in the default `--covariance-mode partition` path. For full pipeline runs, `ldetect run --covariance-mode chromosome` instead loads the chromosome genotypes once and slices each covariance partition from prepared arrays; this avoids repeated VCF/BCF region reads, currently requires the compact cache schema, and emits optional timing rows with `--profile-covariance`.
 
 `ldetect calc-covariance` reads directly from an indexed `--reference-panel` (`.vcf.gz` with a `.tbi`, or `.bcf` with a `.csi`) via [cyvcf2](https://github.com/brentp/cyvcf2), restricting to `--region` if given. If `--reference-panel` is omitted, it instead reads VCF text from stdin with no region restriction of its own — e.g. `tabix -h 1000G.chr2.vcf.gz chr2:... | ldetect calc-covariance ...` (omitting `--reference-panel`/`--region`), useful for piping in output from arbitrary preprocessing (`bcftools view -i ...`, `zcat`, etc.) rather than a plain indexed file.
 

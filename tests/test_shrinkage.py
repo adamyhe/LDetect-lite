@@ -23,6 +23,8 @@ from ldetect_lite.shrinkage import (
     _pack_haplotypes_impl,
     _popcount64,
     calc_covariance,
+    calc_covariance_from_genotypes,
+    load_chromosome_genotypes,
     partition_chromosome,
 )
 
@@ -471,6 +473,63 @@ def test_calc_covariance_bitpacked_compact_matches_uint8_compact(
     np.testing.assert_array_equal(bitpacked_diag[0], uint8_diag[0])
     np.testing.assert_array_equal(bitpacked_diag[1], uint8_diag[1])
     np.testing.assert_array_equal(bitpacked_loci, uint8_loci)
+
+
+@requires_htslib_tools
+def test_calc_covariance_from_genotypes_matches_region_bitpacked(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = _vcf_stream(tmp_path, "prepared_vcf")
+
+    region_path = tmp_path / "region.h5"
+    prepared_path = tmp_path / "prepared.h5"
+    calc_covariance(
+        vcf_path=vcf_path,
+        region="1:100-300",
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=region_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compact_chunk_rows=2,
+        ld_kernel="bitpacked",
+    )
+    genotypes = load_chromosome_genotypes(
+        vcf_path=vcf_path,
+        chrom="1",
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        storage="packed",
+    )
+    calc_covariance_from_genotypes(
+        genotypes,
+        100,
+        300,
+        prepared_path,
+        cutoff=1e-7,
+        compact_chunk_rows=2,
+        ld_kernel="bitpacked",
+    )
+
+    with open_covariance_reader(region_path, 100, 300) as reader:
+        region_rows = reader.read_all()
+        region_diag = reader.read_diagonal()
+        region_loci = reader.read_loci()
+    with open_covariance_reader(prepared_path, 100, 300) as reader:
+        prepared_rows = reader.read_all()
+        prepared_diag = reader.read_diagonal()
+        prepared_loci = reader.read_loci()
+
+    np.testing.assert_array_equal(prepared_rows.lo, region_rows.lo)
+    np.testing.assert_array_equal(prepared_rows.hi, region_rows.hi)
+    np.testing.assert_array_equal(prepared_rows.shrink_ld, region_rows.shrink_ld)
+    np.testing.assert_array_equal(prepared_diag[0], region_diag[0])
+    np.testing.assert_array_equal(prepared_diag[1], region_diag[1])
+    np.testing.assert_array_equal(prepared_loci, region_loci)
 
 
 def test_calc_covariance_bitpacked_requires_compact_output(tmp_path: Path) -> None:

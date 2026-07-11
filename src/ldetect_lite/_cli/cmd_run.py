@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from ldetect_lite.io.covariance_hdf5 import validate_covariance_hdf5
+
+if TYPE_CHECKING:
+    from ldetect_lite.io.partitions import CovarianceStore
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
 
@@ -90,6 +95,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "Covariance partition cache schema for this run. 'compact' writes "
             "only i_pos, j_pos, and shrink_ld; 'full' writes the archival "
             "debug schema (default: compact)."
+        ),
+    )
+    p.add_argument(
+        "--covariance-mode",
+        choices=("partition", "chromosome"),
+        default="partition",
+        help=(
+            "Covariance calculation strategy. 'partition' preserves the "
+            "historical one-region-per-partition path and supports "
+            "partition-level workers. 'chromosome' loads this chromosome's "
+            "genotypes once and slices partitions from the prepared arrays; "
+            "it currently requires --covariance-cache compact (default: "
+            "partition)."
         ),
     )
     p.add_argument(
@@ -200,6 +218,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "this chromosome and output directory (default: keep the cache)."
         ),
     )
+    p.add_argument(
+        "--profile-covariance",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write covariance timing diagnostics as TSV. In chromosome mode "
+            "this includes one chromosome-load row plus per-partition writer "
+            "rows."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -243,6 +272,115 @@ def _calc_partition(
 def _resolve_workers(explicit: int | None, default: int) -> int:
     """Resolve a per-stage worker override, falling back to --workers."""
     return default if explicit is None else explicit
+
+
+def _calc_chromosome_partitions(
+    *,
+    pending: list[tuple[int, int]],
+    chrom: str,
+    reference_panel: str,
+    genetic_map_path: Path,
+    individuals_path: Path,
+    store: CovarianceStore,
+    ne: float,
+    cutoff: float,
+    compression: str,
+    ld_kernel: str,
+) -> list[dict[str, str]]:
+    from ldetect_lite._util.memory import log_memory_checkpoint
+    from ldetect_lite.shrinkage import (
+        calc_covariance_from_genotypes,
+        load_chromosome_genotypes,
+    )
+
+    profile_rows: list[dict[str, str]] = []
+    load_profile: dict[str, float] = {}
+    storage: Literal["uint8", "packed"] = (
+        "packed" if ld_kernel == "bitpacked" else "uint8"
+    )
+    kernel: Literal["uint8", "bitpacked"] = (
+        "bitpacked" if ld_kernel == "bitpacked" else "uint8"
+    )
+    genotypes = load_chromosome_genotypes(
+        vcf_path=Path(reference_panel),
+        chrom=chrom,
+        genetic_map_path=genetic_map_path,
+        individuals_path=individuals_path,
+        storage=storage,
+        profile=load_profile,
+    )
+    profile_rows.append(
+        _profile_row(
+            row_type="chromosome",
+            chrom=chrom,
+            start="",
+            end="",
+            ld_kernel=ld_kernel,
+            profile=load_profile,
+        )
+    )
+    log_memory_checkpoint(f"covariance_chromosome_loaded chrom={chrom}")
+
+    for start, end in pending:
+        profile: dict[str, float] = {}
+        calc_covariance_from_genotypes(
+            genotypes,
+            start,
+            end,
+            store.partition_path(chrom, start, end),
+            ne=ne,
+            cutoff=cutoff,
+            compression=compression,
+            ld_kernel=kernel,
+            profile=profile,
+        )
+        profile_rows.append(
+            _profile_row(
+                row_type="partition",
+                chrom=chrom,
+                start=str(start),
+                end=str(end),
+                ld_kernel=ld_kernel,
+                profile=profile,
+            )
+        )
+        log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
+
+    return profile_rows
+
+
+def _profile_row(
+    *,
+    row_type: str,
+    chrom: str,
+    start: str,
+    end: str,
+    ld_kernel: str,
+    profile: dict[str, float],
+) -> dict[str, str]:
+    row = {
+        "row_type": row_type,
+        "chrom": chrom,
+        "start": start,
+        "end": end,
+        "ld_kernel": ld_kernel,
+    }
+    for key, value in sorted(profile.items()):
+        row[key] = f"{value:.9g}"
+    return row
+
+
+def _write_profile_tsv(path: Path, rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    preferred = ["row_type", "chrom", "start", "end", "ld_kernel"]
+    extras = sorted({key for row in rows for key in row} - set(preferred))
+    fieldnames = preferred + extras
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -306,11 +444,18 @@ def _run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    if args.covariance_mode == "chromosome" and not compact_output:
+        print(
+            "Error: --covariance-mode chromosome requires "
+            "--covariance-cache compact",
+            file=sys.stderr,
+        )
+        return 1
     log_msg(
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache}, "
         f"compression={args.covariance_compression}, "
-        f"ld_kernel={args.ld_kernel})"
+        f"ld_kernel={args.ld_kernel}, mode={args.covariance_mode})"
     )
     log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
@@ -334,33 +479,63 @@ def _run(args: argparse.Namespace) -> int:
     if invalid:
         log_msg(f"  Regenerating {invalid} invalid cached partition(s)")
 
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(
-                _calc_partition,
-                start,
-                end,
-                chrom,
-                args.reference_panel,
-                args.genetic_map,
-                args.individuals,
-                store.partition_path(chrom, start, end),
-                args.ne,
-                args.cov_cutoff,
-                compact_output,
-                args.covariance_compression,
-                args.ld_kernel,
-            ): (start, end)
-            for start, end in pending
-        }
-        for fut in as_completed(futures):
-            start, end = futures[fut]
+    profile_rows: list[dict[str, str]] = []
+    if args.covariance_mode == "chromosome":
+        if pending:
+            if args.workers != 1:
+                log_msg(
+                    "  Note: --covariance-mode chromosome processes this "
+                    "single chromosome serially; --workers still applies to "
+                    "later pipeline stages unless overridden."
+                )
             try:
-                fut.result()
+                profile_rows = _calc_chromosome_partitions(
+                    pending=pending,
+                    chrom=chrom,
+                    reference_panel=args.reference_panel,
+                    genetic_map_path=args.genetic_map,
+                    individuals_path=args.individuals,
+                    store=store,
+                    ne=args.ne,
+                    cutoff=args.cov_cutoff,
+                    compression=args.covariance_compression,
+                    ld_kernel=args.ld_kernel,
+                )
             except (RuntimeError, ValueError) as e:
                 print(f"Error: {e}", file=sys.stderr)
                 return 1
-            log_msg(f"  Partition {start}-{end} done")
+            for start, end in pending:
+                log_msg(f"  Partition {start}-{end} done")
+    else:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            futures = {
+                pool.submit(
+                    _calc_partition,
+                    start,
+                    end,
+                    chrom,
+                    args.reference_panel,
+                    args.genetic_map,
+                    args.individuals,
+                    store.partition_path(chrom, start, end),
+                    args.ne,
+                    args.cov_cutoff,
+                    compact_output,
+                    args.covariance_compression,
+                    args.ld_kernel,
+                ): (start, end)
+                for start, end in pending
+            }
+            for fut in as_completed(futures):
+                start, end = futures[fut]
+                try:
+                    fut.result()
+                except (RuntimeError, ValueError) as e:
+                    print(f"Error: {e}", file=sys.stderr)
+                    return 1
+                log_msg(f"  Partition {start}-{end} done")
+    if args.profile_covariance is not None and profile_rows:
+        _write_profile_tsv(args.profile_covariance, profile_rows)
     log_memory_checkpoint("step2_end")
 
     snp_first = partitions[0][0]

@@ -7,8 +7,9 @@ import math
 import sys
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import cyvcf2
 import numpy as np
@@ -23,6 +24,20 @@ from ldetect_lite.io.covariance_hdf5 import (
 )
 
 COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
+
+
+@dataclass
+class ChromosomeGenotypes:
+    """Prepared chromosome-level genotype arrays for covariance partitions."""
+
+    chrom: str
+    positions: np.ndarray
+    genetic_positions: np.ndarray
+    hap_sums: np.ndarray
+    n_individuals: int
+    n_haplotypes: int
+    haplotypes_uint8: np.ndarray | None = None
+    haplotypes_packed: np.ndarray | None = None
 
 # ---------------------------------------------------------------------------
 # Pairwise LD kernel (Numba-accelerated)
@@ -641,6 +656,281 @@ def _profile_next_chunks(
         )
         profile["n_chunks"] = profile.get("n_chunks", 0.0) + 1.0
         yield chunk
+
+
+def _read_individuals(individuals_path: Path) -> list[str]:
+    individuals: list[str] = []
+    with open(individuals_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                individuals.append(line.split()[0])
+    return individuals
+
+
+def _read_genetic_map(genetic_map_path: Path) -> dict[int, float]:
+    pos2gpos: dict[int, float] = {}
+    with gzip.open(genetic_map_path, "rt") as gf:
+        for raw in gf:
+            parts = raw.strip().split()
+            pos2gpos[int(parts[1])] = float(parts[2])
+    return pos2gpos
+
+
+def _theta_from_haplotypes(n_haps: int) -> float:
+    harmonic = sum(1.0 / i for i in range(1, n_haps))
+    return (1.0 / harmonic) / (n_haps + 1.0 / harmonic)
+
+
+def load_chromosome_genotypes(
+    vcf_path: Path,
+    chrom: str,
+    genetic_map_path: Path,
+    individuals_path: Path,
+    *,
+    storage: Literal["uint8", "packed"] = "packed",
+    profile: dict[str, float] | None = None,
+) -> ChromosomeGenotypes:
+    """Load one chromosome's filtered genotypes once for covariance partitions.
+
+    The filtering intentionally matches :func:`calc_covariance`: requested
+    individuals only, phased non-missing bi-allelic genotypes only, positions
+    present in the genetic map, and first record retained for duplicate
+    physical positions.
+    """
+    if storage not in {"uint8", "packed"}:
+        raise ValueError("storage must be one of: uint8, packed")
+
+    prepare_start = time.perf_counter()
+    individuals = _read_individuals(individuals_path)
+    n_ind = len(individuals)
+    n_haps = 2 * n_ind
+    pos2gpos = _read_genetic_map(genetic_map_path)
+    if profile is not None:
+        profile["prepare_seconds"] = time.perf_counter() - prepare_start
+
+    vcf_start = time.perf_counter()
+    vcf = cyvcf2.VCF(str(vcf_path), samples=individuals)
+    missing = [ind for ind in individuals if ind not in vcf.samples]
+    if missing:
+        vcf.close()
+        raise ValueError(
+            f"individuals not found in VCF/BCF header: {', '.join(missing)}"
+        )
+    sample_index = {ind: idx for idx, ind in enumerate(vcf.samples)}
+    order = [sample_index[ind] for ind in individuals]
+
+    all_pos: list[int] = []
+    haps: list[list[int]] = []
+    skipped_unphased = 0
+    for variant in vcf(chrom):
+        pos = variant.POS
+        if pos not in pos2gpos:
+            continue
+
+        genotypes = variant.genotypes
+        row_haps = [0] * n_haps
+        skip = False
+        hap_col = 0
+        for col in order:
+            allele1, allele2, phased = genotypes[col]
+            if not phased or allele1 < 0 or allele2 < 0:
+                skipped_unphased += 1
+                skip = True
+                break
+            row_haps[hap_col] = allele1
+            row_haps[hap_col + 1] = allele2
+            hap_col += 2
+
+        if skip:
+            continue
+        all_pos.append(pos)
+        haps.append(row_haps)
+
+    vcf.close()
+    if profile is not None:
+        profile["vcf_seconds"] = time.perf_counter() - vcf_start
+
+    if skipped_unphased:
+        print(
+            f"Warning: skipped {skipped_unphased} variant(s) with unphased or "
+            f"missing genotypes",
+            file=sys.stderr,
+        )
+
+    dedupe_start = time.perf_counter()
+    duplicate_positions = 0
+    if all_pos:
+        seen_positions: set[int] = set()
+        unique_pos: list[int] = []
+        unique_haps: list[list[int]] = []
+        for pos, row_haps in zip(all_pos, haps, strict=True):
+            if pos in seen_positions:
+                duplicate_positions += 1
+                continue
+            seen_positions.add(pos)
+            unique_pos.append(pos)
+            unique_haps.append(row_haps)
+        all_pos = unique_pos
+        haps = unique_haps
+    if profile is not None:
+        profile["dedupe_seconds"] = time.perf_counter() - dedupe_start
+
+    if duplicate_positions:
+        print(
+            f"Warning: skipped {duplicate_positions} duplicate-position "
+            f"variant(s); covariance partitions are keyed by physical position",
+            file=sys.stderr,
+        )
+
+    array_start = time.perf_counter()
+    positions = np.asarray(all_pos, dtype=np.int32)
+    genetic_positions = np.asarray(
+        [pos2gpos[p] for p in all_pos], dtype=np.float64
+    )
+    if haps:
+        haplotypes_uint8 = np.asarray(haps, dtype=np.uint8)
+    else:
+        haplotypes_uint8 = np.zeros((0, n_haps), dtype=np.uint8)
+    hap_sums = np.asarray(haplotypes_uint8.sum(axis=1), dtype=np.float64)
+    if profile is not None:
+        profile["array_seconds"] = time.perf_counter() - array_start
+        profile["n_snps"] = float(positions.size)
+        profile["n_haps"] = float(n_haps)
+        profile["uint8_bytes"] = float(haplotypes_uint8.nbytes)
+
+    pack_start = time.perf_counter()
+    haplotypes_packed: np.ndarray | None = None
+    stored_haplotypes_uint8: np.ndarray | None = haplotypes_uint8
+    if storage == "packed":
+        haplotypes_packed = _pack_haplotypes_impl(haplotypes_uint8)
+        stored_haplotypes_uint8 = None
+    if profile is not None:
+        profile["pack_seconds"] = time.perf_counter() - pack_start
+        profile["packed_bytes"] = (
+            float(haplotypes_packed.nbytes) if haplotypes_packed is not None else 0.0
+        )
+
+    return ChromosomeGenotypes(
+        chrom=chrom,
+        positions=positions,
+        genetic_positions=genetic_positions,
+        hap_sums=hap_sums,
+        n_individuals=n_ind,
+        n_haplotypes=n_haps,
+        haplotypes_uint8=stored_haplotypes_uint8,
+        haplotypes_packed=haplotypes_packed,
+    )
+
+
+def calc_covariance_from_genotypes(
+    genotypes: ChromosomeGenotypes,
+    start: int,
+    end: int,
+    output_path: Path,
+    *,
+    ne: float = 11418.0,
+    cutoff: float = 1e-7,
+    compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
+    compression: str | None = "zstd",
+    ld_kernel: Literal["uint8", "bitpacked"] = "bitpacked",
+    profile: dict[str, float] | None = None,
+) -> None:
+    """Write one compact covariance partition from prepared chromosome arrays."""
+    if ld_kernel not in {"uint8", "bitpacked"}:
+        raise ValueError("ld_kernel must be one of: uint8, bitpacked")
+    if ld_kernel == "bitpacked" and genotypes.haplotypes_packed is None:
+        raise ValueError("ld_kernel='bitpacked' requires packed chromosome storage")
+    if ld_kernel == "uint8" and genotypes.haplotypes_uint8 is None:
+        raise ValueError("ld_kernel='uint8' requires uint8 chromosome storage")
+
+    total_start = time.perf_counter()
+    slice_start = time.perf_counter()
+    left = int(np.searchsorted(genotypes.positions, start, side="left"))
+    right = int(np.searchsorted(genotypes.positions, end, side="right"))
+    pos_arr = genotypes.positions[left:right]
+    gpos_arr = genotypes.genetic_positions[left:right]
+    hap_sums = genotypes.hap_sums[left:right]
+    if ld_kernel == "bitpacked":
+        assert genotypes.haplotypes_packed is not None
+        packed_hap_mat = genotypes.haplotypes_packed[left:right]
+        hap_mat = None
+    else:
+        assert genotypes.haplotypes_uint8 is not None
+        hap_mat = genotypes.haplotypes_uint8[left:right]
+        packed_hap_mat = None
+    if profile is not None:
+        profile["slice_seconds"] = time.perf_counter() - slice_start
+        profile["n_snps"] = float(pos_arr.size)
+        profile["n_haps"] = float(genotypes.n_haplotypes)
+
+    if pos_arr.size == 0:
+        output_path.unlink(missing_ok=True)
+        if profile is not None:
+            profile["n_pairs"] = 0.0
+            profile["total_seconds"] = time.perf_counter() - total_start
+        return
+
+    theta = _theta_from_haplotypes(genotypes.n_haplotypes)
+    n_ind = float(genotypes.n_individuals)
+
+    bounds_start = time.perf_counter()
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    if profile is not None:
+        profile["bounds_seconds"] = time.perf_counter() - bounds_start
+
+    if ld_kernel == "bitpacked":
+        assert packed_hap_mat is not None
+        row_chunks = _compact_pair_chunks_single_pass_bitpacked(
+            packed_hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            genotypes.n_haplotypes,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            compact_chunk_rows,
+        )
+    else:
+        assert hap_mat is not None
+        row_chunks = _compact_pair_chunks_single_pass(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            compact_chunk_rows,
+        )
+    row_chunks = _profile_next_chunks(row_chunks, profile)
+
+    write_start = time.perf_counter()
+    try:
+        n_pairs = write_compact_covariance_partition_hdf5_append(
+            output_path,
+            positions=pos_arr,
+            row_chunks=row_chunks,
+            chunk_rows=compact_chunk_rows,
+            compression=compression,
+        )
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+
+    if profile is not None:
+        write_total = time.perf_counter() - write_start
+        profile["write_total_seconds"] = write_total
+        profile["write_io_seconds"] = max(
+            0.0, write_total - profile.get("chunk_seconds", 0.0)
+        )
+        profile["n_pairs"] = float(n_pairs)
+        profile["total_seconds"] = time.perf_counter() - total_start
 
 
 # ---------------------------------------------------------------------------

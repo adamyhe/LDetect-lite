@@ -41,11 +41,14 @@ if str(SRC_ROOT) not in sys.path:
 
 from ldetect_lite.io.covariance_hdf5 import open_covariance_reader  # noqa: E402
 from ldetect_lite.shrinkage import (  # noqa: E402
+    ChromosomeGenotypes,
     _compact_pair_chunks_single_pass,
     _compact_pair_chunks_single_pass_bitpacked,
     _genetic_stop_bounds_impl,
     _pack_haplotypes_impl,
     calc_covariance,
+    calc_covariance_from_genotypes,
+    load_chromosome_genotypes,
     partition_chromosome,
 )
 
@@ -84,6 +87,9 @@ class PartitionResult:
     uint8_seconds: float
     bitpacked_seconds: float
     speedup: float
+    chromosome_bitpacked_seconds: float
+    chromosome_load_seconds: float
+    chromosome_speedup_vs_partition_bitpacked: float
     uint8_prepare_seconds: float
     uint8_vcf_seconds: float
     uint8_array_seconds: float
@@ -98,11 +104,19 @@ class PartitionResult:
     bitpacked_chunk_seconds: float
     bitpacked_write_io_seconds: float
     bitpacked_write_total_seconds: float
+    chromosome_slice_seconds: float
+    chromosome_bounds_seconds: float
+    chromosome_chunk_seconds: float
+    chromosome_write_io_seconds: float
+    chromosome_write_total_seconds: float
     uint8_bytes: int
     bitpacked_bytes: int
+    chromosome_bitpacked_bytes: int
     byte_ratio: float
     exact: bool
+    chromosome_exact: bool
     max_abs_diff: float
+    chromosome_max_abs_diff: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -186,6 +200,14 @@ def parse_args() -> argparse.Namespace:
         "--no-warmup",
         action="store_true",
         help="Skip the synthetic Numba warmup before partition timing.",
+    )
+    parser.add_argument(
+        "--include-chromosome-mode",
+        action="store_true",
+        help=(
+            "Also load each chromosome once and benchmark bitpacked compact "
+            "partition writes from prepared chromosome arrays."
+        ),
     )
     return parser.parse_args()
 
@@ -313,6 +335,28 @@ def run_chromosome(
     if args.max_partitions_per_chrom is not None:
         partitions = partitions[: args.max_partitions_per_chrom]
 
+    chromosome_genotypes: ChromosomeGenotypes | None = None
+    chromosome_load_seconds = 0.0
+    if args.include_chromosome_mode:
+        print(f"  Loading chr{chrom} {population} once for chromosome mode", flush=True)
+        load_profile: dict[str, float] = {}
+        load_start = time.perf_counter()
+        chromosome_genotypes = load_chromosome_genotypes(
+            vcf_path=filtered_vcf,
+            chrom=chrom,
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            storage="packed",
+            profile=load_profile,
+        )
+        chromosome_load_seconds = time.perf_counter() - load_start
+        print(
+            "  chromosome load "
+            f"n_snps={int(load_profile.get('n_snps', 0.0))} "
+            f"seconds={chromosome_load_seconds:.3f}",
+            flush=True,
+        )
+
     results: list[PartitionResult] = []
     for idx, (start, end) in enumerate(partitions, start=1):
         print(
@@ -330,6 +374,10 @@ def run_chromosome(
                 individuals_path=individuals_path,
                 ne=ne,
                 args=args,
+                chromosome_genotypes=chromosome_genotypes,
+                chromosome_load_seconds=(
+                    chromosome_load_seconds if idx == 1 else 0.0
+                ),
             )
         )
     return results
@@ -508,6 +556,8 @@ def benchmark_partition(
     individuals_path: Path,
     ne: float,
     args: argparse.Namespace,
+    chromosome_genotypes: ChromosomeGenotypes | None,
+    chromosome_load_seconds: float,
 ) -> PartitionResult:
     out_dir = args.results_dir / population / f"chr{chrom}" / "partitions"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -540,18 +590,51 @@ def benchmark_partition(
         compression=args.compression,
         ld_kernel="bitpacked",
     )
+    chromosome_bitpacked_seconds = 0.0
+    chromosome_profile: dict[str, float] = {}
+    chromosome_bitpacked_path = out_dir / f"chr{chrom}.{start}.{end}.chromosome.h5"
+    chromosome_bitpacked_path.unlink(missing_ok=True)
+    if chromosome_genotypes is not None:
+        chromosome_bitpacked_seconds, chromosome_profile = (
+            time_calc_covariance_from_genotypes(
+                genotypes=chromosome_genotypes,
+                start=start,
+                end=end,
+                output_path=chromosome_bitpacked_path,
+                ne=ne,
+                cutoff=args.cutoff,
+                compact_chunk_rows=args.compact_chunk_rows,
+                compression=args.compression,
+            )
+        )
     exact, n_rows, max_abs_diff = compare_outputs(
         uint8_path,
         bitpacked_path,
         start,
         end,
     )
+    if chromosome_genotypes is not None:
+        chromosome_exact, _, chromosome_max_abs_diff = compare_outputs(
+            bitpacked_path,
+            chromosome_bitpacked_path,
+            start,
+            end,
+        )
+    else:
+        chromosome_exact = True
+        chromosome_max_abs_diff = 0.0
     uint8_bytes = uint8_path.stat().st_size if uint8_path.exists() else 0
     bitpacked_bytes = bitpacked_path.stat().st_size if bitpacked_path.exists() else 0
+    chromosome_bitpacked_bytes = (
+        chromosome_bitpacked_path.stat().st_size
+        if chromosome_bitpacked_path.exists()
+        else 0
+    )
 
     if not args.keep_outputs:
         uint8_path.unlink(missing_ok=True)
         bitpacked_path.unlink(missing_ok=True)
+        chromosome_bitpacked_path.unlink(missing_ok=True)
 
     return PartitionResult(
         population=population,
@@ -563,6 +646,13 @@ def benchmark_partition(
         bitpacked_seconds=bitpacked_seconds,
         speedup=(
             uint8_seconds / bitpacked_seconds if bitpacked_seconds else float("inf")
+        ),
+        chromosome_bitpacked_seconds=chromosome_bitpacked_seconds,
+        chromosome_load_seconds=chromosome_load_seconds,
+        chromosome_speedup_vs_partition_bitpacked=(
+            bitpacked_seconds / chromosome_bitpacked_seconds
+            if chromosome_bitpacked_seconds
+            else 0.0
         ),
         uint8_prepare_seconds=profile_value(uint8_profile, "prepare_seconds"),
         uint8_vcf_seconds=profile_value(uint8_profile, "vcf_seconds"),
@@ -584,11 +674,23 @@ def benchmark_partition(
         bitpacked_write_total_seconds=profile_value(
             bitpacked_profile, "write_total_seconds"
         ),
+        chromosome_slice_seconds=profile_value(chromosome_profile, "slice_seconds"),
+        chromosome_bounds_seconds=profile_value(chromosome_profile, "bounds_seconds"),
+        chromosome_chunk_seconds=profile_value(chromosome_profile, "chunk_seconds"),
+        chromosome_write_io_seconds=profile_value(
+            chromosome_profile, "write_io_seconds"
+        ),
+        chromosome_write_total_seconds=profile_value(
+            chromosome_profile, "write_total_seconds"
+        ),
         uint8_bytes=uint8_bytes,
         bitpacked_bytes=bitpacked_bytes,
+        chromosome_bitpacked_bytes=chromosome_bitpacked_bytes,
         byte_ratio=bitpacked_bytes / uint8_bytes if uint8_bytes else float("nan"),
         exact=exact,
+        chromosome_exact=chromosome_exact,
         max_abs_diff=max_abs_diff,
+        chromosome_max_abs_diff=chromosome_max_abs_diff,
     )
 
 
@@ -623,6 +725,36 @@ def time_calc_covariance(
         compact_chunk_rows=compact_chunk_rows,
         compression=compression,
         ld_kernel=ld_kernel,
+        profile=profile,
+    )
+    seconds = time.perf_counter() - start_time
+    profile.setdefault("total_seconds", seconds)
+    return seconds, profile
+
+
+def time_calc_covariance_from_genotypes(
+    *,
+    genotypes: ChromosomeGenotypes,
+    start: int,
+    end: int,
+    output_path: Path,
+    ne: float,
+    cutoff: float,
+    compact_chunk_rows: int,
+    compression: str,
+) -> tuple[float, dict[str, float]]:
+    profile: dict[str, float] = {}
+    start_time = time.perf_counter()
+    calc_covariance_from_genotypes(
+        genotypes,
+        start,
+        end,
+        output_path,
+        ne=ne,
+        cutoff=cutoff,
+        compact_chunk_rows=compact_chunk_rows,
+        compression=compression,
+        ld_kernel="bitpacked",
         profile=profile,
     )
     seconds = time.perf_counter() - start_time
@@ -693,8 +825,15 @@ def write_outputs(
 def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
     total_uint8 = sum(result.uint8_seconds for result in results)
     total_bitpacked = sum(result.bitpacked_seconds for result in results)
+    total_chromosome_bitpacked = sum(
+        result.chromosome_bitpacked_seconds for result in results
+    )
+    total_chromosome_load = sum(result.chromosome_load_seconds for result in results)
     total_uint8_bytes = sum(result.uint8_bytes for result in results)
     total_bitpacked_bytes = sum(result.bitpacked_bytes for result in results)
+    total_chromosome_bitpacked_bytes = sum(
+        result.chromosome_bitpacked_bytes for result in results
+    )
     total_uint8_prepare = sum(result.uint8_prepare_seconds for result in results)
     total_bitpacked_prepare = sum(
         result.bitpacked_prepare_seconds for result in results
@@ -713,15 +852,30 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
     total_bitpacked_write_io = sum(
         result.bitpacked_write_io_seconds for result in results
     )
+    total_chromosome_chunk = sum(
+        result.chromosome_chunk_seconds for result in results
+    )
+    total_chromosome_write_io = sum(
+        result.chromosome_write_io_seconds for result in results
+    )
     return {
         "n_partitions": len(results),
         "all_exact": all(result.exact for result in results),
+        "chromosome_all_exact": all(result.chromosome_exact for result in results),
         "total_rows": sum(result.n_rows for result in results),
         "total_uint8_seconds": total_uint8,
         "total_bitpacked_seconds": total_bitpacked,
         "overall_speedup": total_uint8 / total_bitpacked if total_bitpacked else None,
+        "total_chromosome_bitpacked_seconds": total_chromosome_bitpacked,
+        "total_chromosome_load_seconds": total_chromosome_load,
+        "chromosome_speedup_vs_partition_bitpacked": (
+            total_bitpacked / (total_chromosome_load + total_chromosome_bitpacked)
+            if total_chromosome_load + total_chromosome_bitpacked
+            else None
+        ),
         "total_uint8_bytes": total_uint8_bytes,
         "total_bitpacked_bytes": total_bitpacked_bytes,
+        "total_chromosome_bitpacked_bytes": total_chromosome_bitpacked_bytes,
         "overall_byte_ratio": (
             total_bitpacked_bytes / total_uint8_bytes if total_uint8_bytes else None
         ),
@@ -742,7 +896,13 @@ def summary_dict(results: list[PartitionResult]) -> dict[str, object]:
         ),
         "total_uint8_write_io_seconds": total_uint8_write_io,
         "total_bitpacked_write_io_seconds": total_bitpacked_write_io,
+        "total_chromosome_chunk_seconds": total_chromosome_chunk,
+        "total_chromosome_write_io_seconds": total_chromosome_write_io,
         "max_abs_diff": max((result.max_abs_diff for result in results), default=0.0),
+        "chromosome_max_abs_diff": max(
+            (result.chromosome_max_abs_diff for result in results),
+            default=0.0,
+        ),
     }
 
 
