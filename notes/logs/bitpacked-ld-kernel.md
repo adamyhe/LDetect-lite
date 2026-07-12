@@ -16,20 +16,18 @@ This log is a distilled port of the original mixed-concerns branch log (`covaria
 - **Toy-scale, end-to-end:** `examples/ldetect_example/scripts/benchmark_functions.py --ld-kernel bitpacked` on the chr2 EUR toy example (real committed result: `examples/ldetect_example/results/function_benchmark_bitpacked_check/summary.md`) — exactness check passes. Note this specific comparison is bitpacked vs. the *original legacy* ldetect implementation (a different codebase, Decimal/float and summation-order differences expected), reporting `calc_covariance` max abs diff ~2.2e-16 (machine-epsilon-level, not exactly 0.0) — a different, weaker claim than the same-codebase bit-exact tests above. Don't conflate the two: legacy comparison is "matches to floating-point precision," same-codebase comparison is "byte-identical."
 - **Toy-scale speed:** bitpacked vs. legacy on the same chr2 EUR toy example (`examples/ldetect_example/results/covariance_bitpack_vs_legacy/summary.tsv`): 108.29s legacy mean vs. 1.89s bitpacked mean (~57.3x), output 0.254x the legacy size, but *higher* peak RSS (824.8 MiB bitpacked vs. 563.5 MiB legacy) — a real tradeoff, not yet reconciled or explained.
 
-## Not yet done
+## Genome-scale result (2026-07-12)
 
-- **No genome-scale result has ever been produced.** The infrastructure for this already exists — `examples/ldetect_original/Snakefile.ld_kernel_diagnostics` (+ `ld_kernel_diagnostics.yaml`, `scripts/compare_ld_kernel.py`) runs `ldetect run` twice per chromosome x population on identical real 1000G input (once `--ld-kernel uint8`, once `bitpacked`) and compares vectors, breakpoints, BEDs, covariance-directory size, and Snakemake's own wall-clock/peak-RSS `benchmark:` output. It was built during the original mixed-concerns branch's work but never actually run — defaults to the full 22-chromosome x 3-population dataset, explicitly meant for remote/cluster execution given the compute cost (matches `feedback_no-large-jobs-locally` — don't run this locally).
-- **The toy-scale RSS regression (824.8 MiB vs. 563.5 MiB) is unexplained.** Packing to `uint64` should reduce memory, not increase it, at least for the haplotype matrix itself — worth checking whether this is a real steady-state RSS increase or a transient peak from holding both the `uint8` source array and its packed copy simultaneously during `_pack_haplotypes_impl`.
-- **No apples-to-apples `uint8`-vs-`bitpacked` genome-scale *speed* number exists either** — only the toy-scale 57.3x figure above, which is bitpacked-vs-*legacy*, not bitpacked-vs-current-uint8.
+Ran `Snakefile.ld_kernel_diagnostics` for real: all 22 chromosomes x 3 populations (EUR/AFR/ASN), real 1000G Phase 1 data. `results/ld_kernel_summary.tsv`, 66 rows.
 
-## Next step
+**Exactness: definitive pass, no exceptions.** Every one of the 66 rows: `vector_sha256_equal=True`, `vector_max_abs_diff=0.0`, `loci_exact_match=True`, `bed_jaccard=1.0`. Bitpacked and `uint8` produce byte-identical vectors, breakpoints, and BEDs at full genome scale, not just in unit tests. `covariance_size_ratio=1.0` throughout too — the compact HDF5 schema's on-disk size doesn't depend on which pair-counting kernel produced it, as expected.
 
-Run `Snakefile.ld_kernel_diagnostics` for real, on a cluster:
+**Speed: inconclusive.** Aggregate (sum of all `baseline_seconds` / sum of all `bitpacked_seconds`) = 1.095x, but the per-chromosome `speedup` column ranges from 0.12x (AFR chr22, bitpacked ~8x *slower*) to 11.27x (AFR chr19, ~11x faster), median only 1.03x, and 28/66 rows favor `uint8` over `bitpacked`. The extreme outliers cluster entirely among the shortest-running jobs (`baseline_seconds` ~70-250s); the largest jobs (8,000-13,000s) sit much closer to neutral (0.99x-2.13x). Variance shrinking as job size grows is the signature of a fixed per-run overhead or scheduling contention dominating the measurement, not a real kernel-speed difference — `docs/optimizations.md` #13 already documented exactly this failure mode (Slurm scheduling multiple jobs to the same second) for a different diagnostic, and this Snakefile doesn't apply that fix's thread-count-guard pattern. Not confirmed which mechanism (Numba JIT cold-start cost, scheduling contention, or something else) without digging into the individual `.timing.log`/`.benchmark.tsv` files per job — flagging the pattern, not claiming the cause.
 
-```bash
-cd examples/ldetect_original/
-uv run snakemake -s Snakefile.ld_kernel_diagnostics -n   # dry-run first
-uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 8
-```
+**Memory: no regression.** `max_rss_ratio` (baseline/bitpacked) averages 1.014, range 0.93-1.22 — resolves the toy-scale RSS concern below; that regression was specific to the *legacy* comparison, not `uint8`.
 
-Outputs land under `results/ld_kernel_diagnostics/{population}/{chrom}/...`, with a genome-wide summary at `results/ld_kernel_diagnostics/summary.tsv`. That result is the actual deliverable this log is waiting on — once it exists, this section should be replaced with the real numbers and an exactness/speed verdict, and `docs/optimizations.md` #14 updated to cite it directly instead of "see `benchmarks/README.md`."
+**Verdict:** `bitpacked` is proven correct at genome scale. It is *not* proven faster — the 1.095x aggregate isn't reliable given the underlying noise, and nothing here supports flipping the default away from `uint8`. If a real speed claim is wanted, the diagnostic needs the thread-count-guard treatment (or an isolated/dedicated-node run) before the timing numbers can be trusted.
+
+## Toy-scale-only, unresolved
+
+- **The toy-scale RSS regression (824.8 MiB bitpacked vs. 563.5 MiB legacy) is unexplained** — but now known to be legacy-comparison-specific, not a `uint8`-vs-`bitpacked` issue (see genome-scale memory result above). Packing to `uint64` should reduce memory, not increase it, for the haplotype matrix itself — worth checking whether the toy-scale figure was a transient peak from holding both the `uint8` source array and its packed copy simultaneously during `_pack_haplotypes_impl`, if this is ever revisited.
