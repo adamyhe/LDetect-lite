@@ -317,11 +317,14 @@ Run it for real:
 uv run snakemake -s Snakefile.compression_diagnostics --cores 8
 ```
 
-Smoke-test a smaller subset instead of the full genome:
+Smoke-test a smaller subset instead of the full genome. `--config` merges
+into `chromosomes_by_population` key by key, so a population left out of the
+override keeps its full 1-22 default — override every population you want
+restricted, or the "smoke test" will still run the others genome-wide:
 
 ```bash
 uv run snakemake -s Snakefile.compression_diagnostics --cores 4 \
-  --config chromosomes_by_population='{EUR: [11, 22]}'
+  --config chromosomes_by_population='{EUR: [22], AFR: [22], ASN: [22]}'
 ```
 
 Outputs:
@@ -336,6 +339,73 @@ Outputs:
   chromosome x population.
 - `results/compression_diagnostics/summary.tsv` — all comparison rows
   concatenated.
+
+## SV-Boundary Diagnostic Workflow
+
+`Snakefile.sv_boundary_diagnostics` tests a candidate explanation for the
+parked EUR chr8-12 / AFR chr22 reproduction divergence (see
+`notes/findings/ldetect-original-reproduction.md`, "New candidate mechanism:
+SV/indel partition-boundary duplication"): `calc_covariance`'s region-based
+read has no explicit `start <= pos <= end` check of its own, so a structural
+variant or long indel whose span crosses a partition boundary can be
+spuriously double-counted into a neighboring partition's covariance
+calculation. The original ldetect is exposed to this; MacDonald et al. (2022)
+sidesteps it entirely by filtering to SNPs only upstream.
+
+For each chromosome in the same divergent + control set used by
+`Snakefile.provenance_diagnostics` (EUR chr8-13, AFR chr11/13/22), this
+workflow runs the full pipeline twice on identical population-filtered
+input — once with the current `all`-variant-types filtering (matches the
+main `Snakefile`/original ldetect methodology) and once with an added
+`snps_only` filter (`bcftools view --types snps`, matching MacDonald2022) —
+then compares each mode's BED against the published Berisa & Pickrell
+reference at a loose 100kb tolerance (sanity check — both modes should stay
+matching) and an exact 0bp tolerance (the metric that actually tests the
+hypothesis), plus `snps_only` directly against `all` to quantify how much
+the filter itself shifts boundaries.
+
+Dry-run the default (divergent + control chromosome set) diagnostic:
+
+```bash
+uv run snakemake -s Snakefile.sv_boundary_diagnostics -n
+```
+
+Run it for real:
+
+```bash
+uv run snakemake -s Snakefile.sv_boundary_diagnostics --cores 8
+```
+
+Smoke-test a smaller subset (same `--config` merge caveat as above — override
+every population you want restricted):
+
+```bash
+uv run snakemake -s Snakefile.sv_boundary_diagnostics --cores 4 \
+  --config chromosomes_by_population='{EUR: [10], AFR: [22]}'
+```
+
+Outputs:
+
+- `results/sv_boundary_diagnostics/{population}/{chrom}/{all,snps_only}/` —
+  each mode's full `ldetect run` output directory for that chromosome.
+- `results/sv_boundary_diagnostics/{population}/{all,snps_only}_LD_blocks.bed` —
+  each mode's combined BED across this diagnostic's chromosome subset.
+- `results/sv_boundary_diagnostics/{population}/compare/{mode}_vs_ref_tol{0,100000}.tsv` —
+  each mode vs. the published reference, per chromosome, at both tolerances.
+- `results/sv_boundary_diagnostics/{population}/compare/snps_only_vs_all_tol0.tsv` —
+  `snps_only` directly against `all`, at exact tolerance.
+- `results/sv_boundary_diagnostics/summary.tsv` — all comparison rows
+  from every population and comparison, concatenated and tagged by which
+  comparison they came from.
+
+**Reading the result:** if the hypothesis holds, `snps_only_vs_ref_tol0`
+should show improved (higher) `recall`/`precision`/`jaccard` specifically on
+EUR chr8-12 and AFR chr22 relative to `all_vs_ref_tol0`, while both stay
+similarly high on the control chromosomes (chr13 for both populations, chr11
+for AFR) and at the loose 100kb tolerance. If `snps_only` doesn't move the
+divergent chromosomes closer to the reference, that's a real negative result
+worth recording back in `notes/findings/ldetect-original-reproduction.md`,
+not a reason to rerun with different parameters first.
 
 ## Resource Profiling
 

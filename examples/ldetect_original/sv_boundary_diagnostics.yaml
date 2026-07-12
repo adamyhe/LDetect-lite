@@ -1,0 +1,29 @@
+# Chromosomes to diagnose per population: the same divergent + control set
+# already used by provenance_diagnostics.yaml (EUR chr8-12 divergent,
+# chr13 control; AFR chr22 divergent, chr11/chr13 controls) -- no reason to
+# widen this until the hypothesis is confirmed on the chromosomes it's
+# actually meant to explain.
+chromosomes_by_population:
+  EUR: [8, 9, 10, 11, 12, 13]
+  AFR: [11, 13, 22]
+
+subset: fourier_ls
+
+# Two tolerances against the published reference:
+# - loose (100kb): should stay matching in both modes -- this is the metric
+#   the main pipeline already passes on these chromosomes (exact block counts
+#   and coverage), so a regression here would mean the snps_only filter is
+#   too aggressive, not that the hypothesis is confirmed.
+# - exact (0bp): the metric that actually tests the hypothesis -- EUR
+#   chr8-12 and AFR chr22 currently fail this against the published
+#   reference; the question is whether snps_only mode gets them closer.
+tolerance_loose: 100000
+tolerance_exact: 0
+
+covariance_cache: compact
+workers: 4
+
+# Snakemake scheduling guard: this rule claims many threads so `--cores N`
+# still runs only one heavy chromosome x mode job at a time. ldetect-lite
+# itself still receives workers/local_search_workers above.
+ldetect_job_threads: 4

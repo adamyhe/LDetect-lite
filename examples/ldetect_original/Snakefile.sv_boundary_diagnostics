@@ -1,0 +1,361 @@
+"""Test whether SV/indel partition-boundary duplication explains the
+EUR chr8-12 / AFR chr22 residual reproduction divergence.
+
+Background: `calc_covariance`'s region-based read (the only covariance
+strategy this pipeline has; every existing reproduction run uses it) has no
+explicit `start <= pos <= end` check of its own -- it trusts htslib's
+region-overlap semantics, which match by *span* for structural variants
+(`INFO/END`) and long-REF indels, not by `POS`. A large SV/indel near a
+partition boundary can therefore be spuriously double-counted into a
+neighboring partition. Confirmed directly on real chr22 EUR 1000G data and
+written up as a candidate explanation for the parked EUR chr8-12 / AFR chr22
+divergence in `notes/findings/ldetect-original-reproduction.md` -- see that
+file for the full mechanism and evidence.
+
+MacDonald et al. (2022) sidesteps this class of bug entirely by filtering to
+SNPs only *before* any partitioning or covariance step
+(`_reference/LDblocks_GRCh38/scripts/subsetVcf.sh`: `bcftools view --types
+snps`); the original ldetect does not filter by type at all and is exposed
+to the same mechanism as this pipeline's default `all` mode.
+
+This workflow runs the full pipeline twice per chromosome x population on
+identical population-filtered input -- once with the current `all`-variant-
+types filtering (matches the main `Snakefile`/original ldetect methodology)
+and once with an added `snps_only` filter (matches MacDonald2022) -- on the
+same divergent + control chromosome set already used by
+`Snakefile.provenance_diagnostics` (EUR chr8-12 divergent bracketed by chr13
+control; AFR chr22 divergent alongside chr11/chr13 controls). It then
+compares each mode's BED against the published Berisa & Pickrell reference at
+a loose 100kb tolerance (sanity check -- should stay matching) and an exact
+0bp tolerance (the metric that actually tests the hypothesis), plus
+`snps_only` directly against `all` to quantify how much the filter itself
+moves boundaries.
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -s Snakefile.sv_boundary_diagnostics -n
+    uv run snakemake -s Snakefile.sv_boundary_diagnostics --cores 8
+
+    # Smoke-test a smaller subset. --config merges into
+    # chromosomes_by_population key by key -- override every population you
+    # want restricted, or the untouched ones keep their full default:
+    uv run snakemake -s Snakefile.sv_boundary_diagnostics --cores 4 \
+        --config chromosomes_by_population='{EUR: [10], AFR: [22]}'
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "sv_boundary_diagnostics.yaml"
+
+
+CHROMS_BY_POP = {
+    str(pop): [str(chrom) for chrom in chroms]
+    for pop, chroms in config["chromosomes_by_population"].items()
+}
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = RESULTS / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+SVB_ROOT = RESULTS / "sv_boundary_diagnostics"
+
+MODE_TYPE_FILTER = {"all": "", "snps_only": "--types snps"}
+
+wildcard_constraints:
+    mode="all|snps_only",
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def svb_targets(suffix):
+    targets = []
+    for population in CHROMS_BY_POP:
+        targets.append(str(SVB_ROOT / population / suffix))
+    return targets
+
+
+rule all:
+    input:
+        svb_targets("compare/all_vs_ref_tol0.tsv"),
+        svb_targets("compare/snps_only_vs_ref_tol0.tsv"),
+        svb_targets("compare/all_vs_ref_tol100000.tsv"),
+        svb_targets("compare/snps_only_vs_ref_tol100000.tsv"),
+        svb_targets("compare/snps_only_vs_all_tol0.tsv"),
+        str(SVB_ROOT / "summary.tsv"),
+
+
+rule svb_download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule svb_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule svb_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule svb_download_ref_bed:
+    output:
+        str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+    shell:
+        """
+        mkdir -p {RES_DIR}/ldetect_ref
+        wget -q -O {output} \
+            "{params.base_url}/{wildcards.population}/fourier_ls-all.bed"
+        """
+
+
+rule svb_prep_individuals:
+    input:
+        panel=rules.svb_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule svb_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Dual-mode ldetect run: identical population-filtered input,
+# all-variant-types (current default, matches original ldetect methodology)
+# vs. snps_only (matches MacDonald2022's upstream SNP-only filter).
+# ---------------------------------------------------------------------------
+
+
+rule svb_type_filter_vcf:
+    input:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    output:
+        vcf=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "input.vcf.gz"),
+        tbi=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "input.vcf.gz.tbi"),
+    params:
+        type_filter=lambda wc: MODE_TYPE_FILTER[wc.mode],
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view {params.type_filter} -Oz -o {output.vcf} {input.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+rule svb_run_ldetect:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "input.vcf.gz"),
+        tbi=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "input.vcf.gz.tbi"),
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+    log:
+        run=str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.log"),
+        timing=str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
+    benchmark:
+        str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
+    threads: config.get("ldetect_job_threads", config.get("workers", 4))
+    params:
+        output_dir=lambda wc: str(SVB_ROOT / wc.population / wc.chrom / wc.mode),
+        log_dir=str(SVB_ROOT / "{population}" / "{chrom}" / "logs"),
+        ne=lambda wildcards: pop_ne(wildcards.population),
+        cutoff=config["cov_cutoff"],
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        export OMP_NUM_THREADS={params.workers}
+        export OPENBLAS_NUM_THREADS={params.workers}
+        export MKL_NUM_THREADS={params.workers}
+        export NUMEXPR_NUM_THREADS={params.workers}
+        export NUMBA_NUM_THREADS={params.workers}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Combine this diagnostic's chromosome subset into one BED per population x
+# mode, restoring the "chr" prefix compare_blocks.py expects.
+# ---------------------------------------------------------------------------
+
+
+rule svb_combine_beds:
+    input:
+        lambda wc: expand(
+            str(SVB_ROOT / wc.population / "{chrom}" / wc.mode / "{chrom}-ld-blocks.bed"),
+            chrom=CHROMS_BY_POP[wc.population],
+        ),
+    output:
+        str(SVB_ROOT / "{population}" / "{mode}_LD_blocks.bed"),
+    shell:
+        """
+        echo -e "#chr\tstart\tstop" >{output}
+        for f in {input}; do
+            tail -n +2 "$f" | sed 's/^/chr/' >>{output}
+        done
+        """
+
+
+# ---------------------------------------------------------------------------
+# Compare each mode against the published reference (the hypothesis test),
+# and snps_only directly against all (to quantify the shift on its own).
+# ---------------------------------------------------------------------------
+
+
+rule svb_compare_vs_ref:
+    input:
+        ours=str(SVB_ROOT / "{population}" / "{mode}_LD_blocks.bed"),
+        ref=str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    output:
+        str(SVB_ROOT / "{population}" / "compare" / "{mode}_vs_ref_tol{tol}.tsv"),
+    shell:
+        """
+        mkdir -p {SVB_ROOT}/{wildcards.population}/compare
+        uv run python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {wildcards.tol}
+        """
+
+
+rule svb_compare_modes:
+    input:
+        ours=str(SVB_ROOT / "{population}" / "snps_only_LD_blocks.bed"),
+        ref=str(SVB_ROOT / "{population}" / "all_LD_blocks.bed"),
+    output:
+        str(SVB_ROOT / "{population}" / "compare" / "snps_only_vs_all_tol0.tsv"),
+    shell:
+        """
+        mkdir -p {SVB_ROOT}/{wildcards.population}/compare
+        uv run python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance 0
+        """
+
+
+# ---------------------------------------------------------------------------
+# Summary: concatenate every comparison table across populations, tagging
+# each row with which comparison it came from.
+# ---------------------------------------------------------------------------
+
+
+rule svb_summary:
+    input:
+        all_tol0=svb_targets("compare/all_vs_ref_tol0.tsv"),
+        snps_tol0=svb_targets("compare/snps_only_vs_ref_tol0.tsv"),
+        all_tol_loose=svb_targets("compare/all_vs_ref_tol100000.tsv"),
+        snps_tol_loose=svb_targets("compare/snps_only_vs_ref_tol100000.tsv"),
+        modes_tol0=svb_targets("compare/snps_only_vs_all_tol0.tsv"),
+    output:
+        str(SVB_ROOT / "summary.tsv"),
+    run:
+        import csv
+
+        groups = {
+            "all_vs_ref_tol0": input.all_tol0,
+            "snps_only_vs_ref_tol0": input.snps_tol0,
+            "all_vs_ref_tol100000": input.all_tol_loose,
+            "snps_only_vs_ref_tol100000": input.snps_tol_loose,
+            "snps_only_vs_all_tol0": input.modes_tol0,
+        }
+        rows = []
+        fieldnames = None
+        for comparison, paths in groups.items():
+            for path in paths:
+                with open(path) as f:
+                    reader = csv.DictReader(f, delimiter="\t")
+                    if fieldnames is None:
+                        fieldnames = ["comparison", *reader.fieldnames]
+                    for row in reader:
+                        rows.append({"comparison": comparison, **row})
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)
