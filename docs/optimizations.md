@@ -6,6 +6,47 @@ This document summarises the performance improvements applied to `ldetect-lite` 
 
 ---
 
+## Example benchmark figures
+
+The toy chr2 benchmark in `examples/ldetect_example/` compares command-level
+original LDetect scripts against command-level `ldetect-lite` invocations on
+the same VCF-start example interval. Reproduce the figures with:
+
+```bash
+cd examples/ldetect_example
+uv run snakemake --cores 1
+uv run --extra heatmap python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
+uv run --extra heatmap python scripts/benchmark_legacy_covariance.py --warmups 0 --repeats 1
+```
+
+Timing plots are tracked under `examples/ldetect_example/plots/`:
+
+![calc-covariance timing](../examples/ldetect_example/plots/timings-calc-covariance.svg)
+
+![matrix-to-vector timing](../examples/ldetect_example/plots/timings-matrix_to_vector.svg)
+
+![find-minima timing](../examples/ldetect_example/plots/timings-find_minima.svg)
+
+![extract-bpoints timing](../examples/ldetect_example/plots/timings-extract_bpoints.svg)
+
+Current measured command-level timings on the example interval:
+
+| Stage | Original LDetect mean seconds | `ldetect-lite` mean seconds | Speedup |
+|---|---:|---:|---:|
+| `calc-covariance` | 99.936 | 3.222 | 31.02x |
+| `matrix-to-vector` | 1.044 | 0.204 | 5.13x |
+| `find-minima` | 10.786 | 1.200 | 8.98x |
+| `extract-bpoints` | 0.607 | 0.138 | 4.42x |
+
+The covariance benchmark is intentionally a command boundary comparison:
+legacy uses the vendored `P00_01_calc_covariance.py` script with the prepared
+VCF streamed through stdin, while `ldetect-lite` uses
+`ldetect calc-covariance` on the same indexed VCF interval. See
+[`docs/exactness.md`](exactness.md) for the matching equivalence checks and
+exactness figures.
+
+---
+
 ## 1. Numba JIT for pairwise LD kernel (`shrinkage.py`)
 
 **Affected code:** `_pairwise_ld_impl` in `src/ldetect_lite/shrinkage.py`
