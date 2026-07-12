@@ -97,6 +97,7 @@ rule all:
         svb_targets("compare/snps_only_vs_ref_tol100000.tsv"),
         svb_targets("compare/snps_only_vs_all_tol0.tsv"),
         str(SVB_ROOT / "summary.tsv"),
+        str(SVB_ROOT / "boundary_audit_summary.tsv"),
 
 
 rule svb_download_vcf:
@@ -217,6 +218,7 @@ rule svb_run_ldetect:
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         bed=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        partitions=str(SVB_ROOT / "{population}" / "{chrom}" / "{mode}" / "{chrom}_partitions.txt"),
     log:
         run=str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.log"),
         timing=str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
@@ -255,6 +257,67 @@ rule svb_run_ldetect:
             --workers {params.workers} \
             > {log.run} 2>&1
         """
+
+
+# ---------------------------------------------------------------------------
+# Cheap precursor: does any SV/long-indel's span actually cross one of this
+# chromosome's real partition boundaries at all? Uses the `all` mode's
+# already-filtered input VCF and the partition file `ldetect run` itself
+# computed (not a recomputation), so this reuses exactly what the full
+# pipeline run above already produced -- it's a fast bcftools-only scan
+# (genotypes dropped, span is a site-level property), not a second pipeline
+# run. Answers "is the mechanism even in play here" before the (much more
+# expensive) full snps_only-vs-all comparison tries to answer "does it
+# change the actual output."
+# ---------------------------------------------------------------------------
+
+
+rule svb_boundary_audit:
+    input:
+        vcf=str(SVB_ROOT / "{population}" / "{chrom}" / "all" / "input.vcf.gz"),
+        partitions=str(SVB_ROOT / "{population}" / "{chrom}" / "all" / "{chrom}_partitions.txt"),
+        script="scripts/audit_boundary_spanning_variants.py",
+    output:
+        str(SVB_ROOT / "{population}" / "{chrom}" / "boundary_audit.tsv"),
+    shell:
+        """
+        uv run python scripts/audit_boundary_spanning_variants.py \
+            --vcf {input.vcf} \
+            --partitions {input.partitions} \
+            --population {wildcards.population} \
+            --chrom {wildcards.chrom} \
+            --output {output}
+        """
+
+
+def svb_boundary_audit_targets():
+    targets = []
+    for population, chroms in CHROMS_BY_POP.items():
+        for chrom in chroms:
+            targets.append(str(SVB_ROOT / population / chrom / "boundary_audit.tsv"))
+    return targets
+
+
+rule svb_boundary_audit_summary:
+    input:
+        svb_boundary_audit_targets(),
+    output:
+        str(SVB_ROOT / "boundary_audit_summary.tsv"),
+    run:
+        import csv
+
+        rows = []
+        fieldnames = None
+        for path in input:
+            with open(path) as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                if fieldnames is None:
+                    fieldnames = reader.fieldnames
+                rows.extend(reader)
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)
 
 
 # ---------------------------------------------------------------------------

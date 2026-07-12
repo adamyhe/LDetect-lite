@@ -13,5 +13,6 @@ Internal working notes — not the polished public documentation (that's `README
   - `macdonald2022-pyrho-handoff.md` — full dated handoff log behind `findings/macdonald2022-reproduction.md`.
   - `macdonald2022-interpolation-port.md` — full root-cause writeup for the deCODE interval-interpolation bug.
   - `post-covariance-optimization-review.md` — post-covariance-optimization performance review and roadmap.
+  - `sv-boundary-diagnostics-investigation.md` — full dated log behind `findings/ldetect-original-reproduction.md`'s "SV/indel partition-boundary duplication" section.
 
 The performance-optimization counterpart to this directory, `docs/optimizations.md`, lives outside `notes/` because it's human-facing reference documentation, not an internal working note.
