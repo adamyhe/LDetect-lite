@@ -63,6 +63,7 @@ Options:
 - `--cov-cutoff FLOAT` — LD pairs with absolute shrinkage correlation below this threshold are not written to disk, reducing storage (default: 1e-7)
 - `--covariance-cache {compact,full}` — partition cache schema for `ldetect run` (default: `compact`). Compact caches write only canonical position pairs, `shrink_ld`, diagonals, and lookup indexes, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
 - `--covariance-compression {lzf,zstd}` — HDF5 compression codec for covariance partitions (default: `zstd`). `zstd` is smaller and faster to read/write than `lzf` at equal precision — see `docs/optimizations.md`.
+- `--ld-kernel {uint8,bitpacked}` — compact covariance pair-count backend (default: `uint8`). `bitpacked` uses packed haplotypes and popcounts and requires compact covariance output.
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which of the four breakpoint sets to write to the BED file (default: `fourier_ls`; see `docs/pipeline-steps.md` step 4)

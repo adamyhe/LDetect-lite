@@ -78,6 +78,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "(default: zstd)."
         ),
     )
+    p.add_argument(
+        "--ld-kernel",
+        choices=("uint8", "bitpacked"),
+        default="uint8",
+        help=(
+            "Pair-count backend for compact covariance output. 'uint8' is the "
+            "established backend; 'bitpacked' uses packed haplotypes and "
+            "popcounts and currently requires compact output (default: uint8)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -99,6 +109,8 @@ def _run(args: argparse.Namespace) -> int:
             ne=args.ne,
             cutoff=args.cutoff,
             compression=args.covariance_compression,
+            compact_output=args.ld_kernel == "bitpacked",
+            ld_kernel=args.ld_kernel,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

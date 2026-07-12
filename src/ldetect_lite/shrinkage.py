@@ -6,12 +6,13 @@ import gzip
 import math
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 import cyvcf2
 import numpy as np
+from numba import njit
 
 from ldetect_lite.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
@@ -23,26 +24,66 @@ from ldetect_lite.io.covariance_hdf5 import (
 
 COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
 
+
 # ---------------------------------------------------------------------------
-# Pairwise LD kernel (Numba-accelerated when available)
+# Pairwise LD kernel (Numba-accelerated)
 # ---------------------------------------------------------------------------
 
-_F = TypeVar("_F", bound=Callable[..., Any])
 
-try:
-    from numba import njit
+@njit(cache=True, inline="always")
+def _shrink_ld_values(
+    n11: float,
+    n1x: float,
+    nx1: float,
+    gpos_i: float,
+    gpos_j: float,
+    inv_n_total: float,
+    shrink_scale: float,
+    decay_scale: float,
+) -> tuple[float, float]:
+    f11 = n11 * inv_n_total
+    f1 = n1x * inv_n_total
+    f2 = nx1 * inv_n_total
+    d_naive = f11 - f1 * f2
+    ds2 = shrink_scale * d_naive * math.exp(-decay_scale * (gpos_j - gpos_i))
+    return d_naive, ds2
 
-    _numba_decorator = njit(cache=True)
 
-    def _njit_fallback(fn: _F) -> _F:
-        return _numba_decorator(fn)  # type: ignore[no-any-return]
-except ImportError:
+@njit(cache=True, inline="always")
+def _popcount64(x: np.uint64) -> np.int64:
+    """Portable uint64 popcount for Numba kernels."""
+    m1 = np.uint64(0x5555555555555555)
+    m2 = np.uint64(0x3333333333333333)
+    m4 = np.uint64(0x0F0F0F0F0F0F0F0F)
+    h01 = np.uint64(0x0101010101010101)
+    x = x - ((x >> np.uint64(1)) & m1)
+    x = (x & m2) + ((x >> np.uint64(2)) & m2)
+    x = (x + (x >> np.uint64(4))) & m4
+    return np.int64((x * h01) >> np.uint64(56))
 
-    def _njit_fallback(fn: _F) -> _F:
-        return fn
+
+@njit(cache=True)
+def _pack_haplotypes_impl(hap_mat: np.ndarray) -> np.ndarray:
+    """Pack a 0/1 haplotype matrix into uint64 words.
+
+    Haplotype index ``k`` maps to word ``k // 64`` and bit ``k % 64``.
+    Unused high bits in the final word remain zero.
+    """
+    n_snps = hap_mat.shape[0]
+    n_haps = hap_mat.shape[1]
+    n_words = (n_haps + 63) // 64
+    packed = np.zeros((n_snps, n_words), dtype=np.uint64)
+    one = np.uint64(1)
+    for i in range(n_snps):
+        for k in range(n_haps):
+            if hap_mat[i, k] != 0:
+                word = k // 64
+                bit = k - word * 64
+                packed[i, word] |= one << np.uint64(bit)
+    return packed
 
 
-@_njit_fallback
+@njit(cache=True)
 def _count_pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -55,27 +96,30 @@ def _count_pairwise_ld_impl(
 ) -> int:
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    n_total = float(n_haps)
+    inv_n_total = 1.0 / float(n_haps)
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
 
     cnt = 0
     for i in range(n_snps):
+        gpos1 = gpos_arr[i]
         j_stop = j_stop_by_i[i]
         n1x = hap_sums[i]
         for j in range(i, j_stop):
-            gpos1 = gpos_arr[i]
-            df = gpos_arr[j] - gpos1
-            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
             nx1 = hap_sums[j]
-
-            f11 = n11 / n_total
-            f1 = n1x / n_total
-            f2 = nx1 / n_total
-            d_naive = f11 - f1 * f2
-            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+            _, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
 
             if math.fabs(ds2) < cutoff:
                 continue
@@ -85,7 +129,7 @@ def _count_pairwise_ld_impl(
     return cnt
 
 
-@_njit_fallback
+@njit(cache=True)
 def _pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -111,7 +155,10 @@ def _pairwise_ld_impl(
     """
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    n_total = float(n_haps)
+    inv_n_total = 1.0 / float(n_haps)
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
+    diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
     n_pairs = _count_pairwise_ld_impl(
         hap_mat, gpos_arr, hap_sums, j_stop_by_i, ne, n_ind, theta, cutoff
     )
@@ -127,25 +174,26 @@ def _pairwise_ld_impl(
         j_stop = j_stop_by_i[i]
         n1x = hap_sums[i]
         for j in range(i, j_stop):
-            df = gpos_arr[j] - gpos1
-            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
             nx1 = hap_sums[j]
-
-            f11 = n11 / n_total
-            f1 = n1x / n_total
-            f2 = nx1 / n_total
-            d_naive = f11 - f1 * f2
-            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+            d_naive, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
 
             if math.fabs(ds2) < cutoff:
                 continue
 
             if i == j:
-                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
+                ds2 += diag_adjust
 
             ii[cnt] = i
             jj[cnt] = j
@@ -156,7 +204,7 @@ def _pairwise_ld_impl(
     return ii, jj, d_naive_arr, ds2_arr
 
 
-@_njit_fallback
+@njit(cache=True)
 def _count_pairwise_ld_by_i_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -169,7 +217,9 @@ def _count_pairwise_ld_by_i_impl(
 ) -> np.ndarray:
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    n_total = float(n_haps)
+    inv_n_total = 1.0 / float(n_haps)
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     counts = np.zeros(n_snps, dtype=np.int64)
 
     for i in range(n_snps):
@@ -178,19 +228,20 @@ def _count_pairwise_ld_by_i_impl(
         n1x = hap_sums[i]
         row_count = 0
         for j in range(i, j_stop):
-            df = gpos_arr[j] - gpos1
-            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
             nx1 = hap_sums[j]
-
-            f11 = n11 / n_total
-            f1 = n1x / n_total
-            f2 = nx1 / n_total
-            d_naive = f11 - f1 * f2
-            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+            _, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
 
             if math.fabs(ds2) < cutoff:
                 continue
@@ -201,7 +252,7 @@ def _count_pairwise_ld_by_i_impl(
     return counts
 
 
-@_njit_fallback
+@njit(cache=True)
 def _pairwise_ld_compact_range_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -216,7 +267,10 @@ def _pairwise_ld_compact_range_impl(
     n_pairs: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     n_haps = hap_mat.shape[1]
-    n_total = float(n_haps)
+    inv_n_total = 1.0 / float(n_haps)
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
+    diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(n_pairs, dtype=np.int32)
     jj = np.empty(n_pairs, dtype=np.int32)
@@ -228,25 +282,26 @@ def _pairwise_ld_compact_range_impl(
         j_stop = j_stop_by_i[i]
         n1x = hap_sums[i]
         for j in range(i, j_stop):
-            df = gpos_arr[j] - gpos1
-            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
             nx1 = hap_sums[j]
-
-            f11 = n11 / n_total
-            f1 = n1x / n_total
-            f2 = nx1 / n_total
-            d_naive = f11 - f1 * f2
-            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+            _, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
 
             if math.fabs(ds2) < cutoff:
                 continue
 
             if i == j:
-                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
+                ds2 += diag_adjust
 
             ii[cnt] = i
             jj[cnt] = j
@@ -256,7 +311,7 @@ def _pairwise_ld_compact_range_impl(
     return ii, jj, ds2_arr
 
 
-@_njit_fallback
+@njit(cache=True)
 def _genetic_stop_bounds_impl(
     gpos_arr: np.ndarray,
     ne: float,
@@ -265,6 +320,11 @@ def _genetic_stop_bounds_impl(
 ) -> np.ndarray:
     n_snps = gpos_arr.shape[0]
     stops = np.empty(n_snps, dtype=np.int32)
+    if cutoff <= 0.0:
+        stops.fill(n_snps)
+        return stops
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
+    max_gdist = -math.log(cutoff) / decay_scale
     stop = 0
     for i in range(n_snps):
         if stop < i:
@@ -272,15 +332,14 @@ def _genetic_stop_bounds_impl(
         gpos1 = gpos_arr[i]
         while stop < n_snps:
             df = gpos_arr[stop] - gpos1
-            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-            if ee < cutoff:
+            if df > max_gdist:
                 break
             stop += 1
         stops[i] = stop
     return stops
 
 
-@_njit_fallback
+@njit(cache=True)
 def _pairwise_ld_compact_chunk_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -295,8 +354,11 @@ def _pairwise_ld_compact_chunk_impl(
     capacity: int,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
     n_haps = hap_mat.shape[1]
-    n_total = float(n_haps)
+    inv_n_total = 1.0 / float(n_haps)
     n_snps = hap_mat.shape[0]
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
+    diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(capacity, dtype=np.int32)
     jj = np.empty(capacity, dtype=np.int32)
@@ -309,25 +371,98 @@ def _pairwise_ld_compact_chunk_impl(
         j_stop = j_stop_by_i[i]
         n1x = hap_sums[i]
         for j in range(i, j_stop):
-            df = gpos_arr[j] - gpos1
-            ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
-
             a = hap_mat[i]
             b = hap_mat[j]
             n11 = np.sum(a * b)
             nx1 = hap_sums[j]
-
-            f11 = n11 / n_total
-            f1 = n1x / n_total
-            f2 = nx1 / n_total
-            d_naive = f11 - f1 * f2
-            ds2 = (1.0 - theta) ** 2 * d_naive * ee
+            _, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
 
             if math.fabs(ds2) < cutoff:
                 continue
 
             if i == j:
-                ds2 += (theta / 2.0) * (1.0 - theta / 2.0)
+                ds2 += diag_adjust
+
+            ii[cnt] = i
+            jj[cnt] = j
+            ds2_arr[cnt] = ds2
+            cnt += 1
+
+        i += 1
+        if cnt >= target_rows:
+            break
+
+    return i, ii[:cnt], jj[:cnt], ds2_arr[:cnt]
+
+
+@njit(cache=True)
+def _pairwise_ld_compact_chunk_bitpacked_impl(
+    packed_hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    n_haps: int,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    i_start: int,
+    target_rows: int,
+    capacity: int,
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    inv_n_total = 1.0 / float(n_haps)
+    n_snps = packed_hap_mat.shape[0]
+    n_words = packed_hap_mat.shape[1]
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    decay_scale = (4.0 * ne) / (2.0 * n_ind)
+    diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
+
+    ii = np.empty(capacity, dtype=np.int32)
+    jj = np.empty(capacity, dtype=np.int32)
+    ds2_arr = np.empty(capacity, dtype=np.float64)
+
+    cnt = 0
+    i = i_start
+    while i < n_snps:
+        gpos1 = gpos_arr[i]
+        j_stop = j_stop_by_i[i]
+        n1x = hap_sums[i]
+        for j in range(i, j_stop):
+            if i == j:
+                n11 = n1x
+            else:
+                n11_count = np.int64(0)
+                for word in range(n_words):
+                    n11_count += _popcount64(
+                        packed_hap_mat[i, word] & packed_hap_mat[j, word]
+                    )
+                n11 = float(n11_count)
+            nx1 = hap_sums[j]
+            _, ds2 = _shrink_ld_values(
+                n11,
+                n1x,
+                nx1,
+                gpos1,
+                gpos_arr[j],
+                inv_n_total,
+                shrink_scale,
+                decay_scale,
+            )
+
+            if math.fabs(ds2) < cutoff:
+                continue
+
+            if i == j:
+                ds2 += diag_adjust
 
             ii[cnt] = i
             jj[cnt] = j
@@ -439,6 +574,95 @@ def _compact_pair_chunks_single_pass(
         i_start = i_stop
 
 
+def _compact_pair_chunks_single_pass_bitpacked(
+    packed_hap_mat: np.ndarray,
+    gpos_arr: np.ndarray,
+    hap_sums: np.ndarray,
+    j_stop_by_i: np.ndarray,
+    pos_arr: np.ndarray,
+    n_haps: int,
+    ne: float,
+    n_ind: float,
+    theta: float,
+    cutoff: float,
+    chunk_rows: int,
+) -> Iterator[CovarianceRowChunk]:
+    """Yield compact covariance rows from a bit-packed haplotype matrix."""
+    target_rows = max(int(chunk_rows), 1)
+    capacity = target_rows + packed_hap_mat.shape[0]
+    i_start = 0
+    n_snps = packed_hap_mat.shape[0]
+    while i_start < n_snps:
+        i_stop, ii, jj, shrink_ld = _pairwise_ld_compact_chunk_bitpacked_impl(
+            packed_hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            n_haps,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            i_start,
+            target_rows,
+            capacity,
+        )
+        if ii.size:
+            yield CovarianceRowChunk(
+                lo=pos_arr[ii],
+                hi=pos_arr[jj],
+                shrink_ld=shrink_ld,
+            )
+        if i_stop <= i_start:
+            raise RuntimeError("bitpacked compact chunk generation did not advance")
+        i_start = i_stop
+
+
+def _profile_next_chunks(
+    row_chunks: Iterator[CovarianceRowChunk],
+    profile: dict[str, float] | None,
+) -> Iterator[CovarianceRowChunk]:
+    """Measure generator ``next()`` time, which is the streamed pair kernel."""
+    if profile is None:
+        yield from row_chunks
+        return
+
+    iterator = iter(row_chunks)
+    while True:
+        start = time.perf_counter()
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            profile["chunk_seconds"] = (
+                profile.get("chunk_seconds", 0.0) + time.perf_counter() - start
+            )
+            return
+        profile["chunk_seconds"] = (
+            profile.get("chunk_seconds", 0.0) + time.perf_counter() - start
+        )
+        profile["n_chunks"] = profile.get("n_chunks", 0.0) + 1.0
+        yield chunk
+
+
+def _read_individuals(individuals_path: Path) -> list[str]:
+    individuals: list[str] = []
+    with open(individuals_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                individuals.append(line.split()[0])
+    return individuals
+
+
+def _read_genetic_map(genetic_map_path: Path) -> dict[int, float]:
+    pos2gpos: dict[int, float] = {}
+    with gzip.open(genetic_map_path, "rt") as gf:
+        for raw in gf:
+            parts = raw.strip().split()
+            pos2gpos[int(parts[1])] = float(parts[2])
+    return pos2gpos
+
+
 # ---------------------------------------------------------------------------
 # Chromosome partitioning  (was P00_00_partition_chromosome.py)
 # ---------------------------------------------------------------------------
@@ -525,6 +749,8 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
+    ld_kernel: str = "uint8",
+    profile: dict[str, float] | None = None,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
 
@@ -532,8 +758,7 @@ def calc_covariance(
     are supported. Rows with missing (``./.`` or ``.|.``) or unphased (``/``)
     genotypes are skipped with a warning.
 
-    The pairwise LD kernel is JIT-compiled with Numba when available, falling
-    back to pure Python otherwise.
+    The pairwise LD kernel is JIT-compiled with Numba.
 
     Args:
         vcf_path: Path to a ``.vcf``, ``.vcf.gz``, or ``.bcf`` file, or the
@@ -557,6 +782,11 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
+        ld_kernel: Pair-count backend for compact covariance output. ``"uint8"``
+            is the established backend; ``"bitpacked"`` packs haplotypes into
+            ``uint64`` words and uses popcounts for pairwise intersections.
+        profile: Optional mutable timing dictionary populated with coarse
+            stage timings for benchmark/profiling callers.
 
     Raises:
         ValueError: If any individual in *individuals_path* is not present in
@@ -568,7 +798,13 @@ def calc_covariance(
     total_start = time.perf_counter()
     log_memory_checkpoint("calc_covariance_start", debug=True)
 
+    if ld_kernel not in {"uint8", "bitpacked"}:
+        raise ValueError("ld_kernel must be one of: uint8, bitpacked")
+    if ld_kernel == "bitpacked" and not compact_output:
+        raise ValueError("ld_kernel='bitpacked' currently requires compact_output=True")
+
     # --- read individuals ---
+    prep_start = time.perf_counter()
     individuals: list[str] = []
     with open(individuals_path) as f:
         for line in f:
@@ -589,8 +825,11 @@ def calc_covariance(
         for raw in gf:
             parts = raw.strip().split()
             pos2gpos[int(parts[1])] = float(parts[2])
+    if profile is not None:
+        profile["prepare_seconds"] = time.perf_counter() - prep_start
 
     # --- parse VCF/BCF ---
+    vcf_start = time.perf_counter()
     vcf = cyvcf2.VCF(str(vcf_path), samples=individuals)
     missing = [ind for ind in individuals if ind not in vcf.samples]
     if missing:
@@ -601,7 +840,8 @@ def calc_covariance(
     # cyvcf2 subsets to the requested samples but does not guarantee it
     # preserves the caller's order -- remap columns back to *individuals*
     # order explicitly rather than relying on it.
-    order = [vcf.samples.index(ind) for ind in individuals]
+    sample_index = {ind: idx for idx, ind in enumerate(vcf.samples)}
+    order = [sample_index[ind] for ind in individuals]
 
     all_pos: list[int] = []
     all_rs: list[str] = []
@@ -616,16 +856,18 @@ def calc_covariance(
             continue
 
         genotypes = variant.genotypes
-        row_haps: list[int] = []
+        row_haps = [0] * n_haps
         skip = False
+        hap_col = 0
         for col in order:
             allele1, allele2, phased = genotypes[col]
             if not phased or allele1 < 0 or allele2 < 0:
                 skipped_unphased += 1
                 skip = True
                 break
-            row_haps.append(allele1)
-            row_haps.append(allele2)
+            row_haps[hap_col] = allele1
+            row_haps[hap_col + 1] = allele2
+            hap_col += 2
 
         if skip:
             continue
@@ -635,6 +877,10 @@ def calc_covariance(
         haps.append(row_haps)
 
     vcf.close()
+    if profile is not None:
+        profile["vcf_seconds"] = time.perf_counter() - vcf_start
+        profile["n_snps"] = float(len(all_pos))
+        profile["n_haps"] = float(n_haps)
 
     if skipped_unphased:
         print(
@@ -686,6 +932,8 @@ def calc_covariance(
         f"n_snps={hap_mat.shape[0]} n_haps={hap_mat.shape[1]} "
         f"seconds={time.perf_counter() - array_start:.3f}"
     )
+    if profile is not None:
+        profile["array_seconds"] = time.perf_counter() - array_start
     log_memory_checkpoint("calc_covariance_arrays_built", debug=True)
 
     pos_arr = np.array(all_pos, dtype=np.int32)
@@ -696,10 +944,31 @@ def calc_covariance(
     if compact_output and assume_sorted_unique_rows:
         write_start = time.perf_counter()
         try:
-            n_pairs = write_compact_covariance_partition_hdf5_append(
-                output_path,
-                positions=pos_arr,
-                row_chunks=_compact_pair_chunks_single_pass(
+            if ld_kernel == "bitpacked":
+                pack_start = time.perf_counter()
+                packed_hap_mat = _pack_haplotypes_impl(hap_mat)
+                if profile is not None:
+                    profile["pack_seconds"] = time.perf_counter() - pack_start
+                log_debug(
+                    "calc_covariance haplotypes_bitpacked "
+                    f"n_words={packed_hap_mat.shape[1]} "
+                    f"seconds={time.perf_counter() - pack_start:.3f}"
+                )
+                row_chunks = _compact_pair_chunks_single_pass_bitpacked(
+                    packed_hap_mat,
+                    gpos_arr,
+                    hap_sums,
+                    j_stop_by_i,
+                    pos_arr,
+                    n_haps,
+                    ne,
+                    float(n_ind),
+                    theta,
+                    cutoff,
+                    compact_chunk_rows,
+                )
+            else:
+                row_chunks = _compact_pair_chunks_single_pass(
                     hap_mat,
                     gpos_arr,
                     hap_sums,
@@ -710,10 +979,25 @@ def calc_covariance(
                     theta,
                     cutoff,
                     compact_chunk_rows,
-                ),
+                )
+                if profile is not None:
+                    profile["pack_seconds"] = 0.0
+            row_chunks = _profile_next_chunks(row_chunks, profile)
+            n_pairs = write_compact_covariance_partition_hdf5_append(
+                output_path,
+                positions=pos_arr,
+                row_chunks=row_chunks,
                 chunk_rows=compact_chunk_rows,
                 compression=compression,
             )
+            if profile is not None:
+                write_total = time.perf_counter() - write_start
+                profile["write_total_seconds"] = write_total
+                profile["write_io_seconds"] = max(
+                    0.0, write_total - profile.get("chunk_seconds", 0.0)
+                )
+                profile["n_pairs"] = float(n_pairs)
+                profile["total_seconds"] = time.perf_counter() - total_start
             dataset_chunk_rows = HDF5_DATASET_CHUNK_ROWS if n_pairs else 0
             log_debug(
                 "calc_covariance compact_hdf5_written "
@@ -721,6 +1005,7 @@ def calc_covariance(
                 f"dataset_chunk_rows={dataset_chunk_rows} "
                 f"write_chunk_rows={compact_chunk_rows} "
                 "single_pass=true "
+                f"ld_kernel={ld_kernel} "
                 f"seconds={time.perf_counter() - write_start:.3f} "
                 f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
             )

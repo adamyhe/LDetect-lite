@@ -103,6 +103,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--ld-kernel",
+        choices=("uint8", "bitpacked"),
+        default="uint8",
+        help=(
+            "Pair-count backend for compact covariance output. 'uint8' is the "
+            "established backend; 'bitpacked' uses packed haplotypes and "
+            "popcounts (default: uint8)."
+        ),
+    )
+    p.add_argument(
         "--n-snps-bw-bpoints",
         type=int,
         default=10_000,
@@ -205,6 +215,7 @@ def _calc_partition(
     cutoff: float,
     compact_output: bool,
     compression: str,
+    ld_kernel: str,
 ) -> None:
     """
     Wraps an indexed region fetch > calc_covariance so we can run as a
@@ -224,6 +235,7 @@ def _calc_partition(
         cutoff=cutoff,
         compact_output=compact_output,
         compression=compression,
+        ld_kernel=ld_kernel,
     )
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
 
@@ -288,10 +300,17 @@ def _run(args: argparse.Namespace) -> int:
     # Step 2: Calculate covariance for each partition                     #
     # ------------------------------------------------------------------ #
     compact_output = args.covariance_cache == "compact"
+    if args.ld_kernel == "bitpacked" and not compact_output:
+        print(
+            "Error: --ld-kernel bitpacked requires --covariance-cache compact",
+            file=sys.stderr,
+        )
+        return 1
     log_msg(
         "Step 2: Calculating covariance matrices "
         f"(workers={args.workers}, cache={args.covariance_cache}, "
-        f"compression={args.covariance_compression})"
+        f"compression={args.covariance_compression}, "
+        f"ld_kernel={args.ld_kernel})"
     )
     log_memory_checkpoint("step2_start")
     partitions = read_partitions(chrom, store)
@@ -330,6 +349,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.cov_cutoff,
                 compact_output,
                 args.covariance_compression,
+                args.ld_kernel,
             ): (start, end)
             for start, end in pending
         }

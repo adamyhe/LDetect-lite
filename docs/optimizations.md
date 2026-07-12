@@ -235,3 +235,17 @@ Fixed at the Snakemake level, not inside the library: every rule that invokes `l
 **Evidence this matters:** two chromosomes (AFR chr4, chr11) in a 66-row full-replication comparison initially looked like real multi-worker regressions (slower wall-clock, lower core utilization than the general trend). Traced via log timestamps to Slurm scheduling both jobs to start at the identical second — genuine machine contention, confirmed by unrelated/untouched phases (`step3`, `fourier_metric`) also running 7-8x slower under contention, and by a clean 1.7x win when AFR chr4 was re-run in isolation under a 4-CPU cap. That isolated re-run still showed a single ~1-2s sample hitting `cpu_percent_sum=1905%` on a 4-CPU allocation, timed exactly to `_run_local_search`'s `ProcessPoolExecutor` startup — consistent with BLAS/numba worker processes sizing thread pools to the full node rather than the 4-CPU allocation, and a plausible amplifier of the contention above when many such jobs share one Slurm allocation.
 
 **CLI:** no new flags; behavior is driven entirely by `--workers` and the ambient environment.
+
+---
+
+## 14. Bitpacked LD kernel (`shrinkage.py`)
+
+**Affected code:** `_pack_haplotypes_impl`, `_popcount64`, `_compact_pair_chunks_single_pass_bitpacked` in `src/ldetect_lite/shrinkage.py`; `--ld-kernel` on `ldetect run`/`ldetect calc-covariance`
+
+An alternative pair-count backend for the compact covariance cache: haplotypes are packed into `uint64` words (`_pack_haplotypes_impl`) and pairwise intersection counts are computed via popcount (`_popcount64`) over the packed words, instead of the established `uint8`-array `np.sum(a * b)` kernel. Both backends compute the same popcount-derived pair counts and feed them through the identical Wen-Stephens shrinkage formula, so outputs are expected to be exact matches, not merely close.
+
+Landed alongside a shared-arithmetic cleanup in the same hot path: `(1 - theta)^2`, the decay scale, inverse haplotype count, and diagonal adjustment are now computed once per kernel call instead of once per pair; `_genetic_stop_bounds_impl` uses a log-derived genetic-distance threshold equivalent to `exp(-scale * distance) < cutoff`, avoiding an exponential in the bounds pass (preserving the `cutoff <= 0` no-early-stop behavior); VCF/BCF sample-name remapping uses a dictionary rather than repeated `list.index()` calls, with haplotype rows preallocated before filling. These don't change output schema or the shrinkage formula.
+
+**Exactness:** verified bit-exact against the `uint8` kernel at toy scale (`tests/test_shrinkage.py`, `examples/ldetect_example/scripts/benchmark_functions.py --ld-kernel bitpacked`) — see `notes/logs/bitpacked-ld-kernel.md` for the full validation history and the genome-scale diagnostic (`examples/ldetect_original/Snakefile.ld_kernel_diagnostics`) that extends this check to real chromosome-scale 1000G data.
+
+**CLI:** `--ld-kernel {uint8,bitpacked}` on `ldetect run`/`ldetect calc-covariance` (default: `uint8`). `bitpacked` currently requires `--covariance-cache compact`.

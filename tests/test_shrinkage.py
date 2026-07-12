@@ -16,8 +16,12 @@ from ldetect_lite.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect_lite.shrinkage import (
+    _compact_pair_chunks_single_pass,
+    _compact_pair_chunks_single_pass_bitpacked,
     _count_pairwise_ld_by_i_impl,
     _genetic_stop_bounds_impl,
+    _pack_haplotypes_impl,
+    _popcount64,
     calc_covariance,
     partition_chromosome,
 )
@@ -419,6 +423,75 @@ def test_calc_covariance_compact_chunked_writer_matches_full_rows(
 
 
 @requires_htslib_tools
+def test_calc_covariance_bitpacked_compact_matches_uint8_compact(
+    tmp_path: Path,
+) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    uint8_path = tmp_path / "uint8.h5"
+    bitpacked_path = tmp_path / "bitpacked.h5"
+    calc_covariance(
+        vcf_path=_vcf_stream(tmp_path, "uint8_vcf"),
+        region=None,
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=uint8_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compact_chunk_rows=2,
+        ld_kernel="uint8",
+    )
+    calc_covariance(
+        vcf_path=_vcf_stream(tmp_path, "bitpacked_vcf"),
+        region=None,
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=bitpacked_path,
+        cutoff=1e-7,
+        compact_output=True,
+        compact_chunk_rows=2,
+        ld_kernel="bitpacked",
+    )
+
+    with open_covariance_reader(uint8_path, 100, 300) as reader:
+        uint8_rows = reader.read_all()
+        uint8_diag = reader.read_diagonal()
+        uint8_loci = reader.read_loci()
+    with open_covariance_reader(bitpacked_path, 100, 300) as reader:
+        bitpacked_rows = reader.read_all()
+        bitpacked_diag = reader.read_diagonal()
+        bitpacked_loci = reader.read_loci()
+
+    np.testing.assert_array_equal(bitpacked_rows.lo, uint8_rows.lo)
+    np.testing.assert_array_equal(bitpacked_rows.hi, uint8_rows.hi)
+    np.testing.assert_array_equal(bitpacked_rows.shrink_ld, uint8_rows.shrink_ld)
+    np.testing.assert_array_equal(bitpacked_diag[0], uint8_diag[0])
+    np.testing.assert_array_equal(bitpacked_diag[1], uint8_diag[1])
+    np.testing.assert_array_equal(bitpacked_loci, uint8_loci)
+
+
+def test_calc_covariance_bitpacked_requires_compact_output(tmp_path: Path) -> None:
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+
+    with pytest.raises(ValueError, match="requires compact_output=True"):
+        calc_covariance(
+            vcf_path=tmp_path / "unused.vcf.gz",
+            region=None,
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            output_path=tmp_path / "out.h5",
+            compact_output=False,
+            ld_kernel="bitpacked",
+        )
+
+
+@requires_htslib_tools
 def test_calc_covariance_lzf_override_matches_zstd_default(tmp_path: Path) -> None:
     """compression="lzf" must thread through to identical values as the
     zstd default -- compression is lossless, so only the codec differs."""
@@ -787,6 +860,145 @@ def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
                 expected[i] += 1
 
     np.testing.assert_array_equal(counts, expected)
+
+
+def test_pack_haplotypes_word_boundaries() -> None:
+    hap_mat = np.zeros((3, 129), dtype=np.uint8)
+    hap_mat[0, [0, 2, 3]] = 1
+    hap_mat[1, [63, 64, 65]] = 1
+    hap_mat[2, 128] = 1
+
+    packed = _pack_haplotypes_impl(hap_mat)
+
+    assert packed.dtype == np.uint64
+    assert packed.shape == (3, 3)
+    np.testing.assert_array_equal(
+        packed[0], np.array([13, 0, 0], dtype=np.uint64)
+    )
+    np.testing.assert_array_equal(
+        packed[1],
+        np.array(
+            [
+                np.uint64(1) << np.uint64(63),
+                np.uint64(3),
+                np.uint64(0),
+            ],
+            dtype=np.uint64,
+        ),
+    )
+    np.testing.assert_array_equal(
+        packed[2], np.array([0, 0, 1], dtype=np.uint64)
+    )
+
+
+@pytest.mark.parametrize("n_haps", [1, 7, 63, 64, 65, 127, 128, 129, 300])
+def test_pack_haplotypes_matches_naive_pair_counts(n_haps: int) -> None:
+    rng = np.random.default_rng(17)
+    hap_mat = rng.integers(0, 2, size=(8, n_haps), dtype=np.uint8)
+    packed = _pack_haplotypes_impl(hap_mat)
+
+    for i in range(hap_mat.shape[0]):
+        for j in range(hap_mat.shape[0]):
+            expected = int(np.sum(hap_mat[i].astype(np.int64) * hap_mat[j]))
+            actual = 0
+            for word in packed[i] & packed[j]:
+                actual += int(_popcount64(word))
+            assert actual == expected
+
+
+def test_popcount64_matches_python_bin_count() -> None:
+    words = np.array(
+        [
+            0,
+            1,
+            0xFFFFFFFFFFFFFFFF,
+            0x5555555555555555,
+            0x8000000000000000,
+            0xF0F0F0F0F0F0F0F0,
+        ],
+        dtype=np.uint64,
+    )
+
+    for word in words:
+        assert int(_popcount64(word)) == bin(int(word)).count("1")
+
+
+@pytest.mark.parametrize(
+    "n_snps,n_haps,cutoff,chunk_rows",
+    [
+        (1, 2, 0.0, 1),
+        (10, 63, 1e-7, 2),
+        (10, 64, 1e-7, 3),
+        (10, 65, 1e-7, 4),
+        (20, 128, 0.25, 5),
+        (30, 300, 10.0, 7),
+    ],
+)
+def test_bitpacked_compact_chunks_match_uint8_backend(
+    n_snps: int,
+    n_haps: int,
+    cutoff: float,
+    chunk_rows: int,
+) -> None:
+    rng = np.random.default_rng(23)
+    hap_mat = rng.integers(0, 2, size=(n_snps, n_haps), dtype=np.uint8)
+    gpos_arr = np.cumsum(rng.uniform(0.0005, 0.02, size=n_snps))
+    hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
+    pos_arr = np.arange(100, 100 + n_snps * 10, 10, dtype=np.int32)
+    ne = 11418.0
+    n_ind = float(n_haps // 2)
+    theta = 0.01
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    packed = _pack_haplotypes_impl(hap_mat)
+
+    uint8_chunks = list(
+        _compact_pair_chunks_single_pass(
+            hap_mat,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            chunk_rows,
+        )
+    )
+    bitpacked_chunks = list(
+        _compact_pair_chunks_single_pass_bitpacked(
+            packed,
+            gpos_arr,
+            hap_sums,
+            j_stop_by_i,
+            pos_arr,
+            n_haps,
+            ne,
+            n_ind,
+            theta,
+            cutoff,
+            chunk_rows,
+        )
+    )
+
+    def _concat(chunks: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not chunks:
+            return (
+                np.empty(0, dtype=np.int32),
+                np.empty(0, dtype=np.int32),
+                np.empty(0, dtype=np.float64),
+            )
+        return (
+            np.concatenate([chunk.lo for chunk in chunks]),
+            np.concatenate([chunk.hi for chunk in chunks]),
+            np.concatenate([chunk.shrink_ld for chunk in chunks]),
+        )
+
+    uint8_rows = _concat(uint8_chunks)
+    bitpacked_rows = _concat(bitpacked_chunks)
+    np.testing.assert_array_equal(bitpacked_rows[0], uint8_rows[0])
+    np.testing.assert_array_equal(bitpacked_rows[1], uint8_rows[1])
+    np.testing.assert_array_equal(bitpacked_rows[2], uint8_rows[2])
 
 
 def test_partition_chromosome_clamps_uncut_window_to_last_snp(

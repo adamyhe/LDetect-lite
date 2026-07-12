@@ -13,5 +13,6 @@ Internal working notes — not the polished public documentation (that's `README
   - `macdonald2022-pyrho-handoff.md` — full dated handoff log behind `findings/macdonald2022-reproduction.md`.
   - `macdonald2022-interpolation-port.md` — full root-cause writeup for the deCODE interval-interpolation bug.
   - `post-covariance-optimization-review.md` — post-covariance-optimization performance review and roadmap.
+  - `bitpacked-ld-kernel.md` — bitpacked popcount LD kernel (`--ld-kernel bitpacked`), toy-scale validation history, and the genome-scale exactness/timing diagnostic.
 
 The performance-optimization counterpart to this directory, `docs/optimizations.md`, lives outside `notes/` because it's human-facing reference documentation, not an internal working note.
