@@ -40,6 +40,12 @@ CLI docs (`README.md`, `docs/pipeline-steps.md`) were kept in sync with the new 
 
 **Practical implication:** `--covariance-mode chromosome` is not currently safe to use with the default `--ld-kernel uint8` for anything beyond experimentation — it's silently wrong, not just slow. It's only trustworthy today combined with `--ld-kernel bitpacked`, which itself isn't the default and isn't yet genome-scale-validated (see above). Neither combination should be recommended to end users yet.
 
+## Full-genome exactness diagnostic added, with a division of labor vs. the existing benchmark
+
+Added `examples/ldetect_original/Snakefile.ld_kernel_diagnostics` (+ `ld_kernel_diagnostics.yaml`, `scripts/compare_ld_kernel.py`) as the canonical genome-scale `uint8`-vs-`bitpacked` exactness check: runs the real `ldetect run` CLI end to end across all three 1000G populations by default, `--covariance-mode partition` only (chromosome mode intentionally excluded — see above), and compares final vector/breakpoints/BED, not just covariance rows.
+
+This overlaps substantially with the pre-existing `benchmarks/bench_bitpacked_full_genome.py`, which already did a full-genome `uint8`-vs-`bitpacked` exactness+speed comparison — just scoped to covariance-partition rows (via direct `calc_covariance` calls, one population per run) rather than full pipeline output through the CLI. Rather than duplicate two overlapping full-genome checks, resolved to: the Snakefile is now the canonical full-dataset exactness diagnostic (documented in both `benchmarks/README.md` and the benchmark script's own docstring); `bench_bitpacked_full_genome.py` stays for what the Snakefile doesn't do — per-stage timing/RSS breakdowns and quick smoke checks without Snakemake. Also noted there: `bench_bitpacked_full_genome.py`'s `--include-chromosome-mode` path (`time_calc_covariance_from_genotypes`) hardcodes `ld_kernel="bitpacked"` and has never covered chromosome-mode + `uint8` — consistent with why that inexactness gap wasn't caught by existing benchmark infra.
+
 ## Heads up: a separate, unmerged branch explores the same space
 
 `ld-kernel-bitpack-benchmark` (local + `origin`) diverged earlier (before `885144c`) and independently explored "row-vectorized, chunked-matmul, bit-packed popcount" kernel prototypes plus an unrelated "signal cache" HDF5 sidecar feature. It is neither an ancestor nor descendant of `covariance-optimization`. Worth diffing against before doing more kernel-prototype work here, to avoid re-deriving what that branch already tried.

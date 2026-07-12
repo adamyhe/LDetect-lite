@@ -30,3 +30,15 @@ breakpoint search, and BED extraction, and writes:
 
 Use `--ld-kernel bitpacked` to benchmark the compact bitpacked covariance
 backend.
+
+## Bitpacked LD kernel, full-genome scale
+
+`bench_bitpacked_full_genome.py` downloads real 1000G data and compares the
+`uint8` and `bitpacked` LD kernels at the covariance-partition layer only
+(exactness of `lo`/`hi`/`shrink_ld`/diagonal rows, plus per-stage timing and
+RSS profiling). For full-dataset *pipeline-output* exactness (vector,
+breakpoints, BED, across all three populations, via the actual `ldetect run`
+CLI), use `examples/ldetect_original/Snakefile.ld_kernel_diagnostics`
+instead — see that directory's README. The two are complementary: the
+Snakefile is the canonical exactness check; this script is for fine-grained
+per-stage timing.
