@@ -75,6 +75,45 @@ Diffing the loci sets for partition 14 directly: partition mode includes 2 extra
 
 **Updated practical implication (supersedes the "Practical implication" paragraph above):** `--covariance-mode chromosome` is not shown to be wrong for either kernel. The exactness question that's actually open is the reverse of what was originally suspected: whether partition mode's SV/long-indel boundary over-inclusion should be fixed, and if so, whether that changes any existing partition-mode-derived output (including the reproduction-status results). `chromosome` mode still isn't the default and still has no parallelism (gap #1 above still stands), so there's no urgency to flip defaults — but it should no longer be treated as "silently wrong."
 
+## Fixed: chromosome mode now matches partition mode's span-based boundary handling (2026-07-12, later)
+
+Decided to close the gap flagged above by changing the newer side (chromosome mode) rather than partition mode: partition mode's span-based over-inclusion is the long-standing default behind every existing production/reproduction run, so it stays as-is; chromosome mode is the newer, still-non-default path, so it's the one that should stop diverging.
+
+`load_chromosome_genotypes` now records each retained variant's span end (`_variant_span_end`: `POS + len(REF) - 1`, maxed against `INFO/END` if present — the same span computation `scripts/audit_boundary_spanning_variants.py` on `sv-boundary-diagnostics` uses) alongside `positions`, plus the chromosome-wide `max_span_extension = max(span_end - pos)`. `calc_covariance_from_genotypes` still does its `np.searchsorted` slice for `[start, end]`, but now also calls `_boundary_spanning_extra_indices` to pull in any earlier-POS record whose span still reaches `start` — bounded to a `max_span_extension`-wide window so the extra scan stays cheap even on a full chromosome instead of degrading to an O(n) walk back to the start of the array. When no variant in the chromosome has a span longer than its own `POS` (i.e. no SVs/long indels at all — the common case), `max_span_extension == 0` and the original zero-copy slice path is untouched.
+
+Verified with a synthetic 150bp-deletion fixture (`tests/test_shrinkage.py::test_calc_covariance_from_genotypes_includes_boundary_spanning_variant`): partition mode's region read for `1:200-300` and chromosome mode's `calc_covariance_from_genotypes(genotypes, 200, 300, ...)` now report the identical locus set, including the deletion's `POS=100` row that chromosome mode previously excluded. Two direct unit tests on `_boundary_spanning_extra_indices` cover the reaching-span and no-spanning-variant cases. Full suite: 278 passed.
+
+Not re-run against real chr22 EUR data yet to confirm the original 3-partition mismatch from `bench_bitpacked_full_genome.py --include-chromosome-mode` is now gone — the synthetic fixture exercises the same code path, but a real-data confirmation is the natural next check before trusting this for a genome-wide run.
+
+## Closed, negative: parallelizing chromosome mode's partition loop still loses to partition mode (2026-07-12, real chr22 EUR data)
+
+Gap #1 above ("no parallelism") was never actually built — profiled the existing serial chromosome mode on real data first to see if it was even worth building. It isn't.
+
+**Setup:** `uv run ldetect run --covariance-mode chromosome --ld-kernel bitpacked --profile-covariance ... ` on real chr22/EUR 1000G data (`results/filtered_vcf/EUR/ALL.chr22...population-polymorphic.vcf.gz`, produced via the main `Snakefile`'s `filter_vcf` target), plus a `time`-wrapped `--covariance-mode partition --ld-kernel bitpacked --workers 8` run on the same data for a baseline. First attempt used `--workers 1` for the chromosome-mode run (to silence the "processes this chromosome serially" warning) vs. `--workers 8` for partition mode — a confound, since `--workers` also sets the default for `--matrix-workers`/`--local-search-workers`/`--metric-workers` (steps 3-5), so it wasn't an apples-to-apples comparison. Re-ran chromosome mode with `--workers 8` to match.
+
+**Results** (`results/EUR-chr22-chromosome-mode.tsv`, 98 partitions):
+
+| | seconds |
+|---|---|
+| chromosome load (`prepare`+`vcf`+`dedupe`+`array`+`pack`) | 37.18 |
+| — of which `vcf_seconds` alone | 32.91 |
+| sum of 98 partitions' `total_seconds` | 23.81 |
+| — of which `write_io_seconds` | 16.63 |
+| — of which `chunk_seconds` (LD kernel) | 6.97 |
+| full pipeline wall-clock, chromosome mode, `--workers 1` | 123.14 |
+| full pipeline wall-clock, chromosome mode, `--workers 8` | 102.33 |
+| full pipeline wall-clock, partition mode, `--workers 8` | 55.58 |
+
+Backing out non-covariance-step time (steps 1, 3-5) from the `--workers 8` chromosome-mode total using the profiled step-2 estimate (37.18+23.81≈60.99s): non-covariance ≈ 102.33-60.99 ≈ 41.3s. Applying that same non-covariance estimate to the partition-mode total implies partition mode's own step 2 (covariance, parallelized across 8 workers, real per-partition VCF region reads and all) costs only ≈55.58-41.3 ≈ **14.3s**.
+
+The best case for parallelizing chromosome mode's partition loop across 8 workers, keeping the load serial: 37.18 + 23.81/8 ≈ **40.2s** — still **~2.8x slower** than partition mode's real 14.3s, because the fixed serial chromosome load (dominated by `vcf_seconds`, the per-variant/per-sample Python genotype-extraction loop over the whole chromosome) is on its own bigger than partition mode's entire parallelized step 2. No amount of parallelizing the downstream partition loop touches that load cost.
+
+**This overturns the premise that motivated chromosome mode.** `docs/optimizations.md` and the "What's been added" section above frame per-partition VCF/BCF region reads as a major cost chromosome mode avoids. On real chr22/EUR data the opposite holds: 98 small tabix-indexed region fetches (partition mode), parallelized across 8 workers, are cheaper in aggregate than one sequential full-chromosome parse (chromosome mode) even before dividing that parse by anything. The per-region fetch overhead this was meant to avoid is cheap; the actually-expensive thing is `load_chromosome_genotypes`'s serial per-variant/per-sample loop.
+
+**Conclusion: don't build parallelism for chromosome mode.** It's structurally capped well below partition mode's current performance regardless of worker count. If chromosome mode is worth salvaging at all, the lever is cutting `vcf_seconds` itself (vectorizing or otherwise speeding up genotype extraction in `load_chromosome_genotypes`), not the downstream partition processing — not attempted here. Gap #1 in the "Two confirmed gaps" section above is now answered (parallelism isn't worth adding), separate from gap #2 (the still-unresolved `uint8`-specific chromosome-mode exactness bug), which remains open and unrelated to this finding.
+
+**Caveat:** measured on one chromosome/population (chr22/EUR) only. The ~2.8x gap plausibly holds or widens on larger chromosomes (bigger `vcf_seconds`), since chromosome mode's load cost scales with chromosome size while partition mode's region-fetch overhead per partition stays roughly fixed — but that's not measured here, and this doesn't need re-checking unless chromosome mode is revisited.
+
 ## Heads up: a separate, unmerged branch explores the same space
 
 `ld-kernel-bitpack-benchmark` (local + `origin`) diverged earlier (before `885144c`) and independently explored "row-vectorized, chunked-matmul, bit-packed popcount" kernel prototypes plus an unrelated "signal cache" HDF5 sidecar feature. It is neither an ancestor nor descendant of `covariance-optimization`. Worth diffing against before doing more kernel-prototype work here, to avoid re-deriving what that branch already tried.

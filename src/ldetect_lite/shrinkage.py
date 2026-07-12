@@ -38,6 +38,8 @@ class ChromosomeGenotypes:
     n_haplotypes: int
     haplotypes_uint8: np.ndarray | None = None
     haplotypes_packed: np.ndarray | None = None
+    span_ends: np.ndarray | None = None
+    max_span_extension: int = 0
 
 # ---------------------------------------------------------------------------
 # Pairwise LD kernel (Numba-accelerated)
@@ -682,6 +684,22 @@ def _theta_from_haplotypes(n_haps: int) -> float:
     return (1.0 / harmonic) / (n_haps + 1.0 / harmonic)
 
 
+def _variant_span_end(variant: Any) -> int:
+    """The last base a VCF record covers, matching htslib's region-overlap span.
+
+    htslib's region fetch (used by ``calc_covariance``'s ``vcf(region)`` read)
+    matches records by span overlap, not by ``POS`` alone: ``[POS, span_end]``
+    where ``span_end`` is ``INFO/END`` for a symbolic ALT (e.g. ``<DEL>``) or
+    ``POS + len(REF) - 1`` otherwise. For an ordinary SNP this is just ``POS``;
+    for a structural variant or long indel it can reach far past ``POS``.
+    """
+    end = variant.POS + len(variant.REF) - 1
+    info_end = variant.INFO.get("END")
+    if info_end is not None:
+        end = max(end, int(info_end))
+    return end
+
+
 def load_chromosome_genotypes(
     vcf_path: Path,
     chrom: str,
@@ -696,7 +714,10 @@ def load_chromosome_genotypes(
     The filtering intentionally matches :func:`calc_covariance`: requested
     individuals only, phased non-missing bi-allelic genotypes only, positions
     present in the genetic map, and first record retained for duplicate
-    physical positions.
+    physical positions. Also records each retained variant's span end (see
+    :func:`_variant_span_end`), which :func:`calc_covariance_from_genotypes`
+    uses to match the region-overlap semantics of ``calc_covariance``'s
+    htslib-backed region read for structural variants and long indels.
     """
     if storage not in {"uint8", "packed"}:
         raise ValueError("storage must be one of: uint8, packed")
@@ -721,6 +742,7 @@ def load_chromosome_genotypes(
     order = [sample_index[ind] for ind in individuals]
 
     all_pos: list[int] = []
+    all_span_end: list[int] = []
     haps: list[list[int]] = []
     skipped_unphased = 0
     for variant in vcf(chrom):
@@ -745,6 +767,7 @@ def load_chromosome_genotypes(
         if skip:
             continue
         all_pos.append(pos)
+        all_span_end.append(_variant_span_end(variant))
         haps.append(row_haps)
 
     vcf.close()
@@ -763,15 +786,18 @@ def load_chromosome_genotypes(
     if all_pos:
         seen_positions: set[int] = set()
         unique_pos: list[int] = []
+        unique_span_end: list[int] = []
         unique_haps: list[list[int]] = []
-        for pos, row_haps in zip(all_pos, haps, strict=True):
+        for pos, span_end, row_haps in zip(all_pos, all_span_end, haps, strict=True):
             if pos in seen_positions:
                 duplicate_positions += 1
                 continue
             seen_positions.add(pos)
             unique_pos.append(pos)
+            unique_span_end.append(span_end)
             unique_haps.append(row_haps)
         all_pos = unique_pos
+        all_span_end = unique_span_end
         haps = unique_haps
     if profile is not None:
         profile["dedupe_seconds"] = time.perf_counter() - dedupe_start
@@ -785,6 +811,10 @@ def load_chromosome_genotypes(
 
     array_start = time.perf_counter()
     positions = np.asarray(all_pos, dtype=np.int32)
+    span_ends = np.asarray(all_span_end, dtype=np.int64)
+    max_span_extension = (
+        int(np.max(span_ends - positions)) if span_ends.size else 0
+    )
     genetic_positions = np.asarray(
         [pos2gpos[p] for p in all_pos], dtype=np.float64
     )
@@ -820,7 +850,31 @@ def load_chromosome_genotypes(
         n_haplotypes=n_haps,
         haplotypes_uint8=stored_haplotypes_uint8,
         haplotypes_packed=haplotypes_packed,
+        span_ends=span_ends,
+        max_span_extension=max_span_extension,
     )
+
+
+def _boundary_spanning_extra_indices(
+    genotypes: ChromosomeGenotypes, start: int, left: int
+) -> list[int]:
+    """Indices before *left* whose span still reaches into ``start``.
+
+    Mirrors ``calc_covariance``'s htslib-backed region read: a record whose
+    own ``POS`` precedes a partition's *start* but whose span (see
+    ``_variant_span_end``) reaches at least *start* is pulled into that
+    partition too, even though a plain ``POS``-based slice would exclude it.
+    Bounded by the chromosome's ``max_span_extension`` so the scan window
+    stays small regardless of chromosome size.
+    """
+    if left == 0 or genotypes.max_span_extension <= 0 or genotypes.span_ends is None:
+        return []
+    window_start = start - genotypes.max_span_extension
+    scan_from = int(
+        np.searchsorted(genotypes.positions, window_start, side="left")
+    )
+    span_ends = genotypes.span_ends
+    return [i for i in range(scan_from, left) if span_ends[i] >= start]
 
 
 def calc_covariance_from_genotypes(
@@ -836,7 +890,15 @@ def calc_covariance_from_genotypes(
     ld_kernel: Literal["uint8", "bitpacked"] = "bitpacked",
     profile: dict[str, float] | None = None,
 ) -> None:
-    """Write one compact covariance partition from prepared chromosome arrays."""
+    """Write one compact covariance partition from prepared chromosome arrays.
+
+    ``[start, end]`` selection matches ``calc_covariance``'s default
+    region-based read: a structural variant or long indel whose own ``POS``
+    precedes *start* but whose span reaches into ``[start, end]`` is included
+    too (see ``_boundary_spanning_extra_indices``), so a boundary-spanning
+    variant is duplicated into both adjacent partitions in the same way for
+    either covariance mode.
+    """
     if ld_kernel not in {"uint8", "bitpacked"}:
         raise ValueError("ld_kernel must be one of: uint8, bitpacked")
     if ld_kernel == "bitpacked" and genotypes.haplotypes_packed is None:
@@ -848,16 +910,27 @@ def calc_covariance_from_genotypes(
     slice_start = time.perf_counter()
     left = int(np.searchsorted(genotypes.positions, start, side="left"))
     right = int(np.searchsorted(genotypes.positions, end, side="right"))
-    pos_arr = genotypes.positions[left:right]
-    gpos_arr = genotypes.genetic_positions[left:right]
-    hap_sums = genotypes.hap_sums[left:right]
+    extra_indices = _boundary_spanning_extra_indices(genotypes, start, left)
+    sel: slice | np.ndarray
+    if extra_indices:
+        sel = np.concatenate(
+            [
+                np.asarray(extra_indices, dtype=np.int64),
+                np.arange(left, right, dtype=np.int64),
+            ]
+        )
+    else:
+        sel = slice(left, right)
+    pos_arr = genotypes.positions[sel]
+    gpos_arr = genotypes.genetic_positions[sel]
+    hap_sums = genotypes.hap_sums[sel]
     if ld_kernel == "bitpacked":
         assert genotypes.haplotypes_packed is not None
-        packed_hap_mat = genotypes.haplotypes_packed[left:right]
+        packed_hap_mat = genotypes.haplotypes_packed[sel]
         hap_mat = None
     else:
         assert genotypes.haplotypes_uint8 is not None
-        hap_mat = genotypes.haplotypes_uint8[left:right]
+        hap_mat = genotypes.haplotypes_uint8[sel]
         packed_hap_mat = None
     if profile is not None:
         profile["slice_seconds"] = time.perf_counter() - slice_start

@@ -16,6 +16,8 @@ from ldetect_lite.io.covariance_hdf5 import (
     open_covariance_reader,
 )
 from ldetect_lite.shrinkage import (
+    ChromosomeGenotypes,
+    _boundary_spanning_extra_indices,
     _compact_pair_chunks_single_pass,
     _compact_pair_chunks_single_pass_bitpacked,
     _count_pairwise_ld_by_i_impl,
@@ -530,6 +532,104 @@ def test_calc_covariance_from_genotypes_matches_region_bitpacked(
     np.testing.assert_array_equal(prepared_diag[0], region_diag[0])
     np.testing.assert_array_equal(prepared_diag[1], region_diag[1])
     np.testing.assert_array_equal(prepared_loci, region_loci)
+
+
+def _boundary_spanning_deletion_vcf_stream(tmp_path: Path, name: str = "svspan") -> Path:
+    """A 150bp deletion at POS=100 (span end 249) plus ordinary SNPs at 200
+    and 300. The deletion's own POS precedes 200, but its span reaches past
+    it -- exercising htslib's span-based region-overlap matching."""
+    ref_150 = "A" * 150
+    return _write_indexed_vcf(
+        tmp_path,
+        name,
+        [
+            *_VCF_HEADER,
+            f"1\t100\tesv_span\t{ref_150}\tA\t.\tPASS\t.\tGT\t0|1\t0|0",
+            "1\t200\trs_c\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|1",
+            "1\t300\trs_d\tA\tG\t.\tPASS\t.\tGT\t1|1\t0|1",
+        ],
+    )
+
+
+@requires_htslib_tools
+def test_calc_covariance_from_genotypes_includes_boundary_spanning_variant(
+    tmp_path: Path,
+) -> None:
+    """Chromosome mode must include a boundary-spanning SV/indel in a later
+    partition exactly when partition mode's htslib-backed region read would,
+    so the two covariance modes don't diverge on real 1000G SV/indel data
+    (see notes/logs/covariance-bitpacked-kernel-and-chromosome-mode.md)."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = _boundary_spanning_deletion_vcf_stream(tmp_path)
+
+    region_path = tmp_path / "region.h5"
+    calc_covariance(
+        vcf_path=vcf_path,
+        region="1:200-300",
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=region_path,
+        cutoff=1e-7,
+        compact_output=True,
+        ld_kernel="bitpacked",
+    )
+    with open_covariance_reader(region_path, 100, 300) as reader:
+        region_loci = reader.read_loci()
+    assert 100 in region_loci  # sanity: htslib's span match pulls the SV in
+
+    genotypes = load_chromosome_genotypes(
+        vcf_path=vcf_path,
+        chrom="1",
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        storage="packed",
+    )
+    chromosome_path = tmp_path / "chromosome.h5"
+    calc_covariance_from_genotypes(
+        genotypes,
+        200,
+        300,
+        chromosome_path,
+        cutoff=1e-7,
+        ld_kernel="bitpacked",
+    )
+    with open_covariance_reader(chromosome_path, 100, 300) as reader:
+        chromosome_loci = reader.read_loci()
+
+    np.testing.assert_array_equal(chromosome_loci, region_loci)
+
+
+def test_boundary_spanning_extra_indices_finds_reaching_span() -> None:
+    genotypes = ChromosomeGenotypes(
+        chrom="1",
+        positions=np.array([100, 150, 200, 300], dtype=np.int32),
+        genetic_positions=np.array([0.0, 0.0005, 0.001, 0.002]),
+        hap_sums=np.zeros(4),
+        n_individuals=1,
+        n_haplotypes=2,
+        span_ends=np.array([249, 150, 200, 300], dtype=np.int64),
+        max_span_extension=149,
+    )
+    left = int(np.searchsorted(genotypes.positions, 200, side="left"))
+    assert _boundary_spanning_extra_indices(genotypes, 200, left) == [0]
+
+
+def test_boundary_spanning_extra_indices_empty_without_spanning_variant() -> None:
+    genotypes = ChromosomeGenotypes(
+        chrom="1",
+        positions=np.array([100, 150, 200, 300], dtype=np.int32),
+        genetic_positions=np.array([0.0, 0.0005, 0.001, 0.002]),
+        hap_sums=np.zeros(4),
+        n_individuals=1,
+        n_haplotypes=2,
+        span_ends=np.array([100, 150, 200, 300], dtype=np.int64),
+        max_span_extension=0,
+    )
+    left = int(np.searchsorted(genotypes.positions, 200, side="left"))
+    assert _boundary_spanning_extra_indices(genotypes, 200, left) == []
 
 
 def test_calc_covariance_bitpacked_requires_compact_output(tmp_path: Path) -> None:
