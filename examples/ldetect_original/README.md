@@ -381,11 +381,14 @@ Run it for real:
 uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 8
 ```
 
-Smoke-test a smaller subset instead of the full genome:
+Smoke-test a smaller subset instead of the full genome. `--config` merges
+into `chromosomes_by_population` key by key, so a population left out of the
+override keeps its full 1-22 default — override every population you want
+restricted, or the "smoke test" will still run the others genome-wide:
 
 ```bash
 uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 4 \
-  --config chromosomes_by_population='{EUR: [11, 22]}'
+  --config chromosomes_by_population='{EUR: [22], AFR: [22], ASN: [22]}'
 ```
 
 Outputs:

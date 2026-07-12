@@ -24,8 +24,12 @@ Usage:
     cd examples/ldetect_original/
     uv run snakemake -s Snakefile.compression_diagnostics -n
     uv run snakemake -s Snakefile.compression_diagnostics --cores 8
+
+    # --config merges into chromosomes_by_population key by key -- a
+    # population left out of the override keeps its full 1-22 default, so
+    # override every population you want restricted:
     uv run snakemake -s Snakefile.compression_diagnostics --cores 8 \
-        --config chromosomes_by_population='{EUR: [11, 22]}'
+        --config chromosomes_by_population='{EUR: [22], AFR: [22], ASN: [22]}'
 """
 
 from pathlib import Path
