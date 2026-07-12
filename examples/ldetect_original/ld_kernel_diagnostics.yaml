@@ -1,0 +1,38 @@
+# Chromosomes to diagnose per population. Default: the FULL 22-chromosome,
+# 3-population 1000G dataset -- exactness of the bitpacked LD kernel is only
+# a meaningful claim once checked against every chromosome/population, not
+# just a toy fixture. Intended for remote/cluster execution given the
+# compute cost; override with e.g.
+# `--config chromosomes_by_population='{EUR: [11, 22]}'` for a smoke test.
+chromosomes_by_population:
+  EUR: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  AFR: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  ASN: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+subset: fourier_ls
+
+# Boundary-match tolerance (bp) for the uint8-vs-bitpacked BED comparison.
+# The bitpacked kernel is expected to reproduce the exact same shrinkage LD
+# values as uint8 (same popcount-derived pair counts, same formula), so this
+# compares two of our own runs against each other on identical input data --
+# 0 checks for exact breakpoint agreement.
+tolerance: 0
+
+# Keep internal ldetect-lite parallelism conservative unless actively
+# profiling on a high-memory machine; this only affects Step 2/Step 4
+# parallelism inside each mode's `ldetect run` invocation, not which modes
+# run concurrently (see ldetect_job_threads below).
+covariance_cache: compact
+workers: 4
+
+# Both modes always run with --covariance-mode partition (the default).
+# Chromosome-grouped covariance runs are not exercised here: chromosome mode
+# has a known, unresolved exactness gap with the uint8 kernel and no
+# parallelism of its own (see
+# notes/logs/covariance-bitpacked-kernel-and-chromosome-mode.md) -- it stays
+# off until that's verified in small tests.
+
+# Snakemake scheduling guard: this rule claims many threads so `--cores 8`
+# still runs only one heavy chromosome x mode job at a time. ldetect-lite
+# itself still receives workers/local_search_workers above.
+ldetect_job_threads: 4

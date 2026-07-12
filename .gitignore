@@ -95,6 +95,9 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Internal working drafts, not for commit
+docs/application-note.md
+
 # PyBuilder
 .pybuilder/
 target/

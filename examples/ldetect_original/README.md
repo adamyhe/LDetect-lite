@@ -337,6 +337,70 @@ Outputs:
 - `results/compression_diagnostics/summary.tsv` — all comparison rows
   concatenated.
 
+## LD-Kernel Diagnostic Workflow
+
+`Snakefile.ld_kernel_diagnostics` measures the exactness and performance of
+the experimental bitpacked LD kernel (`--ld-kernel bitpacked`) against the
+established `uint8` kernel, on real 1000G data. For each configured
+chromosome x population, it runs `ldetect run` twice on identical filtered
+input — once with `--ld-kernel uint8` (the default) and once with
+`--ld-kernel bitpacked` — then compares the two runs':
+
+- **vector/breakpoints/BED**: row count, sha256 digest, exact loci match, and
+  BED boundary recall/precision/Jaccard at `tolerance` bp (default `0`). The
+  bitpacked kernel computes the same popcount-derived pair counts as `uint8`
+  through the same shrinkage formula, so these are expected to match exactly
+  — any divergence here indicates a real bug, not floating-point noise from a
+  different computation order;
+- **covariance directory size**: total bytes of every `.h5` partition under
+  each mode's covariance directory, plus the size ratio and percent
+  reduction;
+- **performance**: wall-clock seconds and peak RSS from each mode's
+  Snakemake `benchmark:` record, plus the speedup/reduction ratios.
+
+Both modes always run with `--covariance-mode partition` (the default).
+**Chromosome-grouped covariance runs are intentionally out of scope for this
+diagnostic** — chromosome mode has an unresolved exactness gap with the
+`uint8` kernel and no parallelism of its own (see
+`notes/logs/covariance-bitpacked-kernel-and-chromosome-mode.md`), and stays
+off until that's verified in small tests.
+
+This defaults to the **full 22-chromosome, 3-population dataset**, since
+exactness of the bitpacked kernel is only a meaningful claim once checked
+genome-wide — run it on a remote server/cluster given the compute cost.
+
+Dry-run the default (full-genome) diagnostic:
+
+```bash
+uv run snakemake -s Snakefile.ld_kernel_diagnostics -n
+```
+
+Run it for real:
+
+```bash
+uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 8
+```
+
+Smoke-test a smaller subset instead of the full genome:
+
+```bash
+uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 4 \
+  --config chromosomes_by_population='{EUR: [11, 22]}'
+```
+
+Outputs:
+
+- `results/ld_kernel_diagnostics/{population}/{chrom}/{baseline,bitpacked}/` —
+  each mode's full `ldetect run` output directory, including its covariance
+  partitions under `{mode}/{chrom}/`.
+- `results/ld_kernel_diagnostics/{population}/{chrom}/logs/{mode}.benchmark.tsv` —
+  Snakemake's wall-clock/peak-memory record for that mode.
+- `results/ld_kernel_diagnostics/{population}/{chrom}/compare/ld_kernel_vs_baseline.tsv` —
+  one row combining the exactness, size, and performance comparison for that
+  chromosome x population.
+- `results/ld_kernel_diagnostics/summary.tsv` — all comparison rows
+  concatenated.
+
 ## Resource Profiling
 
 Two scripts under `scripts/` turn this replication's resource usage into

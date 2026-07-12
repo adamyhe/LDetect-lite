@@ -13,6 +13,23 @@ It also samples process RSS during each covariance call; with
 ``--include-chromosome-mode`` it reports chromosome-load peak RSS, retained
 packed-cache bytes, and per-partition chromosome-mode RSS.
 
+**Superseded for full-dataset exactness validation.**
+``examples/ldetect_original/Snakefile.ld_kernel_diagnostics`` is now the
+canonical genome-scale ``uint8``-vs-``bitpacked`` exactness diagnostic: it
+runs the actual ``ldetect run`` CLI end to end (not just ``calc_covariance``)
+across all three 1000G populations by default and compares the final
+vector/breakpoints/BED, not just covariance-partition rows. Prefer that
+Snakefile when the goal is "does the bitpacked kernel change pipeline
+output." This script remains useful for what the Snakefile doesn't do:
+fine-grained per-stage timing/RSS profiling (prepare/VCF/array/pack/write
+seconds) at the covariance layer, and quick single-population/small-scale
+smoke checks without a Snakemake setup. Its ``--include-chromosome-mode``
+path only ever exercises chromosome mode with ``ld_kernel="bitpacked"`` (see
+``time_calc_covariance_from_genotypes``) -- it does not, and has never,
+covered the chromosome-mode + ``uint8`` combination that
+``notes/logs/covariance-bitpacked-kernel-and-chromosome-mode.md`` documents
+as inexact.
+
 Examples:
 
     uv run python benchmarks/bench_bitpacked_full_genome.py --population EUR
