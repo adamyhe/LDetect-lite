@@ -2,8 +2,13 @@
 # 3-population 1000G dataset (unlike signal_cache_diagnostics.yaml's chr22
 # smoke test) -- this diagnostic's real purpose is a comprehensive
 # storage-size comparison, which is only meaningful at full-genome scale.
-# Intended for remote/cluster execution given the compute cost; override with
-# e.g. `--config chromosomes_by_population='{EUR: [11, 22]}'` for a smoke test.
+# Intended for remote/cluster execution given the compute cost; override for
+# a smoke test with e.g.
+# `--config chromosomes_by_population='{EUR: [22], AFR: [22], ASN: [22]}'`.
+# Snakemake's --config merges into this dict key by key, so a population you
+# omit from the override keeps its full 1-22 default here -- override every
+# population you want restricted, or the "smoke test" still runs the others
+# genome-wide.
 chromosomes_by_population:
   EUR: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
   AFR: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
