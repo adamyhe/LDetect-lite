@@ -233,11 +233,22 @@ Outputs:
   metrics split by comparison.
 - `results/provenance_diagnostics/filtered_vcf/{source}/{filter}/{POP}/`: the
   staged population-specific filtered VCFs used for comparison.
+- `results/provenance_diagnostics/sv_attribute_comparison_summary.tsv`: SV/
+  long-indel span-attribute (`POS`/`END`) comparisons by variant ID between
+  `v3/all` and each `all`-filter candidate (SNP-only candidates are skipped —
+  there are no SVs left in them to compare). Added alongside the SV/indel
+  partition-boundary-duplication investigation (see
+  `notes/findings/ldetect-original-reproduction.md`): the position/LD checks
+  above only compare SNP-level signals and found release version isn't a
+  differentiator; SV span attributes are a distinct, less-stable attribute
+  class those checks can't see, and are exactly what determines whether that
+  duplication mechanism fires for a given SV. Per-comparison detail in
+  `results/provenance_diagnostics/{POP}/chr{N}/sv_attributes/*.tsv`.
 
 This workflow is intentionally input-focused. If one candidate produces a
-position-set change concentrated in the divergent chromosomes, rerun that
-candidate through `Snakefile.diagnostics` or the main workflow before launching
-larger release-matrix runs.
+position-set change (or an SV span-attribute change) concentrated in the
+divergent chromosomes, rerun that candidate through `Snakefile.diagnostics` or
+the main workflow before launching larger release-matrix runs.
 
 ## Legacy Diagnostic Workflow
 

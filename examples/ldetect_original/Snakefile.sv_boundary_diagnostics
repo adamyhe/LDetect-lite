@@ -31,6 +31,22 @@ a loose 100kb tolerance (sanity check -- should stay matching) and an exact
 `snps_only` directly against `all` to quantify how much the filter itself
 moves boundaries.
 
+**This blunt test came back negative** (see
+`notes/findings/ldetect-original-reproduction.md`): `snps_only` regresses
+the match everywhere checkable, including previously-exact control
+chromosomes, because it also discards legitimate SV signal the original's
+own published blocks were computed with. So this workflow additionally runs
+a second, surgical A/B test on the `all` mode's real input: `ldetect run
+--strict-region-bounds` (see `shrinkage.py::calc_covariance`) adds the
+explicit `POS` bound the original never had, removing only the
+spuriously-duplicated rows without discarding any legitimate SV. The primary
+question is `boundary_fix_vs_unfixed_tol0` -- does the fix change *our own*
+output at all; if not, the mechanism isn't perturbing anything material in
+this pipeline's current runs and the whole line is likely dead. Only if it
+does change our own output does `boundary_fix_{fixed,unfixed}_vs_ref_*`
+(does the fixed version match the reference better) become a meaningful
+question.
+
 Usage:
     cd examples/ldetect_original/
     uv run snakemake -s Snakefile.sv_boundary_diagnostics -n
@@ -96,6 +112,11 @@ rule all:
         svb_targets("compare/all_vs_ref_tol100000.tsv"),
         svb_targets("compare/snps_only_vs_ref_tol100000.tsv"),
         svb_targets("compare/snps_only_vs_all_tol0.tsv"),
+        svb_targets("compare/boundary_fix_vs_unfixed_tol0.tsv"),
+        svb_targets("compare/boundary_fix_fixed_vs_ref_tol0.tsv"),
+        svb_targets("compare/boundary_fix_unfixed_vs_ref_tol0.tsv"),
+        svb_targets("compare/boundary_fix_fixed_vs_ref_tol100000.tsv"),
+        svb_targets("compare/boundary_fix_unfixed_vs_ref_tol100000.tsv"),
         str(SVB_ROOT / "summary.tsv"),
         str(SVB_ROOT / "boundary_audit_summary.tsv"),
 
@@ -321,6 +342,131 @@ rule svb_boundary_audit_summary:
 
 
 # ---------------------------------------------------------------------------
+# The actual causal test: run `ldetect run` on the `all` mode's real
+# (unfiltered-by-type) input, once with the historical behavior and once
+# with `--strict-region-bounds` (the surgical fix -- see shrinkage.py's
+# calc_covariance). This isolates the duplication artifact by itself,
+# unlike snps_only above, which also discards legitimate SV signal.
+# Primary question: does the fix change OUR OWN output at all
+# (svb_compare_fix_vs_unfixed)? Secondary: does the fixed version match the
+# published reference better (svb_compare_boundary_fix_vs_ref)?
+# ---------------------------------------------------------------------------
+
+
+FIX_FLAG = {"unfixed": "", "fixed": "--strict-region-bounds"}
+
+wildcard_constraints:
+    fix="unfixed|fixed",
+
+
+rule svb_run_ldetect_boundary_fix:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=str(SVB_ROOT / "{population}" / "{chrom}" / "all" / "input.vcf.gz"),
+        tbi=str(SVB_ROOT / "{population}" / "{chrom}" / "all" / "input.vcf.gz.tbi"),
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(
+            SVB_ROOT / "{population}" / "{chrom}" / "boundary_fix" / "{fix}" / "{chrom}-ld-blocks.bed"
+        ),
+    log:
+        run=str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "boundary_fix_{fix}.log"),
+        timing=str(
+            SVB_ROOT / "{population}" / "{chrom}" / "logs" / "boundary_fix_{fix}.timing.log"
+        ),
+    benchmark:
+        str(SVB_ROOT / "{population}" / "{chrom}" / "logs" / "boundary_fix_{fix}.benchmark.tsv")
+    threads: config.get("ldetect_job_threads", config.get("workers", 4))
+    params:
+        output_dir=lambda wc: str(SVB_ROOT / wc.population / wc.chrom / "boundary_fix" / wc.fix),
+        log_dir=str(SVB_ROOT / "{population}" / "{chrom}" / "logs"),
+        ne=lambda wildcards: pop_ne(wildcards.population),
+        cutoff=config["cov_cutoff"],
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        fix_flag=lambda wc: FIX_FLAG[wc.fix],
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        export OMP_NUM_THREADS={params.workers}
+        export OPENBLAS_NUM_THREADS={params.workers}
+        export MKL_NUM_THREADS={params.workers}
+        export NUMEXPR_NUM_THREADS={params.workers}
+        export NUMBA_NUM_THREADS={params.workers}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.workers} \
+            {params.fix_flag} \
+            > {log.run} 2>&1
+        """
+
+
+rule svb_combine_beds_boundary_fix:
+    input:
+        lambda wc: expand(
+            str(
+                SVB_ROOT / wc.population / "{chrom}" / "boundary_fix" / wc.fix / "{chrom}-ld-blocks.bed"
+            ),
+            chrom=CHROMS_BY_POP[wc.population],
+        ),
+    output:
+        str(SVB_ROOT / "{population}" / "boundary_fix_{fix}_LD_blocks.bed"),
+    shell:
+        """
+        echo -e "#chr\tstart\tstop" >{output}
+        for f in {input}; do
+            tail -n +2 "$f" | sed 's/^/chr/' >>{output}
+        done
+        """
+
+
+rule svb_compare_fix_vs_unfixed:
+    input:
+        ours=str(SVB_ROOT / "{population}" / "boundary_fix_fixed_LD_blocks.bed"),
+        ref=str(SVB_ROOT / "{population}" / "boundary_fix_unfixed_LD_blocks.bed"),
+    output:
+        str(SVB_ROOT / "{population}" / "compare" / "boundary_fix_vs_unfixed_tol0.tsv"),
+    shell:
+        """
+        mkdir -p {SVB_ROOT}/{wildcards.population}/compare
+        uv run python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance 0
+        """
+
+
+rule svb_compare_boundary_fix_vs_ref:
+    input:
+        ours=str(SVB_ROOT / "{population}" / "boundary_fix_{fix}_LD_blocks.bed"),
+        ref=str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    output:
+        str(SVB_ROOT / "{population}" / "compare" / "boundary_fix_{fix}_vs_ref_tol{tol}.tsv"),
+    shell:
+        """
+        mkdir -p {SVB_ROOT}/{wildcards.population}/compare
+        uv run python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {wildcards.tol}
+        """
+
+
+# ---------------------------------------------------------------------------
 # Combine this diagnostic's chromosome subset into one BED per population x
 # mode, restoring the "chr" prefix compare_blocks.py expects.
 # ---------------------------------------------------------------------------
@@ -396,6 +542,11 @@ rule svb_summary:
         all_tol_loose=svb_targets("compare/all_vs_ref_tol100000.tsv"),
         snps_tol_loose=svb_targets("compare/snps_only_vs_ref_tol100000.tsv"),
         modes_tol0=svb_targets("compare/snps_only_vs_all_tol0.tsv"),
+        fix_vs_unfixed=svb_targets("compare/boundary_fix_vs_unfixed_tol0.tsv"),
+        fixed_vs_ref_tol0=svb_targets("compare/boundary_fix_fixed_vs_ref_tol0.tsv"),
+        unfixed_vs_ref_tol0=svb_targets("compare/boundary_fix_unfixed_vs_ref_tol0.tsv"),
+        fixed_vs_ref_tol_loose=svb_targets("compare/boundary_fix_fixed_vs_ref_tol100000.tsv"),
+        unfixed_vs_ref_tol_loose=svb_targets("compare/boundary_fix_unfixed_vs_ref_tol100000.tsv"),
     output:
         str(SVB_ROOT / "summary.tsv"),
     run:
@@ -407,6 +558,11 @@ rule svb_summary:
             "all_vs_ref_tol100000": input.all_tol_loose,
             "snps_only_vs_ref_tol100000": input.snps_tol_loose,
             "snps_only_vs_all_tol0": input.modes_tol0,
+            "boundary_fix_vs_unfixed_tol0": input.fix_vs_unfixed,
+            "boundary_fix_fixed_vs_ref_tol0": input.fixed_vs_ref_tol0,
+            "boundary_fix_unfixed_vs_ref_tol0": input.unfixed_vs_ref_tol0,
+            "boundary_fix_fixed_vs_ref_tol100000": input.fixed_vs_ref_tol_loose,
+            "boundary_fix_unfixed_vs_ref_tol100000": input.unfixed_vs_ref_tol_loose,
         }
         rows = []
         fieldnames = None

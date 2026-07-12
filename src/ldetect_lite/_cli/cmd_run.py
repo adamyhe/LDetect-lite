@@ -181,6 +181,19 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         help="Use 50-digit Decimal arithmetic for local search (slower).",
     )
     p.add_argument(
+        "--strict-region-bounds",
+        action="store_true",
+        help=(
+            "Also require start <= POS <= end in Python for each partition's "
+            "covariance region fetch, rather than trusting the indexed fetch "
+            "alone. htslib matches by record span, not POS -- a structural "
+            "variant or long indel whose span crosses a partition boundary "
+            "can otherwise be included in a neighboring partition even "
+            "though its POS lies outside it (default: off, matches "
+            "historical behavior)."
+        ),
+    )
+    p.add_argument(
         "--delete-covariance-cache",
         action="store_true",
         help=(
@@ -205,6 +218,7 @@ def _calc_partition(
     cutoff: float,
     compact_output: bool,
     compression: str,
+    strict_region_bounds: bool,
 ) -> None:
     """
     Wraps an indexed region fetch > calc_covariance so we can run as a
@@ -224,6 +238,7 @@ def _calc_partition(
         cutoff=cutoff,
         compact_output=compact_output,
         compression=compression,
+        strict_region_bounds=strict_region_bounds,
     )
     log_memory_checkpoint(f"covariance_partition_end start={start} end={end}")
 
@@ -330,6 +345,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.cov_cutoff,
                 compact_output,
                 args.covariance_compression,
+                args.strict_region_bounds,
             ): (start, end)
             for start, end in pending
         }

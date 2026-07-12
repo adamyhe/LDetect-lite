@@ -78,6 +78,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "(default: zstd)."
         ),
     )
+    p.add_argument(
+        "--strict-region-bounds",
+        action="store_true",
+        help=(
+            "With --region, also require start <= POS <= end in Python "
+            "rather than trusting the indexed region fetch alone. htslib "
+            "matches by record span, not POS -- a structural variant or "
+            "long indel whose span crosses the region boundary can "
+            "otherwise be included even though its POS lies outside it "
+            "(default: off, matches historical behavior)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -99,6 +111,7 @@ def _run(args: argparse.Namespace) -> int:
             ne=args.ne,
             cutoff=args.cutoff,
             compression=args.covariance_compression,
+            strict_region_bounds=args.strict_region_bounds,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

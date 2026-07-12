@@ -579,6 +579,125 @@ def test_calc_covariance_region_restricts_output(tmp_path: Path) -> None:
     assert set(diag_pos.tolist()) == {100, 200}
 
 
+def _boundary_spanning_indel_vcf_stream(tmp_path: Path, name: str = "spanning") -> Path:
+    """A long-REF deletion at POS=100 whose reference span [100, 149]
+    reaches into a later region query, plus two ordinary SNPs at 250/300
+    that are unambiguously inside that region. Mirrors the real htslib
+    behavior observed on 1000G chr22 (esv2670795): region overlap is
+    span-based (POS to POS + len(REF) - 1), not POS-based, for ordinary
+    long-REF records, not just symbolic SV alleles."""
+    long_ref = "A" * 50
+    return _write_indexed_vcf(
+        tmp_path,
+        name,
+        [
+            *_VCF_HEADER,
+            f"1\t100\tdel_spanning\t{long_ref}\tA\t.\tPASS\t.\tGT\t0|1\t0|0",
+            "1\t250\trs_a\tA\tG\t.\tPASS\t.\tGT\t0|1\t0|0",
+            "1\t300\trs_b\tA\tG\t.\tPASS\t.\tGT\t0|1\t1|0",
+        ],
+    )
+
+
+@requires_htslib_tools
+def test_calc_covariance_default_includes_boundary_spanning_variant(
+    tmp_path: Path,
+) -> None:
+    """Historical behavior (strict_region_bounds=False, the default): a
+    record whose span crosses into a queried region is included even
+    though its own POS lies outside that region -- matches the original
+    ldetect's tabix -h behavior, see
+    notes/logs/sv-boundary-diagnostics-investigation.md."""
+    map_path = tmp_path / "map.gz"
+    _write_map_positions(map_path, [100, 250, 300])
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = _boundary_spanning_indel_vcf_stream(tmp_path)
+
+    out_path = tmp_path / "cov.h5"
+    calc_covariance(
+        vcf_path=vcf_path,
+        region="1:120-300",
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=out_path,
+        cutoff=1e-7,
+        compact_output=True,
+    )
+
+    with open_covariance_reader(out_path, 100, 300) as reader:
+        rows = reader.read_all()
+    positions = set(rows.lo.tolist()) | set(rows.hi.tolist())
+    assert 100 in positions
+
+
+@requires_htslib_tools
+def test_calc_covariance_strict_region_bounds_excludes_boundary_spanning_variant(
+    tmp_path: Path,
+) -> None:
+    """strict_region_bounds=True adds the explicit POS check the original
+    never had: the same boundary-spanning record from the previous test is
+    excluded once its own POS is required to fall inside the region."""
+    map_path = tmp_path / "map.gz"
+    _write_map_positions(map_path, [100, 250, 300])
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = _boundary_spanning_indel_vcf_stream(tmp_path)
+
+    out_path = tmp_path / "cov.h5"
+    calc_covariance(
+        vcf_path=vcf_path,
+        region="1:120-300",
+        genetic_map_path=map_path,
+        individuals_path=individuals_path,
+        output_path=out_path,
+        cutoff=1e-7,
+        compact_output=True,
+        strict_region_bounds=True,
+    )
+
+    with open_covariance_reader(out_path, 100, 300) as reader:
+        rows = reader.read_all()
+    positions = set(rows.lo.tolist()) | set(rows.hi.tolist())
+    assert 100 not in positions
+    assert positions == {250, 300}
+
+
+@requires_htslib_tools
+def test_calc_covariance_strict_region_bounds_noop_without_region(
+    tmp_path: Path,
+) -> None:
+    """strict_region_bounds only means something when region is set; passing
+    it with region=None (whole-file read) must not change output at all."""
+    map_path = tmp_path / "map.gz"
+    _write_map(map_path)
+    individuals_path = tmp_path / "inds.txt"
+    _write_individuals(individuals_path)
+    vcf_path = _vcf_stream(tmp_path)
+
+    default_out = tmp_path / "default.h5"
+    strict_out = tmp_path / "strict.h5"
+    for out_path, strict in ((default_out, False), (strict_out, True)):
+        calc_covariance(
+            vcf_path=vcf_path,
+            region=None,
+            genetic_map_path=map_path,
+            individuals_path=individuals_path,
+            output_path=out_path,
+            cutoff=1e-7,
+            compact_output=True,
+            strict_region_bounds=strict,
+        )
+
+    with open_covariance_reader(default_out, 100, 300) as reader:
+        default_rows = reader.read_all()
+    with open_covariance_reader(strict_out, 100, 300) as reader:
+        strict_rows = reader.read_all()
+    np.testing.assert_array_equal(default_rows.lo, strict_rows.lo)
+    np.testing.assert_array_equal(default_rows.hi, strict_rows.hi)
+    np.testing.assert_array_equal(default_rows.shrink_ld, strict_rows.shrink_ld)
+
+
 @requires_htslib_tools
 @requires_bcftools
 def test_calc_covariance_bcf_matches_vcf_gz_output(tmp_path: Path) -> None:

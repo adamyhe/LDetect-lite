@@ -525,6 +525,7 @@ def calc_covariance(
     compact_output: bool = False,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
+    strict_region_bounds: bool = False,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
 
@@ -557,6 +558,17 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
+        strict_region_bounds: When *region* is set, also require
+            ``start <= variant.POS <= end`` in Python, rather than trusting
+            ``cyvcf2``'s (htslib) region fetch alone. htslib matches a region
+            query by a record's *span*, not its ``POS`` -- for an ordinary
+            SNP these are the same thing, but a structural variant with an
+            ``INFO/END`` far from ``POS``, or a long-``REF`` indel/SV, can be
+            returned for a region query even though its ``POS`` lies outside
+            it. Left off by default because it changes long-standing
+            partition-mode output (see
+            ``notes/logs/sv-boundary-diagnostics-investigation.md``); opt in
+            to test or use it.
 
     Raises:
         ValueError: If any individual in *individuals_path* is not present in
@@ -609,9 +621,19 @@ def calc_covariance(
 
     skipped_unphased = 0
 
+    region_bounds: tuple[int, int] | None = None
+    if strict_region_bounds and region is not None:
+        _, region_coords = region.rsplit(":", 1)
+        region_start_str, region_end_str = region_coords.split("-", 1)
+        region_bounds = (int(region_start_str), int(region_end_str))
+
     variants: Iterator[Any] = vcf(region) if region is not None else vcf
     for variant in variants:
         pos = variant.POS
+        if region_bounds is not None and not (
+            region_bounds[0] <= pos <= region_bounds[1]
+        ):
+            continue
         if pos not in pos2gpos:
             continue
 
