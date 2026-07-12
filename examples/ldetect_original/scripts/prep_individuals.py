@@ -17,7 +17,12 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ldetect_lite.io.vcf import read_vcf_samples
+import cyvcf2
+
+
+def read_vcf_samples(vcf_path: Path) -> set[str]:
+    """Return sample IDs present in a VCF header."""
+    return set(cyvcf2.VCF(str(vcf_path)).samples)
 
 
 def read_panel(panel_path: Path, subpops: list[str]) -> set[str]:
