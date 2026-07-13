@@ -620,7 +620,7 @@ def write_timing_plot(path: Path, rows: list[dict[str, str]]) -> None:
     fig, axes = plt.subplots(
         1,
         len(stages),
-        figsize=(max(2.2 * len(stages), 5.0), 2.8),
+        figsize=(max(2.0 * len(stages), 4.8), 2.2),
         constrained_layout=True,
         squeeze=False,
     )
@@ -631,17 +631,19 @@ def write_timing_plot(path: Path, rows: list[dict[str, str]]) -> None:
         )
         labels = [row["repeat"] for row in stage_rows]
         values = [float(row["seconds"]) for row in stage_rows]
-        ax.bar(
+        ax.barh(
             labels,
             values,
+            height=0.35,
             color=repeat_colors(len(values)),
             edgecolor="#222222",
             linewidth=0.6,
         )
+        ax.invert_yaxis()
         ax.set_title(stage)
-        ax.set_xlabel("repeat")
-        ax.set_ylabel("seconds")
-        ax.grid(axis="y", color="#d0d0d0", linewidth=0.6, alpha=0.8)
+        ax.set_xlabel("seconds")
+        ax.set_ylabel("repeat")
+        ax.grid(axis="x", color="#d0d0d0", linewidth=0.6, alpha=0.8)
     fig.savefig(path, dpi=160)
     plt.close(fig)
 

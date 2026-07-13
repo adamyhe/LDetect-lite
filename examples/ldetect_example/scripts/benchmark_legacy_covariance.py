@@ -23,6 +23,8 @@ from pathlib import Path
 import numpy as np
 from benchmark_functions import read_hdf5_covariance, read_reference_covariance
 
+TIMING_FIGSIZE = (3.1, 1.55)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -480,18 +482,21 @@ def write_covariance_timing_plot(path: Path, rows: list[dict[str, str]]) -> None
     labels = [backend_label(backend) for backend in backends]
     means = [float(np.mean(values(rows, backend, "seconds"))) for backend in backends]
 
-    fig, ax = plt.subplots(figsize=(3.4, 2.7), constrained_layout=True)
-    ax.bar(
-        labels,
+    y = [0.0, 0.36]
+    fig, ax = plt.subplots(figsize=TIMING_FIGSIZE, constrained_layout=True)
+    ax.barh(
+        y,
         means,
+        height=0.26,
         color=["#0057b8", "#d62728"][: len(labels)],
         edgecolor="#222222",
         linewidth=0.6,
     )
-    ax.set_ylabel("mean seconds")
+    ax.set_yticks(y, labels)
+    ax.set_ylim(0.58, -0.24)
+    ax.set_xlabel("mean seconds")
     ax.set_title("calc_covariance")
-    ax.tick_params(axis="x", rotation=15)
-    ax.grid(axis="y", color="#d0d0d0", linewidth=0.6, alpha=0.8)
+    ax.grid(axis="x", color="#d0d0d0", linewidth=0.6, alpha=0.8)
     fig.savefig(path, dpi=160)
     plt.close(fig)
 
@@ -534,7 +539,7 @@ def optimized_backend(rows: list[dict[str, str]]) -> str:
 
 def backend_label(backend: str) -> str:
     if backend == "legacy":
-        return "Original LDetect"
+        return "LDetect"
     if backend == "lite":
         return "LDetect-lite"
     return backend

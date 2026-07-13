@@ -77,6 +77,24 @@ If `--workers` is greater than 1 and none of `OMP_NUM_THREADS`/`OPENBLAS_NUM_THR
 
 Each of the five stages (partition, covariance, matrix-to-vector, find-minima, extract-bpoints) can also be run individually, along with a `covariance-summary` inspection utility — see `docs/pipeline-steps.md`.
 
+### Pipeline schematics
+
+From a development checkout, the compact pipeline overview can be regenerated
+with:
+
+```bash
+python3 schematics/plot_figure1_panels.py
+```
+
+The per-step pipeline schematics can be regenerated with:
+
+```bash
+uv run --extra heatmap python schematics/plot_pipeline_schematics.py
+```
+
+The overview command writes `pipeline-overview.svg`; the per-step schematic
+command writes SVG/PDF figures under `schematics/plots/`.
+
 ### Interpolate genetic maps
 
 Convert a recombination rate map (e.g. the [deCODE map](https://www.science.org/doi/10.1126/science.aau1043) or [HapMap-interpolated 1000G maps](https://github.com/joepickrell/1000-genomes-genetic-maps)) to per-SNP genetic positions required by steps 1 and 2:

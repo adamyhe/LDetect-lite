@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 STAGES = ("matrix_to_vector", "find_minima", "extract_bpoints")
+TIMING_FIGSIZE = (3.1, 1.55)
 LEGACY_STAGE_COMMANDS = {
     "matrix_to_vector": "matrix-to-vector",
     "find_minima": "find-minima",
@@ -369,18 +370,22 @@ def write_stage_timing_plot(path: Path, stage: str, rows: list[dict[str, str]]) 
     lite = stage_values(rows, "lite", stage)
     means = [float(np.mean(legacy)), float(np.mean(lite))]
 
-    fig, ax = plt.subplots(figsize=(3.2, 2.7), constrained_layout=True)
-    ax.bar(
-        ["Original LDetect", "LDetect-lite"],
+    labels = ["LDetect", "LDetect-lite"]
+    y = [0.0, 0.36]
+    fig, ax = plt.subplots(figsize=TIMING_FIGSIZE, constrained_layout=True)
+    ax.barh(
+        y,
         means,
+        height=0.26,
         color=["#0057b8", "#d62728"],
         edgecolor="#222222",
         linewidth=0.6,
     )
-    ax.set_ylabel("mean seconds")
+    ax.set_yticks(y, labels)
+    ax.set_ylim(0.58, -0.24)
+    ax.set_xlabel("mean seconds")
     ax.set_title(stage)
-    ax.tick_params(axis="x", rotation=15)
-    ax.grid(axis="y", color="#d0d0d0", linewidth=0.6, alpha=0.8)
+    ax.grid(axis="x", color="#d0d0d0", linewidth=0.6, alpha=0.8)
     fig.savefig(path, dpi=160)
     plt.close(fig)
 

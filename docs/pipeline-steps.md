@@ -6,9 +6,13 @@ Several of these stages accept their own `--workers`/`--metric-workers`. The sam
 
 The pipeline has five stages that can be run individually:
 
+![LDetect-lite pipeline overview](../schematics/plots/pipeline-overview.svg)
+
 ---
 
 **Step 1 — Partition chromosome** into overlapping windows:
+
+![Step 1 schematic](../schematics/plots/step1-partition-chromosome.svg)
 
 ```bash
 ldetect partition-chromosome \
@@ -29,6 +33,8 @@ Arguments:
 ---
 
 **Step 2 — Calculate covariance** from a phased VCF/BCF partition:
+
+![Step 2 schematic](../schematics/plots/step2-calc-covariance.svg)
 
 ```bash
 ldetect calc-covariance \
@@ -60,6 +66,8 @@ Arguments:
 
 **Step 3 — Matrix to vector**:
 
+![Step 3 schematic](../schematics/plots/step3-matrix-to-vector.svg)
+
 ```bash
 ldetect matrix-to-vector \
   --dataset-path cov_matrix/ \
@@ -81,6 +89,8 @@ Arguments:
 ---
 
 **Step 4 — Find breakpoints**:
+
+![Step 4 schematic](../schematics/plots/step4-find-breakpoints.svg)
 
 ```bash
 ldetect find-minima \
@@ -133,6 +143,8 @@ Arguments:
 ---
 
 **Step 5 — Extract to BED**:
+
+![Step 5 schematic](../schematics/plots/step5-extract-bed.svg)
 
 ```bash
 ldetect extract-bpoints \
