@@ -5,9 +5,10 @@ from __future__ import annotations
 import gzip
 import math
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, TypeVar
 
 import numpy as np
 from numba import njit
@@ -30,6 +31,21 @@ from ldetect_lite.io.covariance_hdf5 import (
 
 COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+_numba_cache_decorator = njit(cache=True)
+_numba_inline_decorator = njit(cache=True, inline="always")
+
+
+def _njit_cache(fn: _F) -> _F:
+    """JIT-compile a kernel while preserving its type for mypy."""
+    return _numba_cache_decorator(fn)  # type: ignore[no-any-return]
+
+
+def _njit_inline(fn: _F) -> _F:
+    """JIT-compile a small helper for inlining into other kernels."""
+    return _numba_inline_decorator(fn)  # type: ignore[no-any-return]
+
 
 @dataclass(frozen=True)
 class _CovarianceInputs:
@@ -48,7 +64,7 @@ class _CovarianceInputs:
 # ---------------------------------------------------------------------------
 
 
-@njit(cache=True, inline="always")
+@_njit_inline
 def _shrink_ld_values(
     n11: float,
     n1x: float,
@@ -68,7 +84,7 @@ def _shrink_ld_values(
     return d_naive, ds2
 
 
-@njit(cache=True, inline="always")
+@_njit_inline
 def _popcount64(x: np.uint64) -> np.int64:
     """Portable uint64 popcount for Numba kernels."""
     m1 = np.uint64(0x5555555555555555)
@@ -81,7 +97,7 @@ def _popcount64(x: np.uint64) -> np.int64:
     return np.int64((x * h01) >> np.uint64(56))
 
 
-@njit(cache=True)
+@_njit_cache
 def _pack_haplotypes_impl(hap_mat: np.ndarray) -> np.ndarray:
     """Pack a 0/1 haplotype matrix into uint64 words.
 
@@ -102,7 +118,7 @@ def _pack_haplotypes_impl(hap_mat: np.ndarray) -> np.ndarray:
     return packed
 
 
-@njit(cache=True)
+@_njit_cache
 def _count_pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -149,7 +165,7 @@ def _count_pairwise_ld_impl(
     return cnt
 
 
-@njit(cache=True)
+@_njit_cache
 def _pairwise_ld_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -224,7 +240,7 @@ def _pairwise_ld_impl(
     return ii, jj, d_naive_arr, ds2_arr
 
 
-@njit(cache=True)
+@_njit_cache
 def _count_pairwise_ld_by_i_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -273,7 +289,7 @@ def _count_pairwise_ld_by_i_impl(
     return counts
 
 
-@njit(cache=True)
+@_njit_cache
 def _pairwise_ld_compact_range_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -333,7 +349,7 @@ def _pairwise_ld_compact_range_impl(
     return ii, jj, ds2_arr
 
 
-@njit(cache=True)
+@_njit_cache
 def _genetic_stop_bounds_impl(
     gpos_arr: np.ndarray,
     ne: float,
@@ -362,7 +378,7 @@ def _genetic_stop_bounds_impl(
     return stops
 
 
-@njit(cache=True)
+@_njit_cache
 def _pairwise_ld_compact_chunk_impl(
     hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
@@ -428,7 +444,7 @@ def _pairwise_ld_compact_chunk_impl(
     return i, ii[:cnt], jj[:cnt], ds2_arr[:cnt]
 
 
-@njit(cache=True)
+@_njit_cache
 def _pairwise_ld_compact_chunk_bitpacked_impl(
     packed_hap_mat: np.ndarray,
     gpos_arr: np.ndarray,
