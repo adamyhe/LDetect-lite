@@ -1,4 +1,4 @@
-"""Summarize and plot the full EUR chr2 runtime benchmark.
+"""Summarize and plot the full EUR chr21 runtime benchmark.
 
 This script is intentionally lightweight: the expensive ldetect-lite run is
 owned by the main Snakemake workflow, and the legacy runtime can be supplied as
@@ -20,28 +20,28 @@ BACKENDS = ("legacy", "lite")
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--population", default="EUR")
-    parser.add_argument("--chromosome", default="2")
+    parser.add_argument("--chromosome", default="21")
     parser.add_argument(
         "--lite-benchmark",
         type=Path,
-        default=Path("results/logs/EUR/2.benchmark.tsv"),
-        help="Snakemake benchmark TSV from the ldetect-lite EUR chr2 run.",
+        default=Path("results/logs/EUR/21.benchmark.tsv"),
+        help="Snakemake benchmark TSV from the ldetect-lite EUR chr21 run.",
     )
     parser.add_argument(
         "--lite-time-log",
         type=Path,
-        default=Path("results/logs/EUR/2.timing.log"),
-        help="Optional /usr/bin/time -v log from the ldetect-lite EUR chr2 run.",
+        default=Path("results/logs/EUR/21.timing.log"),
+        help="Optional /usr/bin/time -v log from the ldetect-lite EUR chr21 run.",
     )
     parser.add_argument(
         "--legacy-time-log",
         type=Path,
-        help="Optional /usr/bin/time -v log from the legacy full EUR chr2 run.",
+        help="Optional /usr/bin/time -v log from the legacy full EUR chr21 run.",
     )
     parser.add_argument(
         "--legacy-seconds",
         type=float,
-        help="Legacy full EUR chr2 elapsed time in seconds.",
+        help="Legacy full EUR chr21 elapsed time in seconds.",
     )
     parser.add_argument(
         "--lite-seconds",
@@ -51,12 +51,12 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results/benchmarks/EUR-chr2"),
+        default=Path("results/benchmarks/EUR-chr21"),
     )
     parser.add_argument(
         "--plot",
         type=Path,
-        default=Path("plots/timings-full-eur-chr2.svg"),
+        default=Path("plots/timings-full-eur-chr21.svg"),
     )
     parser.add_argument("--plot-format", choices=("svg", "png", "pdf"), default="svg")
     args = parser.parse_args()
@@ -89,7 +89,7 @@ def choose_lite_seconds(args: argparse.Namespace) -> float:
     raise SystemExit(
         "Could not determine ldetect-lite runtime. Provide --lite-seconds, "
         "--lite-time-log, or --lite-benchmark after running "
-        "`uv run snakemake --cores N --config chromosomes='[2]'` "
+        "`uv run snakemake --cores N --config chromosomes='[21]'` "
         "from examples/ldetect_original."
     )
 
@@ -234,7 +234,7 @@ def write_timing_plot(path: Path, rows: list[dict[str, str]]) -> None:
     ax.set_yticks(y, labels)
     ax.set_ylim(0.58, -0.24)
     ax.set_xlabel("wall time (minutes)")
-    ax.set_title("full EUR chr2")
+    ax.set_title("full EUR chr21")
     ax.grid(axis="x", color="#d0d0d0", linewidth=0.6, alpha=0.8)
     fig.savefig(path, dpi=160)
     plt.close(fig)
@@ -259,7 +259,7 @@ def setup_matplotlib(output_dir: Path):
 def print_summary(rows: list[dict[str, str]]) -> None:
     values = {row["backend"]: float(row["seconds"]) for row in rows}
     print(
-        "full EUR chr2: "
+        "full EUR chr21: "
         f"legacy={values['legacy'] / 60:.3f} min, "
         f"ldetect-lite={values['lite'] / 60:.3f} min, "
         f"speedup={values['legacy'] / values['lite']:.3f}x"
