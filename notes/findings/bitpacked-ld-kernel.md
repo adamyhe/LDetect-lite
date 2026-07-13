@@ -21,18 +21,25 @@ tolerance-based approximation.
 - The toy chr2 example benchmark passes exactness checks when run with
   `--ld-kernel bitpacked`; comparison to original LDetect is at machine
   precision because that is a cross-implementation comparison.
-- Completed serial EUR 1000G diagnostics show exact downstream agreement
-  between bitpacked and `uint8` (`vector_max_abs_diff=0.0` and exact
-  breakpoint/BED agreement).
+- Serial 1000G diagnostics across EUR, ASN, and AFR show exact downstream
+  agreement between bitpacked and `uint8` for all 66 chromosome x population
+  runs (`vector_sha256_equal=True`, `vector_max_abs_diff=0.0`, exact loci, and
+  `bed_jaccard=1.0`).
 
-## Merge Gate
+## Performance Summary
 
-Merge is waiting on the remaining 1000G population diagnostics so the default
-backend flip is backed by population-wide validation. Final speed claims should
-wait for those runs. Current evidence supports bitpacked as the production
-default, but total wall-clock gains are expected to be smaller than the inner
-row-generation speedup because VCF/BCF ingestion and HDF5 writes remain
-substantial.
+Across the 66 EUR/ASN/AFR chromosome runs, bitpacked reduced aggregate
+covariance time from 32637.68 s to 30238.12 s, an overall speedup of 1.079x.
+The median chromosome-level speedup was 1.062x. Bitpacked was faster on 63/66
+runs; the only slower chromosomes were AFR chr9 (0.908x), AFR chr12 (0.951x)
+and AFR chr21 (0.960x).
+
+Peak RSS was comparable (`uint8`/bitpacked RSS ratio mean 1.016, median 1.002,
+range 0.885-1.248). The compact covariance cache size is unchanged
+(`covariance_size_ratio=1.0`) because both backends write the same HDF5 schema.
+Total wall-clock gains remain modest relative to the row-generation kernel
+because VCF/BCF ingestion and HDF5 writes are still substantial parts of the
+covariance stage.
 
 ## Practical Guidance
 
