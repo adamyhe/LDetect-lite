@@ -11,16 +11,20 @@ path starts from the VCF:
 work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz
 ```
 
-It filters to the toy example's EUR individuals, computes covariance using the
-established JIT uint8 backend, and compares each downstream artifact to the
-original LDetect reference files:
+It filters to the toy example's EUR individuals, computes covariance from the
+VCF, and compares each downstream artifact to the original LDetect reference
+files:
 
 ```text
 work/{chrom}/{chrom}.{start}.{end}.h5
 ```
 
 The original gz covariance fixture remains a reference only; it is no longer
-used as the starting point for the main example pipeline.
+used as the starting point for the main example pipeline. The Snakemake
+covariance rule intentionally uses `--ld-kernel uint8` because the covariance
+exactness fixture checks full-schema legacy fields (`naive_ld`, genetic
+positions, and SNP IDs). Production runs default to the compact bitpacked
+backend.
 
 ## Run
 
@@ -48,8 +52,8 @@ diagnostic comparison because the toy reference contains a one-window partition
 fixture; its plot is zoomed to that toy fixture interval rather than treating
 the whole-chromosome generated partition set as an exactness target.
 
-To benchmark ldetect-lite functions directly after preparing the matching VCF
-interval, run:
+To benchmark individual functions after the workflow has prepared `ref/` and
+`work/vcf/`, run:
 
 ```bash
 uv run --extra heatmap python scripts/benchmark_functions.py --warmups 1 --repeats 5
@@ -58,8 +62,8 @@ uv run --extra heatmap python scripts/benchmark_functions.py --warmups 1 --repea
 The benchmark calls the Python APIs directly to avoid command-launch overhead
 and writes `results/function_benchmark/timings.tsv`,
 `results/function_benchmark/exactness.tsv`, `summary.md`, and `timings.svg`.
-Pass `--ld-kernel bitpacked` to benchmark the compact bitpacked covariance
-backend.
+It defaults to the compact bitpacked covariance backend; pass
+`--ld-kernel uint8` to benchmark the reference backend.
 
 To benchmark average downstream-stage CLI runtimes against the vendored
 original LDetect scripts, run:

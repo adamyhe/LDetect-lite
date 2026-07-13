@@ -73,11 +73,12 @@ def main() -> None:
     parser.add_argument("--keep-workdir", action="store_true")
     parser.add_argument(
         "--ld-kernel",
-        choices=("uint8", "bitpacked"),
-        default="uint8",
+        choices=("bitpacked", "uint8"),
+        default="bitpacked",
         help=(
             "Covariance backend to benchmark. bitpacked writes compact HDF5 "
-            "and compares shrinkage rows only (default: uint8)."
+            "and compares shrinkage rows only; uint8 keeps the reference "
+            "backend available for comparison (default: bitpacked)."
         ),
     )
     parser.add_argument(

@@ -98,6 +98,15 @@ def test_covariance_compression_accepts_lzf() -> None:
     assert args.covariance_compression == "lzf"
 
 
+def test_ld_kernel_defaults_to_bitpacked() -> None:
+    assert _parse_run_args([]).ld_kernel == "bitpacked"
+
+
+def test_ld_kernel_accepts_uint8_reference_backend() -> None:
+    args = _parse_run_args(["--ld-kernel", "uint8"])
+    assert args.ld_kernel == "uint8"
+
+
 def test_stage_workers_default_to_none_and_inherit_shared_workers() -> None:
     args = _parse_run_args(["--workers", "4"])
     assert args.matrix_workers is None

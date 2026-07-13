@@ -5,13 +5,13 @@ Reproduces the original ldetect EUR chr2 example from:
 
 Reference downstream intermediates are downloaded from BitBucket. The workflow
 fetches the matching 1000 Genomes Phase 1 interval, filters it to the example
-EUR individuals, computes covariance from the VCF with the established JIT
-backend, and compares each downstream stage to the original LDetect artifacts.
+EUR individuals, computes covariance from the VCF, and compares each downstream
+stage to the original LDetect artifacts.
 
 Pipeline steps:
     0  Download reference intermediates from BitBucket
     1  Fetch/filter the matching 1000G VCF interval
-    2  Compute covariance from VCF (JIT uint8 backend)
+    2  Compute covariance from VCF (uint8 reference backend for full-schema exactness)
     3  Stage reference partition file
     4  Run matrix-to-vector   (compare vs reference vector)
     5  Run find-minima         (compare vs reference breakpoints)
@@ -149,7 +149,11 @@ rule prepare_1000g_vcf:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Calculate covariance from VCF (established JIT uint8 path)
+# Step 2: Calculate covariance from VCF.
+#
+# The toy covariance exactness check compares full-schema legacy fields, so this
+# rule deliberately uses the uint8 reference backend rather than the production
+# bitpacked default.
 # ---------------------------------------------------------------------------
 
 rule calc_covariance:
@@ -175,7 +179,8 @@ rule calc_covariance:
             --individuals {input.individuals} \
             --output {output} \
             --ne {NE} \
-            --cutoff {COV_CUTOFF}
+            --cutoff {COV_CUTOFF} \
+            --ld-kernel uint8
         """
 
 
