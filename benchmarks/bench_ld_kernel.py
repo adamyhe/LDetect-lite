@@ -4,8 +4,9 @@ Usage:
     uv run python benchmarks/bench_ld_kernel.py
     uv run python benchmarks/bench_ld_kernel.py --n-snps 400 1600 --n-haps 800 1600
 
-The compact bitpacked backend is experimental and is not selected by
-``calc_covariance`` yet. This benchmark is the crossover-finding harness.
+The compact bitpacked backend is the default covariance backend. This benchmark
+keeps a small synthetic harness for comparing it against the older uint8
+reference backend across SNP and haplotype counts.
 """
 
 from __future__ import annotations

@@ -2,10 +2,10 @@
 at full-genome scale.
 
 Runs `ldetect run` twice per chromosome x population on identical filtered
-1000G input -- once with `--ld-kernel uint8` (the established default) and
-once with `--ld-kernel bitpacked` (the experimental popcount-based kernel,
-see notes/logs/bitpacked-ld-kernel.md) -- then compares the two runs'
-vectors, breakpoints, and BEDs for exactness.
+1000G input -- once with `--ld-kernel uint8` (the reference backend) and
+once with `--ld-kernel bitpacked` (the default compact backend, see
+notes/logs/bitpacked-ld-kernel.md) -- then compares the two runs' vectors,
+breakpoints, and BEDs for exactness.
 
 Population-generic like Snakefile.compression_diagnostics:
 `chromosomes_by_population` in ld_kernel_diagnostics.yaml maps each

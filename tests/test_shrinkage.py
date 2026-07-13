@@ -287,7 +287,7 @@ def test_calc_covariance_duplicate_position_matches_first_encountered_variant(
 
 
 @requires_htslib_tools
-def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:
+def test_calc_covariance_uint8_full_output_writes_full_schema(tmp_path: Path) -> None:
     map_path = tmp_path / "map.gz"
     _write_map(map_path)
     individuals_path = tmp_path / "inds.txt"
@@ -301,6 +301,8 @@ def test_calc_covariance_default_writes_full_schema(tmp_path: Path) -> None:
         individuals_path=individuals_path,
         output_path=out_path,
         cutoff=1e-7,
+        compact_output=False,
+        ld_kernel="uint8",
     )
 
     import h5py
@@ -682,6 +684,8 @@ def test_calc_covariance_bcf_matches_vcf_gz_output(tmp_path: Path) -> None:
             individuals_path=individuals_path,
             output_path=out,
             cutoff=1e-7,
+            compact_output=False,
+            ld_kernel="uint8",
         )
 
     with open_covariance_reader(vcf_out, 100, 300) as reader:

@@ -149,7 +149,11 @@ rule prepare_1000g_vcf:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Calculate covariance from VCF (established JIT uint8 path)
+# Step 2: Calculate covariance from VCF.
+#
+# The toy covariance exactness check compares full-schema legacy fields, so this
+# rule deliberately uses the uint8 reference backend rather than the production
+# bitpacked default.
 # ---------------------------------------------------------------------------
 
 rule calc_covariance:

@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import gzip
 import math
-import sys
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
-import cyvcf2
 import numpy as np
 from numba import njit
 
+from ldetect_lite._util.reference_panel import (
+    ReferencePanel,
+    read_genetic_map,
+    read_individuals,
+    read_reference_panel,
+    warn_reference_panel_skips,
+    watterson_theta,
+)
 from ldetect_lite.io.covariance_hdf5 import (
     HDF5_DATASET_CHUNK_ROWS,
     CovarianceRowChunk,
@@ -23,6 +29,18 @@ from ldetect_lite.io.covariance_hdf5 import (
 )
 
 COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
+
+
+@dataclass(frozen=True)
+class _CovarianceInputs:
+    """Array form of a reference panel ready for compiled covariance kernels."""
+
+    hap_mat: np.ndarray
+    gpos_arr: np.ndarray
+    hap_sums: np.ndarray
+    j_stop_by_i: np.ndarray
+    pos_arr: np.ndarray
+    assume_sorted_unique_rows: bool
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +59,7 @@ def _shrink_ld_values(
     shrink_scale: float,
     decay_scale: float,
 ) -> tuple[float, float]:
+    """Return naive and Wen/Stephens-shrunk covariance for one SNP pair."""
     f11 = n11 * inv_n_total
     f1 = n1x * inv_n_total
     f2 = nx1 * inv_n_total
@@ -94,6 +113,7 @@ def _count_pairwise_ld_impl(
     theta: float,
     cutoff: float,
 ) -> int:
+    """Count emitted uint8-backend pairs before materializing full output arrays."""
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     inv_n_total = 1.0 / float(n_haps)
@@ -215,6 +235,7 @@ def _count_pairwise_ld_by_i_impl(
     theta: float,
     cutoff: float,
 ) -> np.ndarray:
+    """Count compact covariance rows owned by each left-hand SNP index."""
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
     inv_n_total = 1.0 / float(n_haps)
@@ -266,6 +287,7 @@ def _pairwise_ld_compact_range_impl(
     i_stop: int,
     n_pairs: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Materialize compact uint8-backend pairs for a contiguous i-index range."""
     n_haps = hap_mat.shape[1]
     inv_n_total = 1.0 / float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
@@ -318,6 +340,7 @@ def _genetic_stop_bounds_impl(
     n_ind: float,
     cutoff: float,
 ) -> np.ndarray:
+    """Find the exclusive right bound for each SNP after genetic-distance pruning."""
     n_snps = gpos_arr.shape[0]
     stops = np.empty(n_snps, dtype=np.int32)
     if cutoff <= 0.0:
@@ -353,6 +376,7 @@ def _pairwise_ld_compact_chunk_impl(
     target_rows: int,
     capacity: int,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    """Generate one bounded compact-output chunk with the uint8 backend."""
     n_haps = hap_mat.shape[1]
     inv_n_total = 1.0 / float(n_haps)
     n_snps = hap_mat.shape[0]
@@ -419,6 +443,7 @@ def _pairwise_ld_compact_chunk_bitpacked_impl(
     target_rows: int,
     capacity: int,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
+    """Generate one bounded compact-output chunk with packed haplotypes."""
     inv_n_total = 1.0 / float(n_haps)
     n_snps = packed_hap_mat.shape[0]
     n_words = packed_hap_mat.shape[1]
@@ -489,7 +514,12 @@ def _compact_pair_chunks(
     cutoff: float,
     chunk_rows: int,
 ) -> Iterator[CovarianceRowChunk]:
-    """Yield compact covariance rows in sorted ``(lo, hi)`` order."""
+    """Yield compact rows after a separate per-SNP count pass.
+
+    This is the memory-bounded fallback for compact output. The prior count pass
+    lets each yielded chunk contain complete left-hand SNP rows while respecting
+    the requested approximate chunk size.
+    """
     max_row_count = int(row_counts.max(initial=0))
     target_rows = max(int(chunk_rows), max_row_count, 1)
     i_start = 0
@@ -544,7 +574,11 @@ def _compact_pair_chunks_single_pass(
     cutoff: float,
     chunk_rows: int,
 ) -> Iterator[CovarianceRowChunk]:
-    """Yield compact covariance rows once in sorted ``(lo, hi)`` order."""
+    """Stream compact rows without pre-counting pairs.
+
+    The uint8 backend emits complete left-hand SNP rows until the target chunk
+    size is reached. This avoids the historical two-pass compact-output path.
+    """
     target_rows = max(int(chunk_rows), 1)
     capacity = target_rows + hap_mat.shape[0]
     i_start = 0
@@ -587,7 +621,11 @@ def _compact_pair_chunks_single_pass_bitpacked(
     cutoff: float,
     chunk_rows: int,
 ) -> Iterator[CovarianceRowChunk]:
-    """Yield compact covariance rows from a bit-packed haplotype matrix."""
+    """Stream compact rows from a bit-packed haplotype matrix.
+
+    This mirrors ``_compact_pair_chunks_single_pass`` but computes pairwise
+    intersections with popcounts over packed ``uint64`` words.
+    """
     target_rows = max(int(chunk_rows), 1)
     capacity = target_rows + packed_hap_mat.shape[0]
     i_start = 0
@@ -622,7 +660,12 @@ def _profile_next_chunks(
     row_chunks: Iterator[CovarianceRowChunk],
     profile: dict[str, float] | None,
 ) -> Iterator[CovarianceRowChunk]:
-    """Measure generator ``next()`` time, which is the streamed pair kernel."""
+    """Measure chunk-generation time separately from HDF5 append time.
+
+    The append writer consumes a row-chunk iterator, so wrapping ``next()``
+    calls is the narrowest way to profile the streamed covariance kernel
+    without changing the writer API.
+    """
     if profile is None:
         yield from row_chunks
         return
@@ -644,23 +687,32 @@ def _profile_next_chunks(
         yield chunk
 
 
-def _read_individuals(individuals_path: Path) -> list[str]:
-    individuals: list[str] = []
-    with open(individuals_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                individuals.append(line.split()[0])
-    return individuals
-
-
-def _read_genetic_map(genetic_map_path: Path) -> dict[int, float]:
-    pos2gpos: dict[int, float] = {}
-    with gzip.open(genetic_map_path, "rt") as gf:
-        for raw in gf:
-            parts = raw.strip().split()
-            pos2gpos[int(parts[1])] = float(parts[2])
-    return pos2gpos
+def _build_covariance_inputs(
+    panel: ReferencePanel,
+    pos2gpos: dict[int, float],
+    ne: float,
+    n_ind: int,
+    cutoff: float,
+) -> _CovarianceInputs:
+    """Convert parsed haplotypes into arrays shared by all pair kernels."""
+    hap_mat = np.array(panel.haplotypes, dtype=np.uint8)  # (n_snps, n_haps)
+    gpos_arr = np.array(
+        [pos2gpos[p] for p in panel.positions], dtype=np.float64
+    )  # (n_snps,)
+    hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, float(n_ind), cutoff)
+    pos_arr = np.array(panel.positions, dtype=np.int32)
+    assume_sorted_unique_rows = bool(
+        pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
+    )
+    return _CovarianceInputs(
+        hap_mat=hap_mat,
+        gpos_arr=gpos_arr,
+        hap_sums=hap_sums,
+        j_stop_by_i=j_stop_by_i,
+        pos_arr=pos_arr,
+        assume_sorted_unique_rows=assume_sorted_unique_rows,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -746,10 +798,10 @@ def calc_covariance(
     output_path: Path,
     ne: float = 11418.0,
     cutoff: float = 1e-7,
-    compact_output: bool = False,
+    compact_output: bool = True,
     compact_chunk_rows: int = COVARIANCE_WRITE_CHUNK_ROWS,
     compression: str | None = "zstd",
-    ld_kernel: str = "uint8",
+    ld_kernel: str = "bitpacked",
     profile: dict[str, float] | None = None,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
@@ -782,9 +834,10 @@ def calc_covariance(
         compression: HDF5 compression codec for the covariance partition
             (``"zstd"`` or ``"lzf"``). See
             ``ldetect_lite.io.covariance_hdf5._dataset_compression_kwargs``.
-        ld_kernel: Pair-count backend for compact covariance output. ``"uint8"``
-            is the established backend; ``"bitpacked"`` packs haplotypes into
-            ``uint64`` words and uses popcounts for pairwise intersections.
+        ld_kernel: Pair-count backend for compact covariance output.
+            ``"bitpacked"`` packs haplotypes into ``uint64`` words and uses
+            popcounts for pairwise intersections. ``"uint8"`` keeps the older
+            array-sum backend available for reference and diagnostics.
         profile: Optional mutable timing dictionary populated with coarse
             stage timings for benchmark/profiling callers.
 
@@ -803,143 +856,48 @@ def calc_covariance(
     if ld_kernel == "bitpacked" and not compact_output:
         raise ValueError("ld_kernel='bitpacked' currently requires compact_output=True")
 
-    # --- read individuals ---
     prep_start = time.perf_counter()
-    individuals: list[str] = []
-    with open(individuals_path) as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                individuals.append(line.split()[0])
-
+    individuals = read_individuals(individuals_path)
     n_ind = len(individuals)
     n_haps = 2 * n_ind
-
-    # Watterson's theta for shrinkage
-    harmonic = sum(1.0 / i for i in range(1, n_haps))
-    theta = (1.0 / harmonic) / (n_haps + 1.0 / harmonic)
-
-    # --- read genetic map ---
-    pos2gpos: dict[int, float] = {}
-    with gzip.open(genetic_map_path, "rt") as gf:
-        for raw in gf:
-            parts = raw.strip().split()
-            pos2gpos[int(parts[1])] = float(parts[2])
+    theta = watterson_theta(n_haps)
+    pos2gpos = read_genetic_map(genetic_map_path)
     if profile is not None:
         profile["prepare_seconds"] = time.perf_counter() - prep_start
 
-    # --- parse VCF/BCF ---
     vcf_start = time.perf_counter()
-    vcf = cyvcf2.VCF(str(vcf_path), samples=individuals)
-    missing = [ind for ind in individuals if ind not in vcf.samples]
-    if missing:
-        vcf.close()
-        raise ValueError(
-            f"individuals not found in VCF/BCF header: {', '.join(missing)}"
-        )
-    # cyvcf2 subsets to the requested samples but does not guarantee it
-    # preserves the caller's order -- remap columns back to *individuals*
-    # order explicitly rather than relying on it.
-    sample_index = {ind: idx for idx, ind in enumerate(vcf.samples)}
-    order = [sample_index[ind] for ind in individuals]
-
-    all_pos: list[int] = []
-    all_rs: list[str] = []
-    haps: list[list[int]] = []
-
-    skipped_unphased = 0
-
-    variants: Iterator[Any] = vcf(region) if region is not None else vcf
-    for variant in variants:
-        pos = variant.POS
-        if pos not in pos2gpos:
-            continue
-
-        genotypes = variant.genotypes
-        row_haps = [0] * n_haps
-        skip = False
-        hap_col = 0
-        for col in order:
-            allele1, allele2, phased = genotypes[col]
-            if not phased or allele1 < 0 or allele2 < 0:
-                skipped_unphased += 1
-                skip = True
-                break
-            row_haps[hap_col] = allele1
-            row_haps[hap_col + 1] = allele2
-            hap_col += 2
-
-        if skip:
-            continue
-
-        all_pos.append(pos)
-        all_rs.append(variant.ID or ".")
-        haps.append(row_haps)
-
-    vcf.close()
+    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos, n_haps)
     if profile is not None:
         profile["vcf_seconds"] = time.perf_counter() - vcf_start
-        profile["n_snps"] = float(len(all_pos))
+        profile["n_snps"] = float(len(panel.positions))
         profile["n_haps"] = float(n_haps)
 
-    if skipped_unphased:
-        print(
-            f"Warning: skipped {skipped_unphased} variant(s) with unphased or "
-            f"missing genotypes",
-            file=sys.stderr,
-        )
+    warn_reference_panel_skips(panel)
 
-    duplicate_positions = 0
-    if all_pos:
-        seen_positions: set[int] = set()
-        unique_pos: list[int] = []
-        unique_rs: list[str] = []
-        unique_haps: list[list[int]] = []
-        for pos, rs, row_haps in zip(all_pos, all_rs, haps, strict=True):
-            if pos in seen_positions:
-                duplicate_positions += 1
-                continue
-            seen_positions.add(pos)
-            unique_pos.append(pos)
-            unique_rs.append(rs)
-            unique_haps.append(row_haps)
-        all_pos = unique_pos
-        all_rs = unique_rs
-        haps = unique_haps
-
-    if duplicate_positions:
-        print(
-            f"Warning: skipped {duplicate_positions} duplicate-position "
-            f"variant(s); covariance partitions are keyed by physical position",
-            file=sys.stderr,
-        )
-
-    if not all_pos:
+    if not panel.positions:
         log_debug(
             "calc_covariance empty_partition "
             f"elapsed_seconds={time.perf_counter() - total_start:.3f}"
         )
         return
 
-    # --- build numpy arrays for the JIT kernel ---
     array_start = time.perf_counter()
-    hap_mat = np.array(haps, dtype=np.uint8)  # (n_snps, n_haps)
-    gpos_arr = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)  # (n_snps,)
-    hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, float(n_ind), cutoff)
+    inputs = _build_covariance_inputs(panel, pos2gpos, ne, n_ind, cutoff)
     log_debug(
         "calc_covariance arrays_built "
-        f"n_snps={hap_mat.shape[0]} n_haps={hap_mat.shape[1]} "
+        f"n_snps={inputs.hap_mat.shape[0]} n_haps={inputs.hap_mat.shape[1]} "
         f"seconds={time.perf_counter() - array_start:.3f}"
     )
     if profile is not None:
         profile["array_seconds"] = time.perf_counter() - array_start
     log_memory_checkpoint("calc_covariance_arrays_built", debug=True)
 
-    pos_arr = np.array(all_pos, dtype=np.int32)
-    assume_sorted_unique_rows = bool(
-        pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
-    )
+    hap_mat = inputs.hap_mat
+    gpos_arr = inputs.gpos_arr
+    hap_sums = inputs.hap_sums
+    j_stop_by_i = inputs.j_stop_by_i
+    pos_arr = inputs.pos_arr
+    assume_sorted_unique_rows = inputs.assume_sorted_unique_rows
 
     if compact_output and assume_sorted_unique_rows:
         write_start = time.perf_counter()
@@ -1109,8 +1067,8 @@ def calc_covariance(
         log_memory_checkpoint("calc_covariance_compact_written_fallback", debug=True)
         return
 
-    gpos_flat = np.array([pos2gpos[p] for p in all_pos], dtype=np.float64)
-    rs_arr = np.array(all_rs)
+    gpos_flat = np.array([pos2gpos[p] for p in panel.positions], dtype=np.float64)
+    rs_arr = np.array(panel.rs_ids)
     write_start = time.perf_counter()
     write_covariance_partition_hdf5(
         output_path,

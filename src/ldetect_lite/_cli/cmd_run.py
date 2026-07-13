@@ -104,12 +104,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     )
     p.add_argument(
         "--ld-kernel",
-        choices=("uint8", "bitpacked"),
-        default="uint8",
+        choices=("bitpacked", "uint8"),
+        default="bitpacked",
         help=(
-            "Pair-count backend for compact covariance output. 'uint8' is the "
-            "established backend; 'bitpacked' uses packed haplotypes and "
-            "popcounts (default: uint8)."
+            "Pair-count backend for compact covariance output. 'bitpacked' "
+            "uses packed haplotypes and popcounts; 'uint8' keeps the older "
+            "array-sum backend available for reference and diagnostics "
+            "(default: bitpacked). Use --ld-kernel uint8 with "
+            "--covariance-cache full."
         ),
     )
     p.add_argument(
