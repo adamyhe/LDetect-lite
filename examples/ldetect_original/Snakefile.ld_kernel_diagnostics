@@ -1,0 +1,311 @@
+"""Diagnose the bitpacked LD kernel's exactness and performance on real data,
+at full-genome scale.
+
+Runs `ldetect run` twice per chromosome x population on identical filtered
+1000G input -- once with `--ld-kernel uint8` (the reference backend) and
+once with `--ld-kernel bitpacked` (the default compact backend, see
+notes/logs/bitpacked-ld-kernel.md) -- then compares the two runs' vectors,
+breakpoints, and BEDs for exactness.
+
+Population-generic like Snakefile.compression_diagnostics:
+`chromosomes_by_population` in ld_kernel_diagnostics.yaml maps each
+population to the chromosomes to diagnose for it. Defaults to the FULL
+22-chromosome x 3-population dataset, since exactness of the bitpacked
+kernel is only a meaningful claim once checked genome-wide -- run it on a
+remote server/cluster given the compute cost. Outputs are namespaced under
+`results/ld_kernel_diagnostics/{population}/{chrom}/...`.
+
+Usage:
+    cd examples/ldetect_original/
+    uv run snakemake -s Snakefile.ld_kernel_diagnostics -n
+    uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 8
+
+    # --config merges into chromosomes_by_population key by key -- a
+    # population left out of the override keeps its full 1-22 default, so
+    # override every population you want restricted:
+    uv run snakemake -s Snakefile.ld_kernel_diagnostics --cores 8 \
+        --config chromosomes_by_population='{EUR: [22], AFR: [22], ASN: [22]}'
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "ld_kernel_diagnostics.yaml"
+
+
+CHROMS_BY_POP = {
+    str(pop): [str(chrom) for chrom in chroms]
+    for pop, chroms in config["chromosomes_by_population"].items()
+}
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_DIR = RESULTS / "filtered_vcf"
+FILT_VCF = str(
+    FILT_DIR
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+LD_KERNEL_ROOT = RESULTS / "ld_kernel_diagnostics"
+
+MODE_LD_KERNEL_FLAG = {"baseline": "uint8", "bitpacked": "bitpacked"}
+
+wildcard_constraints:
+    mode="baseline|bitpacked",
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def ld_kernel_targets(suffix):
+    targets = []
+    for population, chroms in CHROMS_BY_POP.items():
+        for chrom in chroms:
+            targets.append(str(LD_KERNEL_ROOT / population / chrom / suffix))
+    return targets
+
+
+rule all:
+    input:
+        ld_kernel_targets("compare/ld_kernel_vs_baseline.tsv"),
+        str(LD_KERNEL_ROOT / "summary.tsv"),
+
+
+rule ld_kernel_download_vcf:
+    output:
+        vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
+        tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule ld_kernel_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule ld_kernel_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule ld_kernel_prep_individuals:
+    input:
+        panel=rules.ld_kernel_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule ld_kernel_filter_vcf:
+    input:
+        vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
+        tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Dual-mode ldetect run: identical input, --ld-kernel uint8 vs bitpacked.
+# ---------------------------------------------------------------------------
+
+
+rule ld_kernel_run_ldetect:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(LD_KERNEL_ROOT / "{population}" / "{chrom}" / "{mode}" / "{chrom}-ld-blocks.bed"),
+        breakpoints=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "{mode}" / "breakpoints-{chrom}.json"
+        ),
+        vector=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "{mode}" / "vector-{chrom}.txt.gz"
+        ),
+    log:
+        run=str(LD_KERNEL_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.log"),
+        timing=str(LD_KERNEL_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.timing.log"),
+    benchmark:
+        str(LD_KERNEL_ROOT / "{population}" / "{chrom}" / "logs" / "{mode}.benchmark.tsv")
+    threads: config.get("ldetect_job_threads", config.get("workers", 4))
+    params:
+        output_dir=lambda wc: str(LD_KERNEL_ROOT / wc.population / wc.chrom / wc.mode),
+        log_dir=str(LD_KERNEL_ROOT / "{population}" / "{chrom}" / "logs"),
+        ne=lambda wildcards: pop_ne(wildcards.population),
+        cutoff=config["cov_cutoff"],
+        workers=lambda wildcards, threads: min(config.get("workers", 4), threads),
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config.get("subset", "fourier_ls"),
+        local_search_workers=lambda wildcards, threads: min(
+            config.get("local_search_workers", 1),
+            threads,
+        ),
+        ld_kernel=lambda wc: MODE_LD_KERNEL_FLAG[wc.mode],
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        export OMP_NUM_THREADS={params.workers}
+        export OPENBLAS_NUM_THREADS={params.workers}
+        export MKL_NUM_THREADS={params.workers}
+        export NUMEXPR_NUM_THREADS={params.workers}
+        export NUMBA_NUM_THREADS={params.workers}
+        /usr/bin/time -v -o {log.timing} \
+        uv run ldetect run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --ld-kernel {params.ld_kernel} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.workers} \
+            --local-search-workers {params.local_search_workers} \
+            > {log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Compare the two modes: exactness (vector/breakpoints/BED) + covariance
+# directory size + performance (Snakemake benchmark: wall-clock, peak RSS)
+# ---------------------------------------------------------------------------
+
+
+rule compare_ld_kernel:
+    input:
+        baseline_vector=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "baseline" / "vector-{chrom}.txt.gz"
+        ),
+        bitpacked_vector=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "bitpacked" / "vector-{chrom}.txt.gz"
+        ),
+        baseline_breakpoints=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "baseline" / "breakpoints-{chrom}.json"
+        ),
+        bitpacked_breakpoints=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "bitpacked" / "breakpoints-{chrom}.json"
+        ),
+        baseline_bed=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}-ld-blocks.bed"
+        ),
+        bitpacked_bed=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "bitpacked" / "{chrom}-ld-blocks.bed"
+        ),
+        baseline_benchmark=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "logs" / "baseline.benchmark.tsv"
+        ),
+        bitpacked_benchmark=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "logs" / "bitpacked.benchmark.tsv"
+        ),
+        script="scripts/compare_ld_kernel.py",
+    output:
+        str(LD_KERNEL_ROOT / "{population}" / "{chrom}" / "compare" / "ld_kernel_vs_baseline.tsv"),
+    params:
+        subset=config.get("subset", "fourier_ls"),
+        tolerance=config.get("tolerance", 0),
+        baseline_covariance_dir=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "baseline" / "{chrom}"
+        ),
+        bitpacked_covariance_dir=str(
+            LD_KERNEL_ROOT / "{population}" / "{chrom}" / "bitpacked" / "{chrom}"
+        ),
+    shell:
+        """
+        uv run python scripts/compare_ld_kernel.py \
+            --population {wildcards.population} \
+            --chromosome {wildcards.chrom} \
+            --baseline-vector {input.baseline_vector} \
+            --bitpacked-vector {input.bitpacked_vector} \
+            --baseline-breakpoints {input.baseline_breakpoints} \
+            --bitpacked-breakpoints {input.bitpacked_breakpoints} \
+            --baseline-bed {input.baseline_bed} \
+            --bitpacked-bed {input.bitpacked_bed} \
+            --baseline-covariance-dir {params.baseline_covariance_dir} \
+            --bitpacked-covariance-dir {params.bitpacked_covariance_dir} \
+            --baseline-benchmark {input.baseline_benchmark} \
+            --bitpacked-benchmark {input.bitpacked_benchmark} \
+            --subset {params.subset} \
+            --tolerance {params.tolerance} \
+            --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Genome-wide summary: concatenate all per-chromosome comparison rows
+# ---------------------------------------------------------------------------
+
+
+rule ld_kernel_summary:
+    input:
+        ld_kernel_targets("compare/ld_kernel_vs_baseline.tsv"),
+    output:
+        str(LD_KERNEL_ROOT / "summary.tsv"),
+    run:
+        import csv
+
+        rows = []
+        fieldnames = None
+        for path in input:
+            with open(path) as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                if fieldnames is None:
+                    fieldnames = reader.fieldnames
+                rows.extend(reader)
+        with open(output[0], "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
+            writer.writeheader()
+            writer.writerows(rows)

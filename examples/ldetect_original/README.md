@@ -133,6 +133,40 @@ Published reference block counts are:
 Matching block counts alone is not enough. Boundary offsets and recall should
 be used to decide whether the analysis is reproducing the original result.
 
+## Full EUR chr21 Runtime Benchmark
+
+The manuscript-scale chr21 timing comparison lives with this full reproduction
+workflow, not the toy `ldetect_example` fixture. First run the EUR chr21
+`ldetect-lite` workflow:
+
+```bash
+uv run snakemake --cores 8 --config chromosomes='[21]'
+```
+
+Then summarize the full-chromosome benchmark and write the manuscript timing
+plot:
+
+```bash
+uv run python scripts/benchmark_eur_chr21.py \
+  --legacy-seconds LEGACY_SECONDS
+```
+
+If the legacy run was captured with `/usr/bin/time -v`, pass that log instead:
+
+```bash
+uv run python scripts/benchmark_eur_chr21.py \
+  --legacy-time-log path/to/legacy-eur-chr21.timing.log
+```
+
+The script reads `results/logs/EUR/21.timing.log` or
+`results/logs/EUR/21.benchmark.tsv` for the `ldetect-lite` runtime, writes local
+summary files under `results/benchmarks/EUR-chr21/`, and writes the figure panel
+to:
+
+```text
+plots/timings-full-eur-chr21.svg
+```
+
 ## Diagnostic Workflow
 
 `Snakefile.diagnostics` runs a focused case/control investigation for boundary

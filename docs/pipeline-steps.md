@@ -6,9 +6,13 @@ Several of these stages accept their own `--workers`/`--metric-workers`. The sam
 
 The pipeline has five stages that can be run individually:
 
+![LDetect-lite pipeline overview](../schematics/plots/pipeline-overview.svg)
+
 ---
 
 **Step 1 — Partition chromosome** into overlapping windows:
+
+![Step 1 schematic](../schematics/plots/step1-partition-chromosome.svg)
 
 ```bash
 ldetect partition-chromosome \
@@ -30,6 +34,8 @@ Arguments:
 
 **Step 2 — Calculate covariance** from a phased VCF/BCF partition:
 
+![Step 2 schematic](../schematics/plots/step2-calc-covariance.svg)
+
 ```bash
 ldetect calc-covariance \
   --reference-panel 1000G.chr2.vcf.gz \
@@ -45,7 +51,7 @@ This step must be run once per partition. `ldetect run --workers N` runs partiti
 
 For large reference panels, prefer `.bcf`/`.csi` over `.vcf.gz`/`.tbi` — same output, but faster and lower-memory to read (see `docs/optimizations.md`).
 
-Reads phased haplotypes and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The standalone command writes the full schema, including naive LD, genetic positions, and SNP IDs; `ldetect run` defaults to the compact schema described above.
+Reads phased haplotypes and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The default bitpacked backend writes the compact production schema; the older `uint8` backend is retained for reference and can write the full debug schema, including naive LD, genetic positions, and SNP IDs.
 
 Arguments:
 - `--reference-panel PATH` — VCF/BCF reference panel path, indexed with `tabix -p vcf` or `bcftools index`. If omitted, reads from stdin instead.
@@ -55,10 +61,13 @@ Arguments:
 - `--ne FLOAT` — effective population size for the shrinkage estimator (default: 11418.0)
 - `--cutoff FLOAT` — pairs with absolute shrinkage LD below this are excluded from the output (default: 1e-7)
 - `--covariance-compression {lzf,zstd}` — HDF5 compression codec for the output partition (default: `zstd`). `zstd` is smaller and faster to read/write than `lzf` at equal precision — see `docs/optimizations.md`.
+- `--ld-kernel {bitpacked,uint8}` — pair-count backend for covariance output (default: `bitpacked`). Use `uint8` for full-schema/debug output or reference-backend comparisons.
 
 ---
 
 **Step 3 — Matrix to vector**:
+
+![Step 3 schematic](../schematics/plots/step3-matrix-to-vector.svg)
 
 ```bash
 ldetect matrix-to-vector \
@@ -76,11 +85,13 @@ Arguments:
 - `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output (requires `ldetect-lite[heatmap]`)
 - `--workers N` — parallel workers for partition-level vector computation (default: 1)
 
-`--generate-heatmap` requires full-schema covariance partitions. If your cache was created by the default `ldetect run` mode, rerun with `ldetect run --covariance-cache full` or create full partitions with standalone `ldetect calc-covariance`.
+`--generate-heatmap` requires full-schema covariance partitions. If your cache was created by the default `ldetect run` mode, rerun with `ldetect run --covariance-cache full --ld-kernel uint8` or create full partitions with standalone `ldetect calc-covariance --ld-kernel uint8`.
 
 ---
 
 **Step 4 — Find breakpoints**:
+
+![Step 4 schematic](../schematics/plots/step4-find-breakpoints.svg)
 
 ```bash
 ldetect find-minima \
@@ -133,6 +144,8 @@ Arguments:
 ---
 
 **Step 5 — Extract to BED**:
+
+![Step 5 schematic](../schematics/plots/step5-extract-bed.svg)
 
 ```bash
 ldetect extract-bpoints \

@@ -146,18 +146,24 @@ def run_legacy(args: argparse.Namespace) -> None:
     summary_path = args.output_dir / "summary.tsv"
     json_path = args.output_dir / f"breakpoints-{args.chromosome}.json"
 
-    matrix_pipeline.pipeline_lean(
-        str(args.dataset_path) + "/",
-        args.chromosome,
-        str(vector_path),
-    )
-    minima_pipeline.pipeline(
-        str(vector_path),
-        args.chromosome,
-        str(args.dataset_path) + "/",
-        args.n_snps_bw_bpoints,
-        str(pickle_path),
-    )
+    if args.stage in ("all", "matrix-to-vector"):
+        matrix_pipeline.pipeline_lean(
+            str(args.dataset_path) + "/",
+            args.chromosome,
+            str(vector_path),
+        )
+
+    if args.stage in ("all", "find-minima"):
+        minima_pipeline.pipeline(
+            str(vector_path),
+            args.chromosome,
+            str(args.dataset_path) + "/",
+            args.n_snps_bw_bpoints,
+            str(pickle_path),
+        )
+
+    if args.stage not in ("all", "extract-bpoints"):
+        return
 
     with raw_bed_path.open("w") as f:
         old_stdout = sys.stdout
@@ -174,13 +180,14 @@ def run_legacy(args: argparse.Namespace) -> None:
 
     _normalise_legacy_bed(raw_bed_path, bed_path)
     _write_json_breakpoints(pickle_path, json_path)
-    _write_summary(
-        summary_path,
-        population=args.population,
-        chromosome=args.chromosome,
-        vector_path=vector_path,
-        pickle_path=pickle_path,
-    )
+    if args.stage == "all":
+        _write_summary(
+            summary_path,
+            population=args.population,
+            chromosome=args.chromosome,
+            vector_path=vector_path,
+            pickle_path=pickle_path,
+        )
 
 
 def main() -> None:
@@ -191,6 +198,11 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--n-snps-bw-bpoints", required=True, type=int)
     parser.add_argument("--subset", default="fourier_ls")
+    parser.add_argument(
+        "--stage",
+        choices=("all", "matrix-to-vector", "find-minima", "extract-bpoints"),
+        default="all",
+    )
     args = parser.parse_args()
     run_legacy(args)
 

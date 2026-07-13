@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<svg width="520pt" height="84pt" viewBox="0 0 520 84" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1">
+
+<defs>
+  <style type="text/css">
+    text { font-family: DejaVu Sans, Arial, sans-serif; fill: #222222; }
+    .panel-label { font-size: 13px; font-weight: 700; }
+    .overview-title { font-size: 10px; font-weight: 700; }
+    .overview-subtitle { font-size: 8.8px; }
+    .overview-box { stroke: #222222; stroke-width: 1; rx: 5; ry: 5; }
+    .mini-line { stroke: #222222; stroke-width: 1.1; fill: none; stroke-linecap: round; }
+    .mini-thin { stroke: #222222; stroke-width: 0.7; fill: none; }
+    .mini-red { stroke: #d62728; stroke-width: 0.9; fill: none; }
+    .overview-arrow { stroke: #222222; stroke-width: 1.2; fill: none; marker-end: url(#arrowhead); }
+  </style>
+  <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+    <path d="M 0 0 L 8 3 L 0 6 z" fill="#222222"/>
+  </marker>
+</defs>
+
+<rect class="overview-box" x="6" y="9" width="92" height="66" fill="#dce9f8"/>
+<text class="overview-title" x="52" y="20" text-anchor="middle">Step 1</text>
+<text class="overview-subtitle" x="52" y="70" text-anchor="middle">partition</text>
+<path class="mini-line" d="M 13 38.68 L 91 38.68"/>
+<path class="mini-thin" d="M 19.24 34.68 L 19.24 42.68"/>
+<path class="mini-thin" d="M 30.16 34.68 L 30.16 42.68"/>
+<path class="mini-thin" d="M 44.98 34.68 L 44.98 42.68"/>
+<path class="mini-thin" d="M 58.24 34.68 L 58.24 42.68"/>
+<path class="mini-thin" d="M 73.06 34.68 L 73.06 42.68"/>
+<path class="mini-thin" d="M 84.76 34.68 L 84.76 42.68"/>
+<rect x="14.56" y="45.88" width="26.52" height="5" fill="#ddf1e9" stroke="#222222" stroke-width="0.5"/>
+<rect x="36.4" y="45.88" width="28.08" height="5" fill="#f7ecd3" stroke="#222222" stroke-width="0.5"/>
+<rect x="58.24" y="45.88" width="31.2" height="5" fill="#ddf1e9" stroke="#222222" stroke-width="0.5"/>
+<path class="mini-red" d="M 41.08 29.68 L 41.08 52.88"/>
+<path class="mini-red" d="M 64.48 29.68 L 64.48 52.88"/>
+<path class="overview-arrow" d="M 100 42 L 107.5 42"/>
+<rect class="overview-box" x="110" y="9" width="92" height="66" fill="#ddf1e9"/>
+<text class="overview-title" x="156" y="20" text-anchor="middle">Step 2</text>
+<text class="overview-subtitle" x="156" y="70" text-anchor="middle">covariance</text>
+<rect x="117" y="26" width="23.4" height="34" fill="#dce9f8" stroke="#222222" stroke-width="0.6"/>
+<path class="mini-thin" d="M 117 34.5 L 140.4 34.5"/>
+<path class="mini-thin" d="M 117 43 L 140.4 43"/>
+<path class="mini-thin" d="M 117 51.5 L 140.4 51.5"/>
+<path class="mini-thin" d="M 124.8 26 L 124.8 60"/>
+<path class="mini-thin" d="M 132.6 26 L 132.6 60"/>
+<rect x="119.028" y="37.135" width="3.744" height="3.23" fill="#ffffff" stroke="#222222" stroke-width="0.25"/>
+<rect x="126.828" y="37.135" width="3.744" height="3.23" fill="#b7cee6" stroke="#222222" stroke-width="0.25"/>
+<rect x="134.628" y="37.135" width="3.744" height="3.23" fill="#0057b8" stroke="#222222" stroke-width="0.25"/>
+<rect x="119.028" y="45.635" width="3.744" height="3.23" fill="#b7cee6" stroke="#222222" stroke-width="0.25"/>
+<rect x="126.828" y="45.635" width="3.744" height="3.23" fill="#ffffff" stroke="#222222" stroke-width="0.25"/>
+<rect x="134.628" y="45.635" width="3.744" height="3.23" fill="#b7cee6" stroke="#222222" stroke-width="0.25"/>
+<rect x="119.028" y="54.135" width="3.744" height="3.23" fill="#0057b8" stroke="#222222" stroke-width="0.25"/>
+<rect x="126.828" y="54.135" width="3.744" height="3.23" fill="#b7cee6" stroke="#222222" stroke-width="0.25"/>
+<rect x="134.628" y="54.135" width="3.744" height="3.23" fill="#ffffff" stroke="#222222" stroke-width="0.25"/>
+<path class="overview-arrow" d="M 145.4 43 L 154.9 43"/>
+<rect x="163.613" y="33.4528" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="168.386" y="33.4528" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="173.16" y="33.4528" width="4.7736" height="4.7736" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="177.934" y="33.4528" width="4.7736" height="4.7736" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="163.613" y="38.2264" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="168.386" y="38.2264" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="173.16" y="38.2264" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="177.934" y="38.2264" width="4.7736" height="4.7736" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="163.613" y="43" width="4.7736" height="4.7736" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="168.386" y="43" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="173.16" y="43" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="177.934" y="43" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="163.613" y="47.7736" width="4.7736" height="4.7736" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="168.386" y="47.7736" width="4.7736" height="4.7736" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="173.16" y="47.7736" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="177.934" y="47.7736" width="4.7736" height="4.7736" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<path class="overview-arrow" d="M 204 42 L 211.5 42"/>
+<rect class="overview-box" x="214" y="9" width="92" height="66" fill="#f7ecd3"/>
+<text class="overview-title" x="260" y="20" text-anchor="middle">Step 3</text>
+<text class="overview-subtitle" x="260" y="70" text-anchor="middle">vector</text>
+<rect x="225.774" y="34.5136" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="230.017" y="34.5136" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="234.26" y="34.5136" width="4.2432" height="4.2432" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="238.503" y="34.5136" width="4.2432" height="4.2432" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="225.774" y="38.7568" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="230.017" y="38.7568" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="234.26" y="38.7568" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="238.503" y="38.7568" width="4.2432" height="4.2432" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="225.774" y="43" width="4.2432" height="4.2432" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="230.017" y="43" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="234.26" y="43" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="238.503" y="43" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="225.774" y="47.2432" width="4.2432" height="4.2432" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="230.017" y="47.2432" width="4.2432" height="4.2432" fill="#b7cee6" stroke="white" stroke-width="0.25"/>
+<rect x="234.26" y="47.2432" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<rect x="238.503" y="47.2432" width="4.2432" height="4.2432" fill="#0057b8" stroke="white" stroke-width="0.25"/>
+<path class="overview-arrow" d="M 252.52 43 L 260.24 43"/>
+<path d="M 266.24 48.6 L 271.716 36 L 276.583 40.76 L 282.058 32.36 L 287.534 39.08 L 293.618 34.04" fill="none" stroke="#0057b8" stroke-width="1.4"/>
+<path class="mini-thin" d="M 266.24 57 L 296.66 57"/>
+<path class="overview-arrow" d="M 308 42 L 315.5 42"/>
+<rect class="overview-box" x="318" y="9" width="92" height="66" fill="#f8dedb"/>
+<text class="overview-title" x="364" y="20" text-anchor="middle">Step 4</text>
+<text class="overview-subtitle" x="364" y="70" text-anchor="middle">breakpoints</text>
+<path d="M 325 37.4 L 337.48 47.48 L 349.18 36.84 L 364 48.6 L 378.82 38.52 L 392.08 46.92 L 403 37.96" fill="none" stroke="#0057b8" stroke-width="1.2"/>
+<circle cx="337.48" cy="47.48" r="2.2" fill="#f8dedb" stroke="#d62728" stroke-width="1"/>
+<circle cx="364" cy="48.6" r="2.2" fill="#f8dedb" stroke="#d62728" stroke-width="1"/>
+<circle cx="392.08" cy="46.92" r="2.2" fill="#f8dedb" stroke="#d62728" stroke-width="1"/>
+<path class="overview-arrow" d="M 412 42 L 419.5 42"/>
+<rect class="overview-box" x="422" y="9" width="92" height="66" fill="#ededed"/>
+<text class="overview-title" x="468" y="20" text-anchor="middle">Step 5</text>
+<text class="overview-subtitle" x="468" y="70" text-anchor="middle">BED</text>
+<path class="mini-line" d="M 429 37.6 L 507 37.6"/>
+<path class="mini-red" d="M 452.4 29.6 L 452.4 52.88"/>
+<path class="mini-red" d="M 474.24 29.6 L 474.24 52.88"/>
+<path class="mini-red" d="M 489.84 29.6 L 489.84 52.88"/>
+<rect x="429" y="45.88" width="23.4" height="6" fill="#dce9f8" stroke="#222222" stroke-width="0.5"/>
+<rect x="452.4" y="45.88" width="21.84" height="6" fill="#f7ecd3" stroke="#222222" stroke-width="0.5"/>
+<rect x="474.24" y="45.88" width="15.6" height="6" fill="#ddf1e9" stroke="#222222" stroke-width="0.5"/>
+<rect x="489.84" y="45.88" width="17.16" height="6" fill="#f8dedb" stroke="#222222" stroke-width="0.5"/>
+</svg>

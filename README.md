@@ -63,6 +63,7 @@ Options:
 - `--cov-cutoff FLOAT` — LD pairs with absolute shrinkage correlation below this threshold are not written to disk, reducing storage (default: 1e-7)
 - `--covariance-cache {compact,full}` — partition cache schema for `ldetect run` (default: `compact`). Compact caches write only canonical position pairs, `shrink_ld`, diagonals, and lookup indexes, which is enough for restartable matrix-to-vector, metric, and local-search steps. Use `full` when debugging or when later running full-matrix/heatmap readers.
 - `--covariance-compression {lzf,zstd}` — HDF5 compression codec for covariance partitions (default: `zstd`). `zstd` is smaller and faster to read/write than `lzf` at equal precision — see `docs/optimizations.md`.
+- `--ld-kernel {bitpacked,uint8}` — compact covariance pair-count backend (default: `bitpacked`). `bitpacked` uses packed haplotypes and popcounts. `uint8` keeps the older array-sum backend available for reference and diagnostics; use it when requesting `--covariance-cache full`.
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which of the four breakpoint sets to write to the BED file (default: `fourier_ls`; see `docs/pipeline-steps.md` step 4)
@@ -76,6 +77,24 @@ Options:
 If `--workers` is greater than 1 and none of `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` are set, `run` prints a startup warning: numpy/BLAS/numba otherwise size their own internal thread pools to the whole machine's core count, not `--workers`, which oversubscribes real CPUs when multiple `ldetect run` processes share a node (e.g. several jobs on the same Slurm allocation). Export those five variables to match `--workers` to avoid this — see `examples/ldetect_original/Snakefile`'s `run_ldetect` rule for a worked example.
 
 Each of the five stages (partition, covariance, matrix-to-vector, find-minima, extract-bpoints) can also be run individually, along with a `covariance-summary` inspection utility — see `docs/pipeline-steps.md`.
+
+### Pipeline schematics
+
+From a development checkout, the compact pipeline overview can be regenerated
+with:
+
+```bash
+python3 schematics/plot_figure1_panels.py
+```
+
+The per-step pipeline schematics can be regenerated with:
+
+```bash
+uv run --extra heatmap python schematics/plot_pipeline_schematics.py
+```
+
+The overview command writes `pipeline-overview.svg`; the per-step schematic
+command writes SVG/PDF figures under `schematics/plots/`.
 
 ### Interpolate genetic maps
 

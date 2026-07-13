@@ -58,8 +58,42 @@ ldetect-lite = "ldetect_lite._cli.main:main"
 ldetect = "ldetect_lite._cli.main:main"
 ldl = "ldetect_lite._cli.main:main"
 
+[tool.hatch.build]
+exclude = [
+    "/_reference",
+    "/benchmarks",
+    "/docs",
+    "/examples",
+    "/notes",
+    "/tests",
+    "/.agents",
+    "/.claude",
+    "/.codex",
+    "/.github",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.uv-cache",
+    "/.gitattributes",
+    "/.gitignore",
+    "/AGENTS.md",
+    "/uv.lock",
+    "/**/__pycache__",
+    "/**/.mypy_cache",
+    "/**/.snakemake",
+    "/**/results",
+    "/**/work",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ldetect_lite"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/LICENSE",
+    "/README.md",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
