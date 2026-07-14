@@ -1,4 +1,4 @@
-"""Summarize and plot the full EUR chr21 runtime benchmark.
+"""Summarize and plot the full chromosome runtime benchmark (default EUR chr21).
 
 This script is intentionally lightweight: the expensive ldetect-lite run is
 owned by the main Snakemake workflow, and the legacy runtime can be supplied as
@@ -64,8 +64,16 @@ def main() -> None:
     lite_seconds = choose_lite_seconds(args)
     legacy_seconds = choose_legacy_seconds(args)
     rows = [
-        timing_row(args.population, args.chromosome, "legacy", legacy_seconds, legacy_source(args)),
-        timing_row(args.population, args.chromosome, "lite", lite_seconds, lite_source(args)),
+        timing_row(
+            args.population,
+            args.chromosome,
+            "legacy",
+            legacy_seconds,
+            legacy_source(args),
+        ),
+        timing_row(
+            args.population, args.chromosome, "lite", lite_seconds, lite_source(args)
+        ),
     ]
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

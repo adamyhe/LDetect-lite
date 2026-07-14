@@ -94,3 +94,58 @@ covariance fixture under `ref/cov_matrix/`. The output-size comparison is
 between the original gzipped text covariance file and the current full HDF5
 `calc-covariance` CLI output; compact-cache storage comparisons should be made
 with the function-level or full-genome bitpacking benchmarks instead.
+
+## VCF/BCF Ingestion Profiling
+
+The example workflow prepares both VCF.gz and BCF versions of the same EUR chr2
+interval:
+
+```text
+work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz
+work/vcf/1000G.phase1.EUR.2.39967768-40067768.bcf
+```
+
+To time VCF.gz to BCF conversion on this interval:
+
+```bash
+mkdir -p results/bcf_conversion_profile
+
+/usr/bin/time -v \
+  -o results/bcf_conversion_profile/vcf_to_bcf.timing.log \
+  bcftools view -Ob \
+    -o results/bcf_conversion_profile/1000G.phase1.EUR.2.39967768-40067768.bcf \
+    work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz
+
+/usr/bin/time -v \
+  -o results/bcf_conversion_profile/bcf_index.timing.log \
+  bcftools index -f \
+    results/bcf_conversion_profile/1000G.phase1.EUR.2.39967768-40067768.bcf
+```
+
+To split bitpacked covariance input preparation into raw cyvcf2 iteration,
+genotype decoding, current list-backed panel construction, current
+array-plus-bitpack construction, direct one-pass packing, and packed HDF5
+sidecar writing, run the profiler on both prepared inputs:
+
+```bash
+uv run python scripts/profile_bitpack_ingestion.py \
+  --reference-panel work/vcf/1000G.phase1.EUR.2.39967768-40067768.bcf \
+  --region 2:39967768-40067768 \
+  --genetic-map ref/chr2.interpolated_genetic_map.gz \
+  --individuals ref/eurinds.txt \
+  --output results/bitpack_ingestion_profile_bcf.tsv \
+  --repeats 7
+
+uv run python scripts/profile_bitpack_ingestion.py \
+  --reference-panel work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz \
+  --region 2:39967768-40067768 \
+  --genetic-map ref/chr2.interpolated_genetic_map.gz \
+  --individuals ref/eurinds.txt \
+  --output results/bitpack_ingestion_profile_vcf.tsv \
+  --repeats 7
+```
+
+These diagnostics are intentionally small-scale. They are useful for deciding
+whether optimization effort should target input format, cyvcf2 iteration,
+Python haplotype construction, direct bitpacking, or sidecar writes before
+testing larger chromosome-scale changes.

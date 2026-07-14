@@ -31,12 +31,23 @@ Timing plots are tracked under `examples/ldetect_example/plots/`:
 
 Current measured command-level timings on the example interval:
 
-| Stage | Original LDetect mean seconds | `ldetect-lite` mean seconds | Speedup |
-|---|---:|---:|---:|
-| `calc-covariance` | 96.649 | 3.276 | 29.50x |
-| `matrix-to-vector` | 1.032 | 0.229 | 4.51x |
-| `find-minima` | 10.845 | 1.345 | 8.06x |
-| `extract-bpoints` | 0.676 | 0.136 | 4.98x |
+| Stage              | Original LDetect mean seconds | `ldetect-lite` mean seconds | Speedup |
+| ------------------ | ----------------------------: | --------------------------: | ------: |
+| `calc-covariance`  |                        96.649 |                       3.276 |  29.50x |
+| `matrix-to-vector` |                         1.032 |                       0.229 |   4.51x |
+| `find-minima`      |                        10.845 |                       1.345 |   8.06x |
+| `extract-bpoints`  |                         0.676 |                       0.136 |   4.98x |
+
+The full EUR chr21 timing benchmark is generated from the
+`examples/ldetect_original/` reproduction workflow. It compares the vendored
+legacy downstream LDetect scripts against `ldetect-lite` on the same staged
+chromosome data; see that example's README for the exact commands.
+
+![full EUR chr21 timing](../examples/ldetect_original/plots/timings-full-eur-chr21.svg)
+
+| Stage      | Original LDetect mean seconds | `ldetect-lite` mean seconds |   Speedup |
+| ---------- | ----------------------------: | --------------------------: | --------: |
+| `pipeline` |                   6605.000000 |                  210.790000 | 31.334504 |
 
 The covariance benchmark is intentionally a command boundary comparison:
 legacy uses the vendored `P00_01_calc_covariance.py` script with the prepared
@@ -174,11 +185,11 @@ write_covariance_partition_hdf5(
 
 **Estimated impact** (based on representative partition profiling):
 
-| Operation | Before | After | Speedup |
-|---|---|---|---|
-| Write | row-oriented Python formatting | typed HDF5 dataset writes/chunk appends | removes per-row Python formatting |
-| Read | row-oriented parsing and broad scans | typed HDF5 reads plus indexed scans | avoids parsing and full scans |
-| Working memory | full pair arrays plus metadata | compact chunk streaming in `run` | bounded by chunk size for compact cache |
+| Operation      | Before                               | After                                   | Speedup                                 |
+| -------------- | ------------------------------------ | --------------------------------------- | --------------------------------------- |
+| Write          | row-oriented Python formatting       | typed HDF5 dataset writes/chunk appends | removes per-row Python formatting       |
+| Read           | row-oriented parsing and broad scans | typed HDF5 reads plus indexed scans     | avoids parsing and full scans           |
+| Working memory | full pair arrays plus metadata       | compact chunk streaming in `run`        | bounded by chunk size for compact cache |
 
 ---
 

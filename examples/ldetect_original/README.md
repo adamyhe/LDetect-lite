@@ -136,36 +136,106 @@ be used to decide whether the analysis is reproducing the original result.
 ## Full EUR chr21 Runtime Benchmark
 
 The manuscript-scale chr21 timing comparison lives with this full reproduction
-workflow, not the toy `ldetect_example` fixture. First run the EUR chr21
-`ldetect-lite` workflow:
+workflow, not the toy `ldetect_example` fixture. The plotting helper
+`scripts/runtime_benchmark.py` does **not** run either implementation; it
+only reads timing logs and writes the summary table/plot. Use the commands
+below to generate those timing logs from a clean checkout.
+
+First run the EUR chr21 `ldetect-lite` workflow. Targeting the BED file avoids
+running all populations/chromosomes:
 
 ```bash
-uv run snakemake --cores 8 --config chromosomes='[21]'
+cd examples/ldetect_original
+
+uv run snakemake --cores 8 \
+  results/EUR/21/21-ld-blocks.bed
 ```
 
-Then summarize the full-chromosome benchmark and write the manuscript timing
+This writes the `ldetect-lite` wall-clock log to:
+
+```text
+results/logs/EUR/21.timing.log
+```
+
+For a single-worker comparison against the vendored legacy downstream command,
+run the same target with one Snakemake core and one internal `ldetect-lite`
+worker. Put the target before `--config`; otherwise Snakemake can parse the
+target path as a malformed config value:
+
+```bash
+uv run snakemake --cores 1 \
+  results/EUR/21/21-ld-blocks.bed \
+  --config workers=1 ldetect_job_threads=1
+```
+
+Next prepare the legacy-format covariance dataset for the same chromosome.
+This uses `ldetect-lite` to generate covariance partitions and converts those
+HDF5 partitions into the text `.gz` files expected by the vendored original
+LDetect downstream scripts:
+
+```bash
+uv run snakemake -s Snakefile.legacy_diagnostics --cores 4 \
+  results/legacy_diagnostics/EUR/21/legacy_dataset/.staged
+```
+
+Then run the original LDetect downstream scripts manually under
+`/usr/bin/time -v`. This is the command that actually times the vendored legacy
+LDetect code. The wrapper runs the original matrix-to-vector, minima/local
+search, and BED extraction scripts in one Python process:
+
+```bash
+mkdir -p results/legacy_diagnostics/EUR/21/logs \
+         results/legacy_diagnostics/EUR/21/legacy_timed
+
+/usr/bin/time -v \
+  -o results/legacy_diagnostics/EUR/21/logs/legacy_ldetect.timing.log \
+  uv run python scripts/run_legacy_ldetect.py \
+    --dataset-path results/legacy_diagnostics/EUR/21/legacy_dataset \
+    --chromosome 21 \
+    --population EUR \
+    --output-dir results/legacy_diagnostics/EUR/21/legacy_timed \
+    --n-snps-bw-bpoints 10000 \
+    --subset fourier_ls \
+  > results/legacy_diagnostics/EUR/21/logs/legacy_ldetect.timed.log 2>&1
+```
+
+Finally summarize the full-chromosome benchmark and write the manuscript timing
 plot:
 
 ```bash
-uv run python scripts/benchmark_eur_chr21.py \
-  --legacy-seconds LEGACY_SECONDS
+uv run --extra heatmap python scripts/runtime_benchmark.py \
+  --population EUR \
+  --chromosome 21 \
+  --lite-time-log results/logs/EUR/21.timing.log \
+  --legacy-time-log results/legacy_diagnostics/EUR/21/logs/legacy_ldetect.timing.log \
+  --output-dir results/benchmarks/EUR-chr21 \
+  --plot plots/timings-full-eur-chr21.svg
 ```
 
-If the legacy run was captured with `/usr/bin/time -v`, pass that log instead:
-
-```bash
-uv run python scripts/benchmark_eur_chr21.py \
-  --legacy-time-log path/to/legacy-eur-chr21.timing.log
-```
-
-The script reads `results/logs/EUR/21.timing.log` or
-`results/logs/EUR/21.benchmark.tsv` for the `ldetect-lite` runtime, writes local
-summary files under `results/benchmarks/EUR-chr21/`, and writes the figure panel
-to:
+The summary script writes:
 
 ```text
+results/benchmarks/EUR-chr21/timings.tsv
+results/benchmarks/EUR-chr21/summary.tsv
 plots/timings-full-eur-chr21.svg
 ```
+
+If you already have a trusted legacy elapsed time from another runner, you can
+skip the manual `/usr/bin/time` command and pass seconds directly instead:
+
+```bash
+uv run --extra heatmap python scripts/runtime_benchmark.py \
+  --population EUR \
+  --chromosome 21 \
+  --lite-time-log results/logs/EUR/21.timing.log \
+  --legacy-seconds LEGACY_SECONDS \
+  --output-dir results/benchmarks/EUR-chr21 \
+  --plot plots/timings-full-eur-chr21.svg
+```
+
+Do not pass `--legacy-dir`, `--lite-dir`, or `--output` to
+`scripts/runtime_benchmark.py`; those are not supported options. The script
+combines timing logs only and does not inspect pipeline output directories.
 
 ## Diagnostic Workflow
 
