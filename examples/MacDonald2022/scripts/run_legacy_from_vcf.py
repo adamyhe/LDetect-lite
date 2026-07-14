@@ -2,10 +2,11 @@
 
 This is a MacDonald2022 diagnostic runner, not part of the default
 reproduction. It uses the exact filtered VCF, individual list, and genetic map
-that the normal ldetect-lite rule uses, but drives the original legacy scripts
-from partitioning through BED extraction. The output is intentionally raw
-pre-postprocessing BED; the Snakefile applies the same MacDonald postprocess
-rule afterward when comparing against the published BEDs.
+that the normal ldetect-lite rule uses, writes legacy-compatible partitions,
+then drives the shipped vendored legacy scripts from covariance through BED
+extraction. The output is intentionally raw pre-postprocessing BED; the
+Snakefile applies the same MacDonald postprocess rule afterward when comparing
+against the published BEDs.
 """
 
 from __future__ import annotations
@@ -27,12 +28,8 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _legacy_shim_root() -> Path:
+def _vendored_legacy_root() -> Path:
     return _repo_root() / "examples" / "ldetect_original" / "scripts" / "legacy_ldetect"
-
-
-def _legacy_reference_root() -> Path:
-    return _repo_root() / "_reference" / "ldetect"
 
 
 def _patch_legacy_scipy_window() -> None:
@@ -131,7 +128,7 @@ def _run_covariance_partitions(
     log_dir: Path,
 ) -> None:
     p00_01 = (
-        _legacy_reference_root()
+        _vendored_legacy_root()
         / "ldetect"
         / "examples"
         / "P00_01_calc_covariance.py"
@@ -144,7 +141,7 @@ def _run_covariance_partitions(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    legacy_paths = [str(_legacy_shim_root()), str(_legacy_reference_root())]
+    legacy_paths = [str(_vendored_legacy_root())]
     env["PYTHONPATH"] = os.pathsep.join(
         legacy_paths + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
     )
@@ -287,7 +284,7 @@ def _run_downstream(
     n_snps_bw_bpoints: int,
     subset: str,
 ) -> tuple[Path, Path, Path, Path]:
-    sys.path.insert(0, str(_legacy_shim_root()))
+    sys.path.insert(0, str(_vendored_legacy_root()))
     _patch_legacy_scipy_window()
 
     import P01_matrix_to_vector_pipeline as matrix_pipeline
