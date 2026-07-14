@@ -43,12 +43,19 @@ configfile: "config.yaml"
 CHROMS = config["chromosomes"]
 BLOCK_SETS = list(config["block_sets"].keys())
 ACTIVE_BLOCK_SETS = config.get("active_block_sets", BLOCK_SETS)
+LEGACY_DIAGNOSTIC_BLOCK_SETS = config.get("legacy_diagnostics", {}).get(
+    "block_sets", []
+)
+LEGACY_DIAGNOSTIC_CHROMS = [
+    str(chrom) for chrom in config.get("legacy_diagnostics", {}).get("chromosomes", [])
+]
 BLOCK_SET_PATTERN = "|".join(re.escape(block_set) for block_set in BLOCK_SETS)
 RAW_DIR = Path(config["raw_vcf_dir"])
 FILT_DIR = Path(config["filtered_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
 RESULTS = Path(config["results_dir"])
+LEGACY_RESULTS = RESULTS / "legacy_vcf"
 VCF_TMPL = config["vcf_filename_template"]
 
 
@@ -133,6 +140,14 @@ def remove_centromeres_param(wc):
     return ""
 
 
+def legacy_diagnostic_targets(filename):
+    return [
+        str(LEGACY_RESULTS / block_set / f"chr{chrom}" / "compare" / filename)
+        for block_set in LEGACY_DIAGNOSTIC_BLOCK_SETS
+        for chrom in LEGACY_DIAGNOSTIC_CHROMS
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Target rule
 # ---------------------------------------------------------------------------
@@ -165,6 +180,12 @@ rule all:
         str(RESULTS / "compare" / "map_summary.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison_point_mode.tsv"),
+
+
+rule legacy_diagnostics:
+    input:
+        legacy_diagnostic_targets("raw_ldetect_lite_vs_legacy.tsv"),
+        legacy_diagnostic_targets("legacy_final_vs_reference.tsv"),
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +435,13 @@ rule run_ldetect:
         ),
     output:
         bed=str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.bed"),
+        vector=str(RESULTS / "{block_set}" / "chr{chrom}" / "vector-chr{chrom}.txt.gz"),
+        breakpoints=str(
+            RESULTS / "{block_set}" / "chr{chrom}" / "breakpoints-chr{chrom}.json"
+        ),
+        partitions=str(
+            RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}_partitions.txt"
+        ),
     log:
         run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
@@ -479,6 +507,166 @@ rule postprocess:
             {params.remove_centromeres} \
             --min-snps {params.min_snps} \
             --output {output}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Opt-in diagnostic: vendored legacy ldetect on the same MacDonald inputs
+# ---------------------------------------------------------------------------
+
+
+rule run_legacy_from_vcf:
+    input:
+        genetic_map=block_set_genetic_map,
+        vcf=block_set_filtered_vcf,
+        tbi=lambda wc: block_set_filtered_vcf(wc) + ".tbi",
+        individuals=lambda wc: str(
+            RES_DIR / f"{block_set_population(wc.block_set)}_inds.txt"
+        ),
+        runner="scripts/run_legacy_from_vcf.py",
+    output:
+        bed=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "legacy"
+            / "chr{chrom}-ld-blocks.bed"
+        ),
+        vector=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "legacy"
+            / "vector-chr{chrom}.txt.gz"
+        ),
+        breakpoints=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "legacy"
+            / "breakpoints-chr{chrom}.json"
+        ),
+        summary=str(
+            LEGACY_RESULTS / "{block_set}" / "chr{chrom}" / "legacy" / "summary.tsv"
+        ),
+        partitions=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "legacy_dataset"
+            / "scripts"
+            / "chr{chrom}_partitions"
+        ),
+    log:
+        run=str(LEGACY_RESULTS / "{block_set}" / "chr{chrom}" / "logs" / "legacy.log"),
+        timing=str(
+            LEGACY_RESULTS / "{block_set}" / "chr{chrom}" / "logs" / "legacy.timing.log"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        output_dir=str(LEGACY_RESULTS / "{block_set}" / "chr{chrom}"),
+        log_dir=str(LEGACY_RESULTS / "{block_set}" / "chr{chrom}" / "logs"),
+        ne=lambda wc: block_set_ne(wc.block_set),
+        cutoff=config["cov_cutoff"],
+        subset=config["subset"],
+        n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+        uv run python {input.runner} \
+            --genetic-map {input.genetic_map} \
+            --vcf {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome chr{wildcards.chrom} \
+            --block-set {wildcards.block_set} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
+            --subset {params.subset} \
+            > {log.run} 2>&1
+        """
+
+
+rule postprocess_legacy_from_vcf:
+    input:
+        bed=rules.run_legacy_from_vcf.output.bed,
+        vcf=block_set_filtered_vcf,
+        centromeres=rules.download_centromeres.output[0],
+    output:
+        str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "legacy"
+            / "chr{chrom}-ld-blocks.final.bed"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        min_snps=config["min_snps_per_block"],
+        remove_centromeres=remove_centromeres_param,
+    shell:
+        """
+        uv run python scripts/postprocess.py \
+            --bed {input.bed} \
+            --vcf {input.vcf} \
+            --centromeres {input.centromeres} \
+            {params.remove_centromeres} \
+            --min-snps {params.min_snps} \
+            --output {output}
+        """
+
+
+rule compare_legacy_from_vcf:
+    input:
+        ldetect_lite_vector=rules.run_ldetect.output.vector,
+        legacy_vector=rules.run_legacy_from_vcf.output.vector,
+        ldetect_lite_breakpoints=rules.run_ldetect.output.breakpoints,
+        legacy_breakpoints=rules.run_legacy_from_vcf.output.breakpoints,
+        ldetect_lite_raw_bed=rules.run_ldetect.output.bed,
+        legacy_raw_bed=rules.run_legacy_from_vcf.output.bed,
+        legacy_final_bed=rules.postprocess_legacy_from_vcf.output[0],
+        reference_bed=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+        script="scripts/compare_legacy_stage_outputs.py",
+    output:
+        raw_ldetect_lite_vs_legacy=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "compare"
+            / "raw_ldetect_lite_vs_legacy.tsv"
+        ),
+        legacy_final_vs_reference=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "compare"
+            / "legacy_final_vs_reference.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        subset=config["subset"],
+        tolerance=config.get("legacy_diagnostics", {}).get("tolerance", 50_000),
+    shell:
+        """
+        uv run python {input.script} \
+            --chromosome chr{wildcards.chrom} \
+            --ldetect-lite-vector {input.ldetect_lite_vector} \
+            --legacy-vector {input.legacy_vector} \
+            --ldetect-lite-breakpoints {input.ldetect_lite_breakpoints} \
+            --legacy-breakpoints {input.legacy_breakpoints} \
+            --ldetect-lite-raw-bed {input.ldetect_lite_raw_bed} \
+            --legacy-raw-bed {input.legacy_raw_bed} \
+            --legacy-final-bed {input.legacy_final_bed} \
+            --reference-bed {input.reference_bed} \
+            --subset {params.subset} \
+            --tolerance {params.tolerance} \
+            --raw-ldetect-lite-vs-legacy {output.raw_ldetect_lite_vs_legacy} \
+            --legacy-final-vs-reference {output.legacy_final_vs_reference}
         """
 
 

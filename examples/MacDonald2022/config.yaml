@@ -82,6 +82,18 @@ block_sets:
 # experimental variant (see above) and is also deliberately excluded.
 active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
 
+# Opt-in legacy end-to-end diagnostic. This runs the vendored original ldetect
+# scripts from the exact filtered VCF/map/individual inputs used by the normal
+# ldetect-lite rule, then compares raw ldetect-lite vs raw legacy and
+# postprocessed legacy vs MacDonald's published BED. Kept deliberately small by
+# default: pyrho_EUR chr21 is a Category B chromosome and chr21 is short enough
+# to run as a reasonable smoke test. Add e.g. pyrho_EAS chr4 here for the
+# deeper but slower diagnostic discussed in notes/logs/macdonald2022-pyrho-handoff.md.
+legacy_diagnostics:
+  block_sets: [pyrho_EUR]
+  chromosomes: [21]
+  tolerance: 50000
+
 # Directories (relative to the analysis/ directory)
 raw_vcf_dir: data/raw
 filtered_vcf_dir: data/filtered
