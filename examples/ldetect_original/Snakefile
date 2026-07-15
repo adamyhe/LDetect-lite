@@ -25,6 +25,7 @@ Usage:
     uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
+import re
 from pathlib import Path
 
 
@@ -33,6 +34,7 @@ configfile: "config.yaml"
 
 CHROMS = config["chromosomes"]
 POPS = list(config["populations"].keys())
+POP_PATTERN = "|".join(re.escape(population) for population in POPS)
 RAW_DIR = Path(config["raw_vcf_dir"])
 MAPS_DIR = Path(config["maps_dir"])
 RES_DIR = Path(config["resources_dir"])
@@ -59,6 +61,29 @@ rule all:
         expand(
             str(RESULTS / "compare" / "{population}_block_comparison.tsv"),
             population=POPS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "{population}"
+                / "chr{chrom}.svg"
+            ),
+            population=POPS,
+            chrom=CHROMS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "published"
+                / "{population}"
+                / "chr{chrom}.svg"
+            ),
+            population=POPS,
+            chrom=CHROMS,
         ),
 
 
@@ -210,11 +235,16 @@ rule run_ldetect:
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         bed=str(RESULTS / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),
+        partitions=str(
+            RESULTS / "{population}" / "{chrom}" / "{chrom}_partitions.txt"
+        ),
     log:
         run=str(RESULTS / "logs" / "{population}" / "{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{population}" / "{chrom}.timing.log"),
     benchmark:
         str(RESULTS / "logs" / "{population}" / "{chrom}.benchmark.tsv")
+    wildcard_constraints:
+        population=POP_PATTERN,
     threads: config.get("ldetect_job_threads", config["workers"])
     params:
         output_dir=str(RESULTS / "{population}" / "{chrom}"),
@@ -263,6 +293,8 @@ rule combine_beds:
         ),
     output:
         str(RESULTS / "{population}_LD_blocks.bed"),
+    wildcard_constraints:
+        population=POP_PATTERN,
     shell:
         """
         echo -e "#chr\tstart\tstop" >{output}
@@ -273,7 +305,94 @@ rule combine_beds:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Compare against published ldetect blocks
+# Step 5: LD-neighborhood separation around our and published boundaries
+# ---------------------------------------------------------------------------
+
+
+rule plot_ld_neighborhood_separation:
+    input:
+        bed=rules.run_ldetect.output.bed,
+        partitions=rules.run_ldetect.output.partitions,
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "{population}"
+            / "chr{chrom}.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "{population}"
+            / "chr{chrom}.svg"
+        ),
+    params:
+        covariance_root=str(RESULTS / "{population}" / "{chrom}"),
+        window_bp=config.get("ld_neighborhood_window_bp", 500_000),
+        sample_limit=config.get("ld_neighborhood_sample_limit", 200_000),
+    wildcard_constraints:
+        population=POP_PATTERN,
+    shell:
+        """
+        uv run python ../MacDonald2022/scripts/plot_ld_neighborhood_separation.py \
+            --bed {input.bed} \
+            --covariance-root {params.covariance_root} \
+            --chrom {wildcards.chrom} \
+            --covariance-name {wildcards.chrom} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --window-bp {params.window_bp} \
+            --sample-limit {params.sample_limit} \
+            --title "{wildcards.population} chr{wildcards.chrom}"
+        """
+
+
+rule plot_published_ld_neighborhood_separation:
+    input:
+        bed=rules.download_ref_bed.output[0],
+        partitions=rules.run_ldetect.output.partitions,
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{population}"
+            / "chr{chrom}.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{population}"
+            / "chr{chrom}.svg"
+        ),
+    params:
+        covariance_root=str(RESULTS / "{population}" / "{chrom}"),
+        window_bp=config.get("ld_neighborhood_window_bp", 500_000),
+        sample_limit=config.get("ld_neighborhood_sample_limit", 200_000),
+    wildcard_constraints:
+        population=POP_PATTERN,
+    shell:
+        """
+        uv run python ../MacDonald2022/scripts/plot_ld_neighborhood_separation.py \
+            --bed {input.bed} \
+            --covariance-root {params.covariance_root} \
+            --chrom chr{wildcards.chrom} \
+            --covariance-name {wildcards.chrom} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --window-bp {params.window_bp} \
+            --sample-limit {params.sample_limit} \
+            --title "published {wildcards.population} chr{wildcards.chrom}"
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 6: Compare against published ldetect blocks
 # ---------------------------------------------------------------------------
 
 
@@ -283,6 +402,8 @@ rule compare_blocks:
         ref=str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
     output:
         str(RESULTS / "compare" / "{population}_block_comparison.tsv"),
+    wildcard_constraints:
+        population=POP_PATTERN,
     params:
         tolerance=100_000,
     shell:

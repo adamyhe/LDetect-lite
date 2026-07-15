@@ -298,42 +298,30 @@ def write_boxplot(
     import matplotlib.pyplot as plt
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    labels = ["Within left", "Across boundary", "Within right"]
+    labels = ["left", "across", "right"]
     data = [samples[category] for category in CATEGORY_ORDER]
-    fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(3.4, 2.35), constrained_layout=True)
     box = ax.boxplot(
         data,
         tick_labels=labels,
         patch_artist=True,
         showfliers=False,
-        widths=0.55,
-        medianprops={"color": "black", "linewidth": 1.4},
-        whiskerprops={"color": "0.35", "linewidth": 1.0},
-        capprops={"color": "0.35", "linewidth": 1.0},
+        widths=0.34,
+        medianprops={"color": "black", "linewidth": 1.1},
+        whiskerprops={"color": "0.35", "linewidth": 0.8},
+        capprops={"color": "0.35", "linewidth": 0.8},
     )
     for patch, category in zip(box["boxes"], CATEGORY_ORDER, strict=True):
         patch.set_facecolor(COLORS[category])
         patch.set_alpha(0.65)
         patch.set_edgecolor("0.25")
 
-    counts = [len(values) for values in data]
-    ax.set_title(title)
-    ax.set_ylabel("Pairwise LD ($r^2$)")
-    ax.set_xlabel(f"Boundary neighborhood, +/- {window_bp:,} bp")
+    ax.set_title(title, fontsize=9, pad=4)
+    ax.set_ylabel("$r^2$", labelpad=2)
     ax.set_ylim(bottom=0.0)
-    ax.grid(axis="y", color="0.9", linewidth=0.8)
-    for x, count in enumerate(counts, start=1):
-        ax.text(
-            x,
-            0.98,
-            f"n={count:,}",
-            transform=ax.get_xaxis_transform(),
-            ha="center",
-            va="top",
-            fontsize=8,
-            color="0.25",
-        )
-    fig.savefig(path)
+    ax.grid(axis="y", color="0.9", linewidth=0.6)
+    ax.tick_params(axis="both", labelsize=8, pad=1)
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.03)
     plt.close(fig)
 
 
@@ -342,6 +330,14 @@ def main() -> None:
     parser.add_argument("--bed", required=True, type=Path)
     parser.add_argument("--covariance-root", required=True, type=Path)
     parser.add_argument("--chrom", required=True)
+    parser.add_argument(
+        "--covariance-name",
+        default="",
+        help=(
+            "Covariance partition basename. Defaults to --chrom. Use this when "
+            "the BED chromosome name and covariance cache name differ."
+        ),
+    )
     parser.add_argument("--output-tsv", required=True, type=Path)
     parser.add_argument("--plot", required=True, type=Path)
     parser.add_argument("--window-bp", type=int, default=500_000)
@@ -360,7 +356,7 @@ def main() -> None:
         chrom=chrom,
         boundaries=internal_boundaries(blocks),
         store=CovarianceStore(root=args.covariance_root),
-        name=chrom,
+        name=args.covariance_name or chrom,
         window_bp=args.window_bp,
         sample_limit=args.sample_limit,
         seed=args.seed,
