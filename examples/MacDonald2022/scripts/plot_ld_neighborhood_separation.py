@@ -41,6 +41,26 @@ def internal_boundaries(blocks: list[Block]) -> list[int]:
     return [end for _start, end in blocks[:-1]]
 
 
+def chrom_aliases(chrom: str) -> list[str]:
+    if chrom.startswith("chr"):
+        bare = chrom.removeprefix("chr")
+        return [chrom, bare]
+    return [chrom, f"chr{chrom}"]
+
+
+def resolve_chrom_blocks(
+    genome_bed: dict[str, list[Block]],
+    requested_chrom: str,
+) -> tuple[str, list[Block]]:
+    for chrom in chrom_aliases(requested_chrom):
+        if chrom in genome_bed:
+            return chrom, genome_bed[chrom]
+    available = ", ".join(sorted(genome_bed)) or "none"
+    raise RuntimeError(
+        f"No blocks for {requested_chrom}; available BED chromosomes: {available}"
+    )
+
+
 def read_diagonal_index(
     name: str,
     store: CovarianceStore,
@@ -329,6 +349,35 @@ def write_boxplot(
     plt.close(fig)
 
 
+def write_empty_plot(path: Path, *, title: str) -> None:
+    configure_matplotlib_cache(path)
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(2.25, 1.9))
+    ax.text(
+        0.5,
+        0.52,
+        "no internal\nboundaries",
+        ha="center",
+        va="center",
+        fontsize=8,
+        color="0.35",
+        transform=ax.transAxes,
+    )
+    ax.set_title(title, fontsize=8, pad=2)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_color("0.85")
+    fig.subplots_adjust(left=0.04, right=0.995, bottom=0.04, top=0.88)
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.005)
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bed", required=True, type=Path)
@@ -351,10 +400,17 @@ def main() -> None:
     parser.add_argument("--title", default="")
     args = parser.parse_args()
 
-    chrom = args.chrom if args.chrom.startswith("chr") else f"chr{args.chrom}"
-    blocks = read_genome_bed(args.bed).get(chrom, [])
+    chrom, blocks = resolve_chrom_blocks(read_genome_bed(args.bed), args.chrom)
     if len(blocks) < 2:
-        raise RuntimeError(f"{args.bed} has fewer than two blocks for {chrom}")
+        write_summary(args.output_tsv, [])
+        title = args.title
+        if not title:
+            block_set = args.covariance_root.parent.name
+            title = f"{block_set} {chrom}: LD neighborhood separation"
+        write_empty_plot(args.plot, title=title)
+        print(f"{args.bed} has fewer than two blocks for {chrom}; wrote empty plot")
+        print(f"Wrote {args.output_tsv} and {args.plot}")
+        return
 
     rows, samples = boundary_rows_and_samples(
         chrom=chrom,
