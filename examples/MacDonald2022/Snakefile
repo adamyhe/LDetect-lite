@@ -201,12 +201,33 @@ rule all:
                 RESULTS
                 / "compare"
                 / "ld_neighborhood"
+                / "{block_set}"
+                / "genomewide.svg"
+            ),
+            block_set=ACTIVE_BLOCK_SETS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
                 / "published"
                 / "{block_set}"
                 / "chr{chrom}.svg"
             ),
             block_set=ACTIVE_BLOCK_SETS,
             chrom=CHROMS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "published"
+                / "{block_set}"
+                / "genomewide.svg"
+            ),
+            block_set=ACTIVE_BLOCK_SETS,
         ),
         str(RESULTS / "compare" / "map_summary.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
@@ -731,6 +752,87 @@ rule plot_published_ld_neighborhood_separation:
             --window-bp {params.window_bp} \
             --sample-limit {params.sample_limit} \
             --title "published {wildcards.block_set} chr{wildcards.chrom}: LD neighborhood separation"
+        """
+
+
+rule plot_ld_neighborhood_genomewide:
+    input:
+        lambda wc: expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / wc.block_set
+                / "chr{chrom}.tsv"
+            ),
+            chrom=CHROMS,
+        ),
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "{block_set}"
+            / "genomewide.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "{block_set}"
+            / "genomewide.svg"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    shell:
+        """
+        uv run python scripts/plot_ld_neighborhood_genomewide.py \
+            --inputs {input} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --title "{wildcards.block_set}: genome-wide LD separation"
+        """
+
+
+rule plot_published_ld_neighborhood_genomewide:
+    input:
+        lambda wc: expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "published"
+                / wc.block_set
+                / "chr{chrom}.tsv"
+            ),
+            chrom=CHROMS,
+        ),
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{block_set}"
+            / "genomewide.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{block_set}"
+            / "genomewide.svg"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    shell:
+        """
+        uv run python scripts/plot_ld_neighborhood_genomewide.py \
+            --inputs {input} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --title "published {wildcards.block_set}: genome-wide LD separation"
         """
 
 

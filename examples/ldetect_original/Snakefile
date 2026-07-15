@@ -78,12 +78,33 @@ rule all:
                 RESULTS
                 / "compare"
                 / "ld_neighborhood"
+                / "{population}"
+                / "genomewide.svg"
+            ),
+            population=POPS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
                 / "published"
                 / "{population}"
                 / "chr{chrom}.svg"
             ),
             population=POPS,
             chrom=CHROMS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "published"
+                / "{population}"
+                / "genomewide.svg"
+            ),
+            population=POPS,
         ),
 
 
@@ -388,6 +409,87 @@ rule plot_published_ld_neighborhood_separation:
             --window-bp {params.window_bp} \
             --sample-limit {params.sample_limit} \
             --title "published {wildcards.population} chr{wildcards.chrom}"
+        """
+
+
+rule plot_ld_neighborhood_genomewide:
+    input:
+        lambda wc: expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / wc.population
+                / "chr{chrom}.tsv"
+            ),
+            chrom=CHROMS,
+        ),
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "{population}"
+            / "genomewide.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "{population}"
+            / "genomewide.svg"
+        ),
+    wildcard_constraints:
+        population=POP_PATTERN,
+    shell:
+        """
+        uv run python ../MacDonald2022/scripts/plot_ld_neighborhood_genomewide.py \
+            --inputs {input} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --title "{wildcards.population}: genome-wide LD separation"
+        """
+
+
+rule plot_published_ld_neighborhood_genomewide:
+    input:
+        lambda wc: expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "published"
+                / wc.population
+                / "chr{chrom}.tsv"
+            ),
+            chrom=CHROMS,
+        ),
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{population}"
+            / "genomewide.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{population}"
+            / "genomewide.svg"
+        ),
+    wildcard_constraints:
+        population=POP_PATTERN,
+    shell:
+        """
+        uv run python ../MacDonald2022/scripts/plot_ld_neighborhood_genomewide.py \
+            --inputs {input} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --title "published {wildcards.population}: genome-wide LD separation"
         """
 
 
