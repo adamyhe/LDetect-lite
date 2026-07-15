@@ -479,7 +479,7 @@ genuine *algorithmic* issue (not just "tiny legitimate covariance
 differences") explains the razor-thin margins. Investigated four angles:
 
 1. **Window-bound computation.** Compared legacy's actual local-search
-   driver (`_reference/ldetect_original/ldetect/examples/P02_minima_pipeline.py`,
+   driver (`examples/ldetect_original/scripts/legacy_ldetect/P02_minima_pipeline.py`,
    `run_local_search_complete`) against `src/ldetect_lite/pipeline.py`'s
    `_run_local_search`/`_midpoint`. **No deviation** — both compute every
    breakpoint's search window from the same raw, un-refined candidate list;
@@ -663,7 +663,8 @@ only asserts `len(intersection) == expected_count` — a same-size,
 different-membership drift would pass silently.
 
 Both our script and MacDonald's own documented recipe
-(`_reference/LDblocks_GRCh38/README.md`) use the **identical mechanism**:
+([`README.md`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/README.md))
+use the **identical mechanism**:
 scrape each subpop's *live* 1000G FTP directory listing
 (`data/<SUBPOP>/`), union across subpops, intersect with the VCF header. No
 randomness, deterministic given a fixed FTP listing — but the FTP listing
@@ -898,10 +899,10 @@ But MacDonald's README states they used **their own R script**
 (`interpolate.R`) to do this interpolation, not joepickrell's tool — and,
 critically, **MacDonald's actual GitHub repository publishes the resulting
 already-interpolated deCODE maps**, exactly the same way they publish the
-pyrho maps: `_reference/LDblocks_GRCh38/data/deCODE_interpolated_maps/chr{1..22}.tab.gz`
-(confirmed via `git log` inside that nested checkout: commit `2c5a7e9
-"Added interpolated deCODE map files"`, part of their real published
-history, not something we generated). We have simply never wired the
+pyrho maps:
+`https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps/chr{1..22}.tab.gz`
+(confirmed from MacDonald's published GitHub history: commit `2c5a7e9
+"Added interpolated deCODE map files"`). We have simply never wired the
 Snakefile up to use it, unlike pyrho.
 
 Confirmed this is a drop-in, no-reformatting substitution: both

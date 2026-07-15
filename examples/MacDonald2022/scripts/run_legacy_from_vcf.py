@@ -22,6 +22,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 
 def _repo_root() -> Path:
@@ -53,6 +54,51 @@ def _patch_legacy_scipy_window() -> None:
 def _count_individuals(path: Path) -> int:
     with path.open() as f:
         return sum(1 for line in f if line.strip())
+
+
+class MapStats(NamedTuple):
+    rows: int
+    decrease_rows: int
+    max_drop_cm: float
+
+
+def _validate_legacy_map(input_path: Path) -> MapStats:
+    """Validate the monotone-map assumption made by original LDetect.
+
+    Original ldetect assumes genetic positions are monotone in physical order.
+    Some published MacDonald pyrho maps contain local cM decreases, which make
+    the original P00_01 script overflow in ``math.exp``. Treating that as a
+    preflight failure preserves the clean diagnostic: legacy is run only on the
+    exact published map, never a repaired copy.
+    """
+    rows = 0
+    decrease_rows = 0
+    max_drop = 0.0
+    running_max: float | None = None
+
+    with gzip.open(input_path, "rt") as f:
+        for raw in f:
+            parts = raw.strip().split()
+            if len(parts) < 3:
+                continue
+            cm = float(parts[2])
+            if running_max is None or cm >= running_max:
+                running_max = cm
+            else:
+                decrease_rows += 1
+                max_drop = max(max_drop, running_max - cm)
+            rows += 1
+
+    if rows == 0:
+        raise ValueError(f"No map positions found in {input_path}")
+    if decrease_rows:
+        raise RuntimeError(
+            "Original LDetect requires nondecreasing genetic-map cM values, "
+            f"but {input_path} has {decrease_rows} local decrease(s) "
+            f"(max drop {max_drop:.17g} cM). Refusing to rewrite the map for "
+            "this clean legacy-on-published-inputs diagnostic."
+        )
+    return MapStats(rows=rows, decrease_rows=decrease_rows, max_drop_cm=max_drop)
 
 
 def _read_map_positions(path: Path) -> list[tuple[int, float]]:
@@ -239,6 +285,7 @@ def _write_summary(
     vector_path: Path,
     pickle_path: Path,
     partition_count: int,
+    map_stats: MapStats,
 ) -> None:
     with pickle_path.open("rb") as f:
         data = pickle.load(f)
@@ -252,6 +299,9 @@ def _write_summary(
         "fourier_ls_n": str(len(data["fourier_ls"]["loci"])),
         "uniform_n": str(len(data["uniform"]["loci"])),
         "uniform_ls_n": str(len(data["uniform_ls"]["loci"])),
+        "map_rows": str(map_stats.rows),
+        "map_decrease_rows": str(map_stats.decrease_rows),
+        "map_max_drop_cm": f"{map_stats.max_drop_cm:.17g}",
     }
     row.update(_vector_summary(vector_path))
     cols = [
@@ -268,6 +318,9 @@ def _write_summary(
         "fourier_ls_n",
         "uniform_n",
         "uniform_ls_n",
+        "map_rows",
+        "map_decrease_rows",
+        "map_max_drop_cm",
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="") as f:
@@ -345,6 +398,7 @@ def main() -> None:
     output_dir = args.output_dir / "legacy"
 
     n_individuals = _count_individuals(args.individuals)
+    map_stats = _validate_legacy_map(args.genetic_map)
     partitions = _write_legacy_partitions(
         args.genetic_map,
         partitions_path,
@@ -375,6 +429,7 @@ def main() -> None:
         vector_path=vector_path,
         pickle_path=pickle_path,
         partition_count=len(partitions),
+        map_stats=map_stats,
     )
 
 

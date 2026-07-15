@@ -6,7 +6,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 **ldetect-lite** is a modern reimplementation of [ldetect](https://bitbucket.org/nygcresearch/ldetect), a bioinformatics tool that calculates approximately independent linkage disequilibrium (LD) blocks in the human genome. The algorithm is described in [Berisa & Pickrell, 2016](https://academic.oup.com/bioinformatics/article/32/2/283/1743626).
 
-The complete reference implementation lives in `_reference/ldetect_original/ldetect/` (also `_reference/LDblocks_GRCh38/` for the MacDonald et al. 2022 GRCh38 reproduction). The new implementation is in `src/ldetect_lite/`.
+The shipped legacy scripts used by diagnostics live under `examples/ldetect_original/scripts/legacy_ldetect/`; upstream reference sources are GitHub/Bitbucket repositories, not part of the distributed package. The new implementation is in `src/ldetect_lite/`.
 
 ## Commands
 
@@ -98,7 +98,6 @@ The package is under `src/ldetect_lite/`. Key modules:
   - `MacDonald2022/` — reproduction of MacDonald et al. (2022) GRCh38 LD blocks (deCODE map + pyrho superpopulation maps).
   - `r2_zarr_exactness/` — Zarr-based exactness checks.
 - `benchmarks/` — standalone perf benchmarks (e.g. `bench_ld_kernel.py` for the Numba LD kernel, referenced in `docs/optimizations.md`).
-- `_reference/` — vendored reference implementations used for parity testing and porting: `ldetect_original/ldetect/` (original Berisa & Pickrell code) and `LDblocks_GRCh38/` (MacDonald et al. 2022 scripts).
 
 ## Reproduction Status
 

@@ -137,11 +137,19 @@ sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections
 #       below) -- the EUR block set itself uses decode_interpolated_map_base_url.
 decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
 
-# MacDonald et al. published already-interpolated pyrho AND deCODE maps in the
-# reference repository. These are in the chr/position/cM format accepted by
-# ldetect run, used directly (no local interpolation) for both the pyrho and
-# EUR/deCODE block sets.
-pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
+# pyrho GRCh38 maps. The pyrho project publishes per-population maps at Zenodo
+# record 11437540. The workflow downloads the hg38 archive, extracts files named
+# {pop}_recombination_map_hapmap_format_hg38_chr_{chrom}.txt, converts their
+# HapMap-style columns (chromosome, position, rate cM/Mb, cumulative cM), and
+# runs our interval interpolator. These raw-derived maps are the default pyrho
+# source used by ldetect run.
+pyrho_raw_map_url: "https://zenodo.org/api/records/11437540/files/hg38_maps.tar.gz/content"
+
+# MacDonald et al. published already-interpolated pyrho and deCODE maps in the
+# reference repository. The pyrho files are kept as validation targets for the
+# raw-derived maps; the EUR/deCODE block set still uses the published deCODE
+# map directly.
+macdonald_pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
 decode_interpolated_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps"
 reference_bed_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data"
 

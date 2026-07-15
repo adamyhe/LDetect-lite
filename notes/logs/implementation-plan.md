@@ -6,7 +6,7 @@ This is mostly a historical document.
 
 ## Context
 
-Full refactor of `_reference/ldetect/` into a modern Python package at `src/ldetect_lite/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:
+Full refactor of the original LDetect codebase into a modern Python package at `src/ldetect_lite/`, plus the `interpolate_maps.py` script from joepickrell/1000-genomes-genetic-maps. Goals:
 
 - All logic lives under `src/ldetect_lite/` as importable modules
 - Single unified `ldetect-lite` CLI via stdlib argparse (no extra dependency)
