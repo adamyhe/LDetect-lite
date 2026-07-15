@@ -300,13 +300,15 @@ def write_boxplot(
     path.parent.mkdir(parents=True, exist_ok=True)
     labels = ["left", "across", "right"]
     data = [samples[category] for category in CATEGORY_ORDER]
-    fig, ax = plt.subplots(figsize=(3.4, 2.35), constrained_layout=True)
+    positions = [1.0, 1.26, 1.52]
+    fig, ax = plt.subplots(figsize=(2.25, 1.9))
     box = ax.boxplot(
         data,
+        positions=positions,
         tick_labels=labels,
         patch_artist=True,
         showfliers=False,
-        widths=0.34,
+        widths=0.15,
         medianprops={"color": "black", "linewidth": 1.1},
         whiskerprops={"color": "0.35", "linewidth": 0.8},
         capprops={"color": "0.35", "linewidth": 0.8},
@@ -316,12 +318,14 @@ def write_boxplot(
         patch.set_alpha(0.65)
         patch.set_edgecolor("0.25")
 
-    ax.set_title(title, fontsize=9, pad=4)
-    ax.set_ylabel("$r^2$", labelpad=2)
+    ax.set_title(title, fontsize=8, pad=2)
+    ax.set_ylabel("$r^2$", labelpad=0)
     ax.set_ylim(bottom=0.0)
+    ax.set_xlim(0.89, 1.63)
     ax.grid(axis="y", color="0.9", linewidth=0.6)
-    ax.tick_params(axis="both", labelsize=8, pad=1)
-    fig.savefig(path, bbox_inches="tight", pad_inches=0.03)
+    ax.tick_params(axis="both", labelsize=7, pad=0)
+    fig.subplots_adjust(left=0.16, right=0.995, bottom=0.16, top=0.88)
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.005)
     plt.close(fig)
 
 
