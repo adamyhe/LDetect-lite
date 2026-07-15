@@ -196,6 +196,18 @@ rule all:
             block_set=ACTIVE_BLOCK_SETS,
             chrom=CHROMS,
         ),
+        expand(
+            str(
+                RESULTS
+                / "compare"
+                / "ld_neighborhood"
+                / "published"
+                / "{block_set}"
+                / "chr{chrom}.svg"
+            ),
+            block_set=ACTIVE_BLOCK_SETS,
+            chrom=CHROMS,
+        ),
         str(RESULTS / "compare" / "map_summary.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison_point_mode.tsv"),
@@ -678,6 +690,47 @@ rule plot_ld_neighborhood_separation:
             --window-bp {params.window_bp} \
             --sample-limit {params.sample_limit} \
             --title "{wildcards.block_set} chr{wildcards.chrom}: LD neighborhood separation"
+        """
+
+
+rule plot_published_ld_neighborhood_separation:
+    input:
+        bed=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+        partitions=rules.run_ldetect.output.partitions,
+    output:
+        tsv=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{block_set}"
+            / "chr{chrom}.tsv"
+        ),
+        plot=str(
+            RESULTS
+            / "compare"
+            / "ld_neighborhood"
+            / "published"
+            / "{block_set}"
+            / "chr{chrom}.svg"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        covariance_root=str(RESULTS / "{block_set}" / "chr{chrom}"),
+        window_bp=config.get("ld_neighborhood_window_bp", 500_000),
+        sample_limit=config.get("ld_neighborhood_sample_limit", 200_000),
+    shell:
+        """
+        uv run python scripts/plot_ld_neighborhood_separation.py \
+            --bed {input.bed} \
+            --covariance-root {params.covariance_root} \
+            --chrom chr{wildcards.chrom} \
+            --output-tsv {output.tsv} \
+            --plot {output.plot} \
+            --window-bp {params.window_bp} \
+            --sample-limit {params.sample_limit} \
+            --title "published {wildcards.block_set} chr{wildcards.chrom}: LD neighborhood separation"
         """
 
 
