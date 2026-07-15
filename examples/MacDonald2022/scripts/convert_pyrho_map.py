@@ -10,18 +10,17 @@ with four HapMap-style columns:
     Chromosome  Position(bp)  Rate(cM/Mb)  Map(cM)
 
 The HapMap ``Map(cM)`` column is the cumulative genetic position at
-``Position(bp)``. ``ldetect interpolate-maps --mode interval`` expects a
-gzipped three-column interval map:
+``Position(bp)``. ``ldetect interpolate-maps --mode hapmap`` consumes this
+coordinate convention directly from a gzipped three-column map:
 
     position  cM_per_Mb  genetic_position_cM
 
-where ``genetic_position_cM`` is the cumulative cM at the end of the interval.
-By default, this script therefore shifts the HapMap cumulative column forward
-by one row, extracts one population/chromosome map from the archive, writes the
-three-column form, and fails if the cumulative map is not nondecreasing. For
-diagnostics, ``--cumulative-position start`` writes the unshifted HapMap
-``Map(cM)`` column; feeding that through interval interpolation reproduces
-MacDonald et al.'s pyrho interpolation convention.
+where ``genetic_position_cM`` is the cumulative cM at ``position``. This script
+extracts one population/chromosome map from the archive, writes the unshifted
+three-column HapMap-style form, and fails if the cumulative map is not
+nondecreasing. Feeding this output through interval interpolation reproduces
+MacDonald et al.'s pyrho interpolation convention; the corrected path uses
+``ldetect interpolate-maps --mode hapmap``.
 """
 
 from __future__ import annotations
@@ -160,18 +159,6 @@ def _validate_rows(rows: list[PyrhoRow], chromosome: str) -> None:
         prev_cm = row.map_cm
 
 
-def _interval_cumulative_cm(
-    rows: list[PyrhoRow],
-    index: int,
-    cumulative_position: str,
-) -> float:
-    if cumulative_position == "start":
-        return rows[index].map_cm
-    if cumulative_position == "end" and index + 1 < len(rows):
-        return rows[index + 1].map_cm
-    return rows[index].map_cm
-
-
 def convert(
     *,
     archive: Path | None,
@@ -179,7 +166,6 @@ def convert(
     population: str,
     chromosome: str,
     output: Path,
-    cumulative_position: str,
 ) -> None:
     if (archive is None) == (input_map is None):
         raise ValueError("provide exactly one of --archive or --input-map")
@@ -195,11 +181,8 @@ def convert(
     output.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(output, "wt") as out:
         out.write("position\tcM_per_Mb\tgenetic_position\n")
-        for idx, row in enumerate(rows):
-            out.write(
-                f"{row.position}\t{row.rate_cm_mb:.17g}\t"
-                f"{_interval_cumulative_cm(rows, idx, cumulative_position):.17g}\n"
-            )
+        for row in rows:
+            out.write(f"{row.position}\t{row.rate_cm_mb:.17g}\t{row.map_cm:.17g}\n")
 
 
 def main() -> None:
@@ -213,15 +196,6 @@ def main() -> None:
     )
     parser.add_argument("--population", required=True, help="pyrho population code")
     parser.add_argument("--chromosome", required=True, help="Chromosome, e.g. 21")
-    parser.add_argument(
-        "--cumulative-position",
-        choices=("end", "start"),
-        default="end",
-        help=(
-            "Whether output cumulative cM should describe each interval's end "
-            "(corrected default) or start (MacDonald pyrho diagnostic)."
-        ),
-    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -231,7 +205,6 @@ def main() -> None:
         population=args.population,
         chromosome=args.chromosome,
         output=args.output,
-        cumulative_position=args.cumulative_position,
     )
 
 

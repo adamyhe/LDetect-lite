@@ -115,6 +115,11 @@ n_snps_bw_bpoints: 7000
 # cores per job, so total cores used = (simultaneous chromosome jobs) × workers.
 workers: 4
 
+# LD-neighborhood separation plots around called boundaries. Each plot samples
+# pairwise r^2 from within-left, across-boundary, and within-right windows.
+ld_neighborhood_window_bp: 500000
+ld_neighborhood_sample_limit: 200000
+
 # Post-processing
 min_snps_per_block: 100
 # Default centromere-removal behavior for block sets that do not override it.
@@ -131,10 +136,9 @@ sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections
 
 # deCODE recombination map (Halldorsson et al. 2019, Science).
 # NOTE: requires journal access; download manually if behind paywall and place at
-#       data/maps/decode_raw/aau1043_datas3.gz. Only used by the diagnostic
-#       convert_decode_map/interpolate_map/compare_maps rules (regression-checks
-#       our own ldetect interpolate-maps against MacDonald's published output
-#       below) -- the EUR block set itself uses decode_interpolated_map_base_url.
+#       data/maps/decode_raw/aau1043_datas3.gz. The EUR/deCODE block set uses
+#       this raw-derived map after convert_decode_map/interpolate_map; compare_maps
+#       checks it against MacDonald's published output below.
 decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
 
 # pyrho GRCh38 maps. The pyrho project publishes per-population maps at Zenodo
@@ -146,9 +150,8 @@ decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl
 pyrho_raw_map_url: "https://zenodo.org/api/records/11437540/files/hg38_maps.tar.gz/content"
 
 # MacDonald et al. published already-interpolated pyrho and deCODE maps in the
-# reference repository. The pyrho files are kept as validation targets for the
-# raw-derived maps; the EUR/deCODE block set still uses the published deCODE
-# map directly.
+# reference repository. These files are kept as validation targets for the
+# raw-derived maps.
 macdonald_pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
 decode_interpolated_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps"
 reference_bed_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data"
