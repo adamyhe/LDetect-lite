@@ -17,7 +17,7 @@ pip install ldetect-lite
 Or, with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv add ldetect-lite
+uv tool install ldetect-lite
 ```
 
 This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, and `ldl` — so pick whichever is most convenient; examples below use `ldetect`.
