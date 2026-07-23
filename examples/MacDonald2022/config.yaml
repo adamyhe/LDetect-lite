@@ -22,10 +22,11 @@ populations:
     # No HapMap II SAS-specific default is cited by SHAPEIT; keep CEU default.
     ne: 11418
 
-# Output block sets. The named EUR and pyrho_AFR/EAS/EUR/SAS targets are
-# MacDonald reproduction targets, so they use MacDonald's published
-# already-interpolated maps directly. Corrected-coordinate pyrho variants are
-# available as opt-in block sets below.
+# Output block sets. EUR/deCODE is the current default reproduction target and
+# uses MacDonald's published already-interpolated deCODE maps directly. pyrho
+# targets remain available as opt-in diagnostics, but are not part of the
+# default run because MacDonald's published pyrho maps contain nonmonotone cM
+# coordinates that original ldetect cannot process cleanly.
 block_sets:
   EUR:
     population: EUR
@@ -110,12 +111,9 @@ block_sets:
     remove_centromere_blocks: true
     maf_filter: minor
 
-# Default targets for rule all. SAS is kept as an available block set above,
-# but is excluded from the default reproduction target because MacDonald et al.
-# do not document an SAS-specific effective population size and the current
-# CEU fallback gives poor concordance. pyrho_EAS_minormaf is an opt-in
-# experimental variant (see above) and is also deliberately excluded.
-active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
+# Default targets for rule all. Focus on the documented, monotone deCODE/EUR
+# path. pyrho block sets above can still be requested explicitly.
+active_block_sets: [EUR]
 
 # Opt-in legacy end-to-end diagnostic. This runs the vendored original ldetect
 # scripts from the exact filtered VCF/map/individual inputs used by the normal

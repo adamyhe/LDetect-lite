@@ -21,6 +21,7 @@ import os
 import pickle
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
 
@@ -172,6 +173,7 @@ def _run_covariance_partitions(
     ne: float,
     cutoff: float,
     log_dir: Path,
+    workers: int,
 ) -> None:
     p00_01 = (
         _vendored_legacy_root()
@@ -192,37 +194,98 @@ def _run_covariance_partitions(
         legacy_paths + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
     )
 
-    for start, end in partitions:
-        region = f"{chrom}:{start}-{end}"
-        output = chrom_dir / f"{chrom}.{start}.{end}.gz"
-        log_path = log_dir / f"covariance-{start}-{end}.log"
-        tabix_cmd = ["tabix", "-h", str(vcf), region]
-        legacy_cmd = [
-            sys.executable,
-            str(p00_01),
-            str(genetic_map),
-            str(individuals),
-            str(ne),
-            str(cutoff),
-            str(output),
-        ]
-        with log_path.open("wb") as log:
-            tabix = subprocess.Popen(tabix_cmd, stdout=subprocess.PIPE, stderr=log)
-            assert tabix.stdout is not None
-            legacy = subprocess.Popen(
-                legacy_cmd,
-                stdin=tabix.stdout,
-                stdout=log,
-                stderr=log,
-                env=env,
-            )
-            tabix.stdout.close()
-            legacy_rc = legacy.wait()
-            tabix_rc = tabix.wait()
-        if tabix_rc != 0:
-            raise RuntimeError(f"tabix failed for {region}; see {log_path}")
-        if legacy_rc != 0:
-            raise RuntimeError(f"legacy covariance failed for {region}; see {log_path}")
+    tasks = [
+        (
+            start,
+            end,
+            chrom,
+            vcf,
+            genetic_map,
+            individuals,
+            ne,
+            cutoff,
+            chrom_dir / f"{chrom}.{start}.{end}.gz",
+            log_dir / f"covariance-{start}-{end}.log",
+            p00_01,
+            env,
+        )
+        for start, end in partitions
+    ]
+    worker_count = max(1, min(workers, len(tasks)))
+    if worker_count == 1:
+        for task in tasks:
+            _run_covariance_partition(task)
+        return
+
+    print(
+        f"Running {len(tasks)} legacy covariance partition(s) "
+        f"with {worker_count} worker(s).",
+        flush=True,
+    )
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(_run_covariance_partition, task) for task in tasks]
+        for future in as_completed(futures):
+            future.result()
+
+
+def _run_covariance_partition(
+    task: tuple[
+        int,
+        int,
+        str,
+        Path,
+        Path,
+        Path,
+        float,
+        float,
+        Path,
+        Path,
+        Path,
+        dict[str, str],
+    ],
+) -> None:
+    (
+        start,
+        end,
+        chrom,
+        vcf,
+        genetic_map,
+        individuals,
+        ne,
+        cutoff,
+        output,
+        log_path,
+        p00_01,
+        env,
+    ) = task
+    region = f"{chrom}:{start}-{end}"
+    tabix_cmd = ["tabix", "-h", str(vcf), region]
+    legacy_cmd = [
+        sys.executable,
+        str(p00_01),
+        str(genetic_map),
+        str(individuals),
+        str(ne),
+        str(cutoff),
+        str(output),
+    ]
+    with log_path.open("wb") as log:
+        tabix = subprocess.Popen(tabix_cmd, stdout=subprocess.PIPE, stderr=log)
+        assert tabix.stdout is not None
+        legacy = subprocess.Popen(
+            legacy_cmd,
+            stdin=tabix.stdout,
+            stdout=log,
+            stderr=log,
+            env=env,
+        )
+        tabix.stdout.close()
+        legacy_rc = legacy.wait()
+        tabix_rc = tabix.wait()
+    if tabix_rc != 0:
+        raise RuntimeError(f"tabix failed for {region}; see {log_path}")
+    if legacy_rc != 0:
+        raise RuntimeError(f"legacy covariance failed for {region}; see {log_path}")
 
 
 def _normalise_legacy_bed(raw_path: Path, output_path: Path) -> None:
@@ -390,6 +453,12 @@ def main() -> None:
     parser.add_argument("--cov-cutoff", required=True, type=float)
     parser.add_argument("--n-snps-bw-bpoints", required=True, type=int)
     parser.add_argument("--subset", default="fourier_ls")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of legacy covariance partitions to run concurrently.",
+    )
     args = parser.parse_args()
 
     dataset_path = args.output_dir / "legacy_dataset"
@@ -414,6 +483,7 @@ def main() -> None:
         ne=args.ne,
         cutoff=args.cov_cutoff,
         log_dir=log_dir,
+        workers=args.workers,
     )
     vector_path, pickle_path, _json_path, _bed_path = _run_downstream(
         dataset_path=dataset_path,

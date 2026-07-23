@@ -930,6 +930,7 @@ rule run_legacy_from_vcf:
         ),
     wildcard_constraints:
         block_set=BLOCK_SET_PATTERN,
+    threads: config["workers"]
     params:
         output_dir=str(LEGACY_RESULTS / "{block_set}" / "chr{chrom}"),
         log_dir=str(LEGACY_RESULTS / "{block_set}" / "chr{chrom}" / "logs"),
@@ -952,6 +953,7 @@ rule run_legacy_from_vcf:
             --cov-cutoff {params.cutoff} \
             --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
             --subset {params.subset} \
+            --workers {threads} \
             > {log.run} 2>&1
         """
 
