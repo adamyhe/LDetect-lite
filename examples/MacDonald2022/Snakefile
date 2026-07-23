@@ -8,17 +8,17 @@ Pipeline steps:
     0  Data download (VCFs, raw pyrho maps, raw deCODE map, centromeres)
     1  VCF filtering with bcftools (MAF ≥ 0.01, SNPs only)
     2  Individual list preparation (1000G population dirs ∩ VCF samples)
-    2a-2c deCODE map conversion/interpolation (the EUR block set uses this
-       raw-derived map; validate_maps/compare_maps check it against MacDonald's
-       published deCODE_interpolated_maps).
+    2a-2c deCODE map conversion/interpolation (the EUR replication block set
+       uses MacDonald's published interpolated map directly; locally derived
+       maps are retained for validate_maps/compare_maps diagnostics).
        compare_maps/compare_maps_point_mode together are an interpolation
-       equivalence test: ldetect interpolate-maps --mode interval matches
-       MacDonald's deCODE interval interpolation and should match their
+       equivalence test: ldetect interpolate-maps --mode macdonald-decode
+       matches MacDonald's deCODE R interpolation and should match their
        published deCODE maps almost exactly, while --mode point (the prior
-       default) reproduces the interval-shift bug those scripts fixed -- see
-       notes/logs/macdonald2022-interpolation-port.md. pyrho maps are first
-       extracted by convert_pyrho_map.py and interpolated with --mode hapmap
-       so their cumulative cM is interpreted at HapMap point positions.
+       default) quantifies the interval-shift bug those scripts fixed -- see
+       notes/logs/macdonald2022-interpolation-port.md. pyrho replication block
+       sets use MacDonald's published interpolated maps directly; locally
+       corrected and MacDonald-style interpolations are retained as diagnostics.
     3  LD block detection per chromosome (ldetect run)
     4  Post-processing: centromere removal + small block merging
     5  Genome-wide BED assembly (cat all chromosomes)
@@ -124,13 +124,39 @@ def block_set_filtered_vcf(wc):
 def block_set_genetic_map(wc):
     block_config = config["block_sets"][wc.block_set]
     if block_config["map_source"] == "decode":
-        return str(MAPS_DIR / "interpolated" / f"chr{wc.chrom}.tab.gz")
+        interpolation = block_config.get("decode_interpolation", "local")
+        if interpolation == "local":
+            return str(MAPS_DIR / "interpolated" / f"chr{wc.chrom}.tab.gz")
+        if interpolation == "published":
+            return str(MAPS_DIR / "decode_interpolated_maps" / f"chr{wc.chrom}.tab.gz")
+        raise ValueError(
+            f"Unknown deCODE interpolation mode for {wc.block_set}: {interpolation}"
+        )
     if block_config["map_source"] == "pyrho":
-        return str(
-            MAPS_DIR
-            / "pyrho_interpolated_from_raw"
-            / block_config["map_pop"]
-            / f"chr{wc.chrom}.tab.gz"
+        interpolation = block_config.get("pyrho_interpolation", "corrected")
+        if interpolation == "corrected":
+            return str(
+                MAPS_DIR
+                / "pyrho_interpolated_from_raw"
+                / block_config["map_pop"]
+                / f"chr{wc.chrom}.tab.gz"
+            )
+        if interpolation == "macdonald_style":
+            return str(
+                MAPS_DIR
+                / "pyrho_interpolated_macdonald_style"
+                / block_config["map_pop"]
+                / f"chr{wc.chrom}.tab.gz"
+            )
+        if interpolation == "published":
+            return str(
+                MAPS_DIR
+                / "macdonald_pyrho_interpolated_maps"
+                / block_config["map_pop"]
+                / f"chr{wc.chrom}.tab.gz"
+            )
+        raise ValueError(
+            f"Unknown pyrho interpolation mode for {wc.block_set}: {interpolation}"
         )
     raise ValueError(f"Unknown map source: {block_config['map_source']}")
 
@@ -153,6 +179,14 @@ def legacy_diagnostic_targets(filename):
         str(LEGACY_RESULTS / block_set / f"chr{chrom}" / "compare" / filename)
         for block_set in LEGACY_DIAGNOSTIC_BLOCK_SETS
         for chrom in LEGACY_DIAGNOSTIC_CHROMS
+    ]
+
+
+def vcf_map_position_targets():
+    return [
+        str(RESULTS / "compare" / "vcf_map_positions" / block_set / f"chr{chrom}.tsv")
+        for block_set in ACTIVE_BLOCK_SETS
+        for chrom in CHROMS
     ]
 
 
@@ -284,6 +318,11 @@ rule legacy_diagnostics:
         legacy_diagnostic_targets("legacy_final_vs_reference.tsv"),
 
 
+rule vcf_map_position_diagnostics:
+    input:
+        vcf_map_position_targets(),
+
+
 # ---------------------------------------------------------------------------
 # Step 0: Download
 # ---------------------------------------------------------------------------
@@ -377,8 +416,9 @@ rule download_macdonald_pyrho_map:
 
 # MacDonald et al. also publish their own already-interpolated deCODE maps
 # (same chr/pos/cM format as the pyrho maps above), produced by their own R
-# interpolation script. Keep these as comparison targets; the EUR/deCODE block
-# set itself uses the raw-derived interpolation from convert_decode_map.
+# interpolation script. The EUR/deCODE replication block set uses these
+# directly; local raw-derived deCODE maps are retained for interpolation
+# diagnostics.
 rule download_decode_interpolated_map:
     output:
         str(MAPS_DIR / "decode_interpolated_maps" / "chr{chrom}.tab.gz"),
@@ -515,7 +555,7 @@ rule interpolate_map:
             --snp-file {input.snps} \
             --genetic-map {input.map} \
             --output {output} \
-            --mode interval
+            --mode macdonald-decode
         """
 
 
@@ -576,7 +616,7 @@ rule interpolate_pyrho_map_macdonald_style:
             --snp-file {input.snps} \
             --genetic-map {input.map} \
             --output {output} \
-            --mode interval
+            --mode macdonald-pyrho
         """
 
 
@@ -586,8 +626,8 @@ rule interpolate_pyrho_map_macdonald_style:
 # The shared ldetect-lite covariance code applies the covariance cutoff before
 # adding the diagonal shrinkage term, matching original ldetect behavior and
 # preventing population-monomorphic variants from entering the covariance
-# output. deCODE and pyrho block sets use locally interpolated maps derived
-# from the raw map sources; MacDonald's published maps are comparison targets.
+# output. Default replication block sets use MacDonald's published maps directly;
+# locally interpolated deCODE/pyrho maps are retained as diagnostic targets.
 # ---------------------------------------------------------------------------
 
 
@@ -996,6 +1036,27 @@ rule compare_legacy_from_vcf:
         """
 
 
+rule compare_vcf_map_positions:
+    input:
+        vcf=block_set_filtered_vcf,
+        genetic_map=block_set_genetic_map,
+    output:
+        str(RESULTS / "compare" / "vcf_map_positions" / "{block_set}" / "chr{chrom}.tsv"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        script="scripts/compare_vcf_map_positions.py",
+    shell:
+        """
+        uv run python {params.script} \
+            --vcf {input.vcf} \
+            --genetic-map {input.genetic_map} \
+            --chromosome chr{wildcards.chrom} \
+            --block-set {wildcards.block_set} \
+            --output {output}
+        """
+
+
 # ---------------------------------------------------------------------------
 # Step 5: Combine chromosomes into genome-wide BED
 # ---------------------------------------------------------------------------
@@ -1086,15 +1147,16 @@ rule compare_maps:
         """
 
 
-# Equivalence check for deCODE maps: --mode interval matches MacDonald's
-# deCODE interval-rate interpolation, so it should match their published
+# Equivalence check for deCODE maps: --mode macdonald-decode mirrors
+# MacDonald's deCODE R interpolation, so it should match their published
 # deCODE_interpolated_maps almost exactly (near-zero MAE). This rule reruns
 # the same comparison against interpolate_map_point's --mode point output so
-# the two map_ref_comparison*.tsv files can be diffed directly: interval
+# the two map_ref_comparison*.tsv files can be diffed directly: MacDonald
 # mode's MAE should collapse to ~0 while point mode reproduces the
 # previously measured 0.0013-0.0026 cM error. pyrho maps are intentionally
-# excluded from this equivalence claim because their HapMap-style cumulative
-# coordinates are handled by --mode hapmap. See
+# excluded from this equivalence claim because their corrected HapMap-style
+# cumulative coordinates are handled by --mode hapmap, while replication uses
+# --mode macdonald-pyrho. See
 # notes/logs/macdonald2022-interpolation-port.md.
 rule compare_maps_point_mode:
     input:

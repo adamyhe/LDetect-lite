@@ -117,6 +117,58 @@ def interpolate_intervals(
     """
     snp_positions, snp_ids = _read_snp_bed(snp_file)
     begins, rates, cum_cm = _read_map_rows(genetic_map)
+    _interpolate_interval_rows(snp_positions, snp_ids, begins, rates, cum_cm, output)
+
+
+def interpolate_macdonald_decode(
+    snp_file: Path,
+    genetic_map: Path,
+    output: Path,
+) -> None:
+    """Match MacDonald et al.'s deCODE R interpolation script.
+
+    This is the same interval-end cumulative convention as
+    :func:`interpolate_intervals`, plus the R script's dataframe mutation
+    ``tmp[1, 2] <- 0`` before constructing the map GRanges.
+    """
+    snp_positions, snp_ids = _read_snp_bed(snp_file)
+    begins, rates, cum_cm = _read_map_rows(genetic_map)
+    if begins:
+        begins[0] = 0
+    _interpolate_interval_rows(snp_positions, snp_ids, begins, rates, cum_cm, output)
+
+
+def interpolate_macdonald_pyrho(
+    snp_file: Path,
+    genetic_map: Path,
+    output: Path,
+) -> None:
+    """Match MacDonald et al.'s pyrho R interpolation script.
+
+    MacDonald's ``interpolate_pyhro.R`` treats HapMap cumulative cM values as
+    previous-interval endpoints, sets the first map position to zero, and
+    appears to accidentally overwrite the final row's rate column with
+    ``last_snp + 1`` while trying to extend a non-existent end-position
+    column. This mode intentionally reproduces those dataframe/indexing
+    choices for block-replication diagnostics only.
+    """
+    snp_positions, snp_ids = _read_snp_bed(snp_file)
+    positions, rates, cum_cm = _read_map_rows(genetic_map)
+    if positions:
+        positions[0] = 0
+    if snp_positions and rates and snp_positions[-1] > rates[-1]:
+        rates[-1] = float(snp_positions[-1] + 1)
+    _interpolate_interval_rows(snp_positions, snp_ids, positions, rates, cum_cm, output)
+
+
+def _interpolate_interval_rows(
+    snp_positions: list[int],
+    snp_ids: list[str],
+    begins: list[int],
+    rates: list[float],
+    cum_cm: list[float],
+    output: Path,
+) -> None:
     n = len(begins)
 
     with gzip.open(output, "wt") as out:
@@ -193,9 +245,18 @@ def _read_snp_bed(snp_file: Path) -> tuple[list[int], list[str]]:
     with gzip.open(snp_file, "rt") if _is_gz(snp_file) else open(snp_file) as f:
         for line in f:
             parts = line.strip().split()
-            if not parts:
+            if (
+                not parts
+                or parts[0].startswith("#")
+                or parts[0] in {"track", "browser"}
+            ):
                 continue
-            positions.append(int(parts[2]))  # BED end coord = physical position
+            if len(parts) < 4:
+                continue
+            try:
+                positions.append(int(parts[2]))  # BED end coord = physical position
+            except ValueError:
+                continue
             ids.append(parts[3])
     return positions, ids
 

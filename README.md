@@ -96,9 +96,11 @@ Arguments:
 - `--snp-file PATH` — bgzipped BED file of SNP positions (columns: `chrom start end rs_id`); typically extracted from a filtered VCF with `bcftools query -f '%CHROM\t%POS0\t%POS\t%ID\n'`
 - `--genetic-map PATH` — gzipped recombination map; interpolation is used to assign a cM value to each SNP position
 - `--output PATH` — gzipped output map in the 3-column format expected by steps 1 and 2 (`rs_id  position  cM`)
-- `--mode {point,interval}` (default: `point`) — interpolation algorithm:
+- `--mode {point,interval,hapmap,macdonald-decode,macdonald-pyrho}` (default: `point`) — interpolation algorithm:
   - `point` — treats `--genetic-map` as discrete `(position, cM)` points and linearly interpolates between the two points bracketing each SNP. Correct for point-sampled maps (e.g. HapMap-interpolated 1000G maps).
-  - `interval` — treats each map row as the start of a genomic interval with its own recombination rate (`Begin, rate_cM_Mb, cumulative_cM_at_End`), matching MacDonald et al.'s R interpolation scripts ([`interpolate.R`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/scripts/interpolate.R)/[`interpolate_pyhro.R`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/scripts/interpolate_pyhro.R)). Required for interval-rate maps such as the deCODE map — feeding those into `point` mode silently uses the *next* interval's rate for SNPs in the *current* interval, an off-by-one bug that produced a ~0.001–0.003 cM error per SNP in earlier testing (see `notes/findings/macdonald2022-reproduction.md`).
+  - `interval` — treats each map row as the start of a genomic interval with its own recombination rate (`Begin, rate_cM_Mb, cumulative_cM_at_End`). Correct for interval-rate maps such as deCODE; feeding those into `point` mode silently uses the *next* interval's rate for SNPs in the *current* interval.
+  - `hapmap` — treats each map row's cM as the cumulative genetic position at that row's physical position, with the row's rate applying to the following interval. Correct for pyrho/HapMap-format maps.
+  - `macdonald-decode` / `macdonald-pyrho` — compatibility modes for reproducing MacDonald et al.'s R interpolation scripts, including their dataframe/indexing conventions. Use these only for replication diagnostics; use `interval`/`hapmap` for corrected coordinates.
 
 ## Algorithm
 

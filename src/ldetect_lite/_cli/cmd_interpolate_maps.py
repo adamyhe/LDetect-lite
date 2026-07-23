@@ -34,7 +34,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     )
     p.add_argument(
         "--mode",
-        choices=("point", "interval", "hapmap"),
+        choices=("point", "interval", "hapmap", "macdonald-decode", "macdonald-pyrho"),
         default="point",
         help=(
             "Interpolation algorithm. 'point' (default) treats the map as "
@@ -46,7 +46,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "converted by convert_decode_map.py. 'hapmap' treats each map "
             "row as the start of an interval whose cM column is the "
             "cumulative position at the row itself; use this for pyrho "
-            "HapMap-format maps."
+            "HapMap-format maps. 'macdonald-decode' and 'macdonald-pyrho' "
+            "reproduce MacDonald et al.'s R interpolation conventions, "
+            "including dataframe/indexing quirks, for replication diagnostics."
         ),
     )
     p.set_defaults(func=_run)
@@ -57,12 +59,16 @@ def _run(args: argparse.Namespace) -> int:
         interpolate,
         interpolate_hapmap,
         interpolate_intervals,
+        interpolate_macdonald_decode,
+        interpolate_macdonald_pyrho,
     )
 
     fns = {
         "point": interpolate,
         "interval": interpolate_intervals,
         "hapmap": interpolate_hapmap,
+        "macdonald-decode": interpolate_macdonald_decode,
+        "macdonald-pyrho": interpolate_macdonald_pyrho,
     }
     fn = fns[args.mode]
     fn(

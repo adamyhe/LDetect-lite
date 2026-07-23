@@ -22,37 +22,71 @@ populations:
     # No HapMap II SAS-specific default is cited by SHAPEIT; keep CEU default.
     ne: 11418
 
-# Output block sets. The original deCODE EUR target keeps the historical
-# result name (EUR). The pyrho targets reproduce the four published
-# superpopulation BEDs from the MacDonald reference repository.
+# Output block sets. The named EUR and pyrho_AFR/EAS/EUR/SAS targets are
+# MacDonald reproduction targets, so they use MacDonald's published
+# already-interpolated maps directly. Corrected-coordinate pyrho variants are
+# available as opt-in block sets below.
 block_sets:
   EUR:
     population: EUR
     map_source: decode
+    decode_interpolation: published
     reference_bed: deCODE_EUR_LD_blocks.bed
     remove_centromere_blocks: false
   pyrho_AFR:
     population: AFR
     map_source: pyrho
     map_pop: GWD
+    pyrho_interpolation: published
     reference_bed: pyrho_AFR_LD_blocks.bed
     remove_centromere_blocks: true
   pyrho_EAS:
     population: EAS
     map_source: pyrho
     map_pop: CHB
+    pyrho_interpolation: published
     reference_bed: pyrho_EAS_LD_blocks.bed
     remove_centromere_blocks: true
   pyrho_EUR:
     population: EUR
     map_source: pyrho
     map_pop: IBS
+    pyrho_interpolation: published
     reference_bed: pyrho_EUR_LD_blocks.bed
     remove_centromere_blocks: true
   pyrho_SAS:
     population: SAS
     map_source: pyrho
     map_pop: GIH
+    pyrho_interpolation: published
+    reference_bed: pyrho_SAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_AFR_corrected:
+    population: AFR
+    map_source: pyrho
+    map_pop: GWD
+    pyrho_interpolation: corrected
+    reference_bed: pyrho_AFR_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_EAS_corrected:
+    population: EAS
+    map_source: pyrho
+    map_pop: CHB
+    pyrho_interpolation: corrected
+    reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_EUR_corrected:
+    population: EUR
+    map_source: pyrho
+    map_pop: IBS
+    pyrho_interpolation: corrected
+    reference_bed: pyrho_EUR_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_SAS_corrected:
+    population: SAS
+    map_source: pyrho
+    map_pop: GIH
+    pyrho_interpolation: corrected
     reference_bed: pyrho_SAS_LD_blocks.bed
     remove_centromere_blocks: true
   # Experimental: same as pyrho_EAS, but the VCF is filtered with true
@@ -71,6 +105,7 @@ block_sets:
     population: EAS
     map_source: pyrho
     map_pop: CHB
+    pyrho_interpolation: published
     reference_bed: pyrho_EAS_LD_blocks.bed
     remove_centromere_blocks: true
     maf_filter: minor
