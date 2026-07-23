@@ -121,11 +121,12 @@ active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
 # scripts from the exact filtered VCF/map/individual inputs used by the normal
 # ldetect-lite rule, then compares raw ldetect-lite vs raw legacy and
 # postprocessed legacy vs MacDonald's published BED. Kept deliberately small by
-# default: pyrho_EUR chr21 is a Category B chromosome and chr21 is short enough
-# to run as a reasonable smoke test. Add e.g. pyrho_EAS chr4 here for the
-# deeper but slower diagnostic discussed in notes/logs/macdonald2022-pyrho-handoff.md.
+# default: EUR chr21 uses MacDonald's published deCODE map, which is monotone
+# and can be passed to unmodified original ldetect. Published pyrho maps are
+# intentionally excluded from this clean legacy diagnostic because their
+# nonmonotone cM coordinates trigger original ldetect covariance overflows.
 legacy_diagnostics:
-  block_sets: [pyrho_EUR]
+  block_sets: [EUR]
   chromosomes: [21]
   tolerance: 50000
 
