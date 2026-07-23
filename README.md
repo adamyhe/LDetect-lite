@@ -24,7 +24,7 @@ This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, a
 
 The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the VCF/BCFs must be indexed before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
-**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
+**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`/`uv tool install ldetect-lite[heatmap]`. Generating covariance heatmaps requires a matplotlib install.
 
 ### Development
 
@@ -77,21 +77,6 @@ Options:
 If `--workers` is greater than 1 and none of `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` are set, `run` prints a startup warning: numpy/BLAS/numba otherwise size their own internal thread pools to the whole machine's core count, not `--workers`, which oversubscribes real CPUs when multiple `ldetect run` processes share a node (e.g. several jobs on the same Slurm allocation). Export those five variables to match `--workers` to avoid this — see `examples/ldetect_original/Snakefile`'s `run_ldetect` rule for a worked example.
 
 Each of the five stages (partition, covariance, matrix-to-vector, find-minima, extract-bpoints) can also be run individually, along with a `covariance-summary` inspection utility — see `docs/pipeline-steps.md`.
-
-### Pipeline schematics
-
-From a development checkout, the compact pipeline overview can be regenerated
-with:
-
-```bash
-python3 schematics/plot_figure1_panels.py
-```
-
-The per-step pipeline schematics can be regenerated with:
-
-```bash
-uv run --extra heatmap python schematics/plot_pipeline_schematics.py
-```
 
 The overview command writes `pipeline-overview.svg`; the per-step schematic
 command writes SVG/PDF figures under `schematics/plots/`.
