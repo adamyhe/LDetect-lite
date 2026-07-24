@@ -123,6 +123,11 @@ def test_stage_worker_override_takes_precedence_over_shared_workers() -> None:
     assert _resolve_workers(args.local_search_workers, args.workers) == 1
 
 
+def test_matrix_backend_defaults_to_array_and_accepts_legacy() -> None:
+    assert _parse_run_args([]).matrix_backend == "array"
+    assert _parse_run_args(["--matrix-backend", "legacy"]).matrix_backend == "legacy"
+
+
 def test_delete_covariance_cache_defaults_to_false() -> None:
     assert _parse_run_args([]).delete_covariance_cache is False
 

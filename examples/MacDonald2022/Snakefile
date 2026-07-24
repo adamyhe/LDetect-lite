@@ -662,6 +662,7 @@ rule run_ldetect:
         cutoff=config["cov_cutoff"],
         subset=config["subset"],
         n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
+        matrix_backend=config.get("matrix_backend", "array"),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -681,6 +682,7 @@ rule run_ldetect:
             --cov-cutoff {params.cutoff} \
             --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
             --subset {params.subset} \
+            --matrix-backend {params.matrix_backend} \
             --workers {threads} \
             > {log.run} 2>&1
         """

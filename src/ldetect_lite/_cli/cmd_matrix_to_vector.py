@@ -63,6 +63,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "(default: 1)."
         ),
     )
+    p.add_argument(
+        "--backend",
+        choices=("array", "legacy"),
+        default="array",
+        help=(
+            "Backend for diag mode. 'array' is faster; 'legacy' uses the "
+            "dictionary-backed ldetect-compatible summation path (default: array)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -84,7 +93,11 @@ def _run(args: argparse.Namespace) -> int:
             analysis.calc_diag()
             analysis.write_output_to_file(args.output)
         else:
-            analysis.calc_diag_lean(args.output, matrix_workers=args.workers)
+            analysis.calc_diag_lean(
+                args.output,
+                matrix_workers=args.workers,
+                backend=args.backend,
+            )
     else:
         raise NotImplementedError("vert mode is deprecated; use diag")
 

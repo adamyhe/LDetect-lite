@@ -178,6 +178,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--matrix-backend",
+        choices=("array", "legacy"),
+        default="array",
+        help=(
+            "Backend for Step 3 matrix-to-vector conversion. 'array' is faster; "
+            "'legacy' uses the dictionary-backed ldetect-compatible summation "
+            "path for replication diagnostics (default: array)."
+        ),
+    )
+    p.add_argument(
         "--metric-workers",
         type=int,
         default=None,
@@ -376,10 +386,17 @@ def _run(args: argparse.Namespace) -> int:
     # Step 3: Matrix → vector                                             #
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
-    log_msg(f"Step 3: Converting matrix to vector (workers={matrix_workers})")
+    log_msg(
+        "Step 3: Converting matrix to vector "
+        f"(backend={args.matrix_backend}, workers={matrix_workers})"
+    )
     log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
-    analysis.calc_diag_lean(vector_path, matrix_workers=matrix_workers)
+    analysis.calc_diag_lean(
+        vector_path,
+        matrix_workers=matrix_workers,
+        backend=args.matrix_backend,
+    )
     log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #

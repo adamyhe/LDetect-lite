@@ -87,13 +87,16 @@ class MatrixAnalysis:
         out_path: Path,
         covariance_cache: ChromosomeCovariance | None = None,
         matrix_workers: int = 1,
+        backend: str = "array",
     ) -> None:
         """Compute the diagonal correlation-sum vector, writing output incrementally.
 
         This is the memory-efficient path.  Results are appended to *out_path*
         (gzipped TSV: position \\t corr_sum) as each partition is processed.
         """
-        if _USE_ARRAY_DIAG:
+        if backend not in {"array", "legacy"}:
+            raise ValueError(f"Unknown matrix-to-vector backend: {backend}")
+        if backend == "array" and _USE_ARRAY_DIAG:
             self.calc_diag_array(
                 out_path,
                 covariance_cache=covariance_cache,

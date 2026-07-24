@@ -148,6 +148,11 @@ n_snps_bw_bpoints: 7000
 # chromosome (~40 for human autosomes). Snakemake will reserve this many
 # cores per job, so total cores used = (simultaneous chromosome jobs) × workers.
 workers: 4
+# Use the ldetect-compatible dictionary-backed matrix-to-vector summation for
+# MacDonald deCODE replication. The faster array backend remains available via
+# `--config matrix_backend=array`, but differs from legacy on EUR chr21 even
+# when legacy itself exactly matches the published deCODE blocks.
+matrix_backend: legacy
 
 # LD-neighborhood separation plots around called boundaries. Each plot samples
 # pairwise r^2 from within-left, across-boundary, and within-right windows.
