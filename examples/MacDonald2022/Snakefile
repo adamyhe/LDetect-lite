@@ -360,6 +360,7 @@ rule legacy_diagnostics:
     input:
         legacy_diagnostic_targets("raw_ldetect_lite_vs_legacy.tsv"),
         legacy_diagnostic_targets("legacy_final_vs_reference.tsv"),
+        legacy_diagnostic_targets("covariance_lite_vs_legacy.tsv"),
 
 
 rule vcf_map_position_diagnostics:
@@ -1119,6 +1120,46 @@ rule compare_legacy_from_vcf:
             --legacy-final-vs-reference {output.legacy_final_vs_reference}
         cp {output.raw_ldetect_lite_vs_legacy} {params.raw_ldetect_lite_vs_legacy_latest}
         cp {output.legacy_final_vs_reference} {params.legacy_final_vs_reference_latest}
+        """
+
+
+rule compare_legacy_covariance_from_vcf:
+    input:
+        ldetect_lite_partitions=rules.run_ldetect.output.partitions,
+        legacy_partitions=rules.run_legacy_from_vcf.output.partitions,
+        script="scripts/compare_legacy_covariance.py",
+    output:
+        str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "compare"
+            / "{params_hash}"
+            / "covariance_lite_vs_legacy.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+        params_hash=r"[0-9a-f]{12}",
+    params:
+        ldetect_lite_root=str(RESULTS / "{block_set}" / "chr{chrom}"),
+        legacy_dataset_root=str(
+            LEGACY_RESULTS / "{block_set}" / "chr{chrom}" / "legacy_dataset"
+        ),
+        latest=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "compare"
+            / "covariance_lite_vs_legacy.tsv"
+        ),
+    shell:
+        """
+        uv run python {input.script} \
+            --chromosome chr{wildcards.chrom} \
+            --ldetect-lite-root {params.ldetect_lite_root} \
+            --legacy-dataset-root {params.legacy_dataset_root} \
+            --output {output}
+        cp {output} {params.latest}
         """
 
 
