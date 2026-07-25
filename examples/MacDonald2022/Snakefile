@@ -201,7 +201,9 @@ def vcf_map_position_targets():
 
 def ldetect_run_params_for(block_set):
     return {
+        "all_breakpoint_subsets": True,
         "cov_cutoff": config["cov_cutoff"],
+        "filter_window": config.get("filter_window", "symmetric"),
         "ld_kernel": config.get("ld_kernel", "bitpacked"),
         "matrix_backend": config.get("matrix_backend", "array"),
         "n_snps_bw_bpoints": config["n_snps_bw_bpoints"],
@@ -725,6 +727,7 @@ rule run_ldetect:
         n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
         matrix_backend=config.get("matrix_backend", "array"),
         ld_kernel=config.get("ld_kernel", "bitpacked"),
+        filter_window=config.get("filter_window", "symmetric"),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -744,8 +747,10 @@ rule run_ldetect:
             --cov-cutoff {params.cutoff} \
             --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
             --subset {params.subset} \
+            --all-breakpoint-subsets \
             --matrix-backend {params.matrix_backend} \
             --ld-kernel {params.ld_kernel} \
+            --filter-window {params.filter_window} \
             --force-covariance \
             --workers {threads} \
             > {log.run} 2>&1

@@ -12,6 +12,7 @@ import scipy.signal as sig
 
 from ldetect_lite.filters import (
     _convolve1d_reflect,
+    _filter_window,
     _pad_reflect,
     apply_filter,
     apply_filter_get_minima,
@@ -55,6 +56,21 @@ def test_apply_filter_window_size():
     width = 7
     result = apply_filter(_ARR, width=width)
     assert len(result["window"]) == 2 * width + 1
+
+
+def test_scipy_periodic_filter_window_matches_get_window_default():
+    width = 7
+    np.testing.assert_allclose(
+        _filter_window(width, "scipy-periodic"),
+        sig.get_window("hann", 2 * width + 1),
+        atol=1e-15,
+        rtol=1e-15,
+    )
+
+
+def test_default_filter_window_is_symmetric_hanning():
+    width = 7
+    np.testing.assert_array_equal(_filter_window(width), np.hanning(2 * width + 1))
 
 
 def test_apply_filter_filtered_length():

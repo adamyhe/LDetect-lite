@@ -111,7 +111,20 @@ class FilterResult(TypedDict):
     filtered_minima_vals: list[float]
 
 
-def apply_filter(np_init_array: np.ndarray, width: int) -> FilterResult:
+def _filter_window(width: int, mode: str = "symmetric") -> np.ndarray:
+    n = 2 * width + 1
+    if mode == "symmetric":
+        return np.hanning(n)
+    if mode == "scipy-periodic":
+        return np.hanning(n + 1)[:-1]
+    raise ValueError(f"Unknown filter window mode: {mode}")
+
+
+def apply_filter(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "symmetric",
+) -> FilterResult:
     """Apply a Hanning-window low-pass filter and find local minima.
 
     Args:
@@ -122,7 +135,7 @@ def apply_filter(np_init_array: np.ndarray, width: int) -> FilterResult:
         Dict with keys: width, window, filtered, filtered_minima_ind,
         filtered_minima_vals.
     """
-    window = np.hanning(2 * width + 1)
+    window = _filter_window(width, window_mode)
     kernel = window / window.sum()
     if _HAVE_NUMBA:
         arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
@@ -150,14 +163,22 @@ def apply_filter(np_init_array: np.ndarray, width: int) -> FilterResult:
     }
 
 
-def apply_filter_get_minima(np_init_array: np.ndarray, width: int) -> int:
+def apply_filter_get_minima(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "symmetric",
+) -> int:
     """Return the number of local minima for a given filter width."""
-    return len(apply_filter(np_init_array, width)["filtered_minima_ind"])
+    return len(apply_filter(np_init_array, width, window_mode)["filtered_minima_ind"])
 
 
-def apply_filter_get_minima_ind(np_init_array: np.ndarray, width: int) -> np.ndarray:
+def apply_filter_get_minima_ind(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "symmetric",
+) -> np.ndarray:
     """Return the indices of local minima for a given filter width."""
-    return apply_filter(np_init_array, width)["filtered_minima_ind"]
+    return apply_filter(np_init_array, width, window_mode)["filtered_minima_ind"]
 
 
 def get_minima_loc(g: FilterResult, np_init_array_x: np.ndarray) -> list[int]:
@@ -178,6 +199,10 @@ def apply_filters(
     first: int,
     last: int,
     step: int,
+    window_mode: str = "symmetric",
 ) -> list[FilterResult]:
     """Apply filters at a range of widths and return all results."""
-    return [apply_filter(np_init_array, w) for w in range(first, last + 1, step)]
+    return [
+        apply_filter(np_init_array, w, window_mode)
+        for w in range(first, last + 1, step)
+    ]

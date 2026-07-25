@@ -66,6 +66,7 @@ def find_breakpoints(
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
     subsets: set[str] | None = None,
+    filter_window: str = "symmetric",
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
 
@@ -105,6 +106,9 @@ def find_breakpoints(
             for normal float metrics.
         subsets: Optional breakpoint subsets to compute and write.  ``None``
             preserves the historical behavior and writes all four subsets.
+        filter_window: Hanning window compatibility mode. ``"symmetric"`` uses
+            ``np.hanning``; ``"scipy-periodic"`` matches original ldetect's
+            ``scipy.signal.get_window(..., fftbins=True)`` behavior.
     """
     requested_subsets, explicit_subsets = _normalise_subsets(subsets)
     needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
@@ -136,7 +140,7 @@ def find_breakpoints(
     log_msg("Searching for filter width...")
     found_width = custom_binary_search_with_trackback(
         np_array,
-        apply_filter_get_minima,
+        lambda arr, width: apply_filter_get_minima(arr, width, filter_window),
         n_bpoints,
         trackback_delta=trackback_delta,
         trackback_step=trackback_step,
@@ -149,7 +153,7 @@ def find_breakpoints(
     # 4. Extract minima positions
     log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
-    g = apply_filter(np_array, found_width)
+    g = apply_filter(np_array, found_width, filter_window)
     fourier_loci = get_minima_loc(g, np_array_x)
     log_memory_checkpoint("minima_extraction_end")
 

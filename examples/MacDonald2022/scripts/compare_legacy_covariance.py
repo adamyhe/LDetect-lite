@@ -178,7 +178,7 @@ def main() -> None:
     parser.add_argument("--ldetect-lite-root", required=True, type=Path)
     parser.add_argument("--legacy-dataset-root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--tolerance", type=float, default=0.0)
+    parser.add_argument("--tolerance", type=float, default=1e-12)
     args = parser.parse_args()
 
     chrom = args.chromosome

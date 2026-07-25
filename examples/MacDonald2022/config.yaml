@@ -158,6 +158,10 @@ matrix_backend: legacy
 # faster bitpacked kernel remains the package default and can be requested with
 # `--config ld_kernel=bitpacked`.
 ld_kernel: uint8
+# Original ldetect uses scipy.signal.get_window(..., fftbins=True) for its
+# Hanning filter. Keep MacDonald replication diagnostics on that legacy-periodic
+# window; the package default remains the symmetric np.hanning window.
+filter_window: scipy-periodic
 
 # LD-neighborhood separation plots around called boundaries. Each plot samples
 # pairwise r^2 from within-left, across-boundary, and within-right windows.
