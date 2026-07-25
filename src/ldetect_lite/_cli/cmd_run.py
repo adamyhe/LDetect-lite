@@ -212,6 +212,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "this chromosome and output directory (default: keep the cache)."
         ),
     )
+    p.add_argument(
+        "--force-covariance",
+        action="store_true",
+        help=(
+            "Recompute this chromosome's covariance partitions even if cached "
+            "partition files already exist. Useful when changing diagnostic "
+            "covariance backends or cache parameters."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -329,8 +338,14 @@ def _run(args: argparse.Namespace) -> int:
 
     pending = []
     invalid = 0
+    forced = 0
     for start, end in partitions:
         partition_path = store.partition_path(chrom, start, end)
+        if args.force_covariance and partition_path.exists():
+            partition_path.unlink()
+            forced += 1
+            pending.append((start, end))
+            continue
         if not partition_path.exists():
             pending.append((start, end))
             continue
@@ -343,6 +358,8 @@ def _run(args: argparse.Namespace) -> int:
     skipped = len(partitions) - len(pending)
     if skipped:
         log_msg(f"  Skipping {skipped} already-completed partition(s)")
+    if forced:
+        log_msg(f"  Forcing recomputation of {forced} cached partition(s)")
     if invalid:
         log_msg(f"  Regenerating {invalid} invalid cached partition(s)")
 

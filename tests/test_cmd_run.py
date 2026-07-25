@@ -137,6 +137,11 @@ def test_delete_covariance_cache_flag_sets_true() -> None:
     assert args.delete_covariance_cache is True
 
 
+def test_force_covariance_defaults_to_false_and_flag_sets_true() -> None:
+    assert _parse_run_args([]).force_covariance is False
+    assert _parse_run_args(["--force-covariance"]).force_covariance is True
+
+
 def test_delete_covariance_cache_removes_directory(tmp_path: Path) -> None:
     cov_dir = tmp_path / "22"
     cov_dir.mkdir()

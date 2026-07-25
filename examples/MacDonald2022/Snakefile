@@ -30,6 +30,7 @@ Usage:
     uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -647,6 +648,7 @@ rule run_ldetect:
         partitions=str(
             RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}_partitions.txt"
         ),
+        run_params=str(RESULTS / "{block_set}" / "chr{chrom}" / "run_params.json"),
     log:
         run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
@@ -663,6 +665,18 @@ rule run_ldetect:
         subset=config["subset"],
         n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
         matrix_backend=config.get("matrix_backend", "array"),
+        ld_kernel=config.get("ld_kernel", "bitpacked"),
+        run_params_json=lambda wc: json.dumps(
+            {
+                "cov_cutoff": config["cov_cutoff"],
+                "ld_kernel": config.get("ld_kernel", "bitpacked"),
+                "matrix_backend": config.get("matrix_backend", "array"),
+                "n_snps_bw_bpoints": config["n_snps_bw_bpoints"],
+                "ne": block_set_ne(wc.block_set),
+                "subset": config["subset"],
+            },
+            sort_keys=True,
+        ),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -683,8 +697,11 @@ rule run_ldetect:
             --n-snps-bw-bpoints {params.n_snps_bw_bpoints} \
             --subset {params.subset} \
             --matrix-backend {params.matrix_backend} \
+            --ld-kernel {params.ld_kernel} \
+            --force-covariance \
             --workers {threads} \
             > {log.run} 2>&1
+        printf '%s\n' '{params.run_params_json}' > {output.run_params}
         """
 
 

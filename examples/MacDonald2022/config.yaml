@@ -153,6 +153,11 @@ workers: 4
 # `--config matrix_backend=array`, but differs from legacy on EUR chr21 even
 # when legacy itself exactly matches the published deCODE blocks.
 matrix_backend: legacy
+# Use the uint8 covariance kernel for deCODE replication diagnostics. This is
+# the closest ldetect-lite covariance path to the original Python script; the
+# faster bitpacked kernel remains the package default and can be requested with
+# `--config ld_kernel=bitpacked`.
+ld_kernel: uint8
 
 # LD-neighborhood separation plots around called boundaries. Each plot samples
 # pairwise r^2 from within-left, across-boundary, and within-right windows.
