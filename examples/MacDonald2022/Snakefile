@@ -30,6 +30,7 @@ Usage:
     uv run snakemake --config chromosomes=[22]  # smoke-test on chr22 only
 """
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -177,7 +178,14 @@ def remove_centromeres_param(wc):
 
 def legacy_diagnostic_targets(filename):
     return [
-        str(LEGACY_RESULTS / block_set / f"chr{chrom}" / "compare" / filename)
+        str(
+            LEGACY_RESULTS
+            / block_set
+            / f"chr{chrom}"
+            / "compare"
+            / ldetect_run_params_hash_for(block_set)
+            / filename
+        )
         for block_set in LEGACY_DIAGNOSTIC_BLOCK_SETS
         for chrom in LEGACY_DIAGNOSTIC_CHROMS
     ]
@@ -189,6 +197,41 @@ def vcf_map_position_targets():
         for block_set in ACTIVE_BLOCK_SETS
         for chrom in CHROMS
     ]
+
+
+def ldetect_run_params_for(block_set):
+    return {
+        "cov_cutoff": config["cov_cutoff"],
+        "ld_kernel": config.get("ld_kernel", "bitpacked"),
+        "matrix_backend": config.get("matrix_backend", "array"),
+        "n_snps_bw_bpoints": config["n_snps_bw_bpoints"],
+        "ne": block_set_ne(block_set),
+        "subset": config["subset"],
+    }
+
+
+def ldetect_run_params_json_for(block_set):
+    return json.dumps(ldetect_run_params_for(block_set), sort_keys=True)
+
+
+def ldetect_run_params_hash_for(block_set):
+    return hashlib.sha256(
+        ldetect_run_params_json_for(block_set).encode()
+    ).hexdigest()[:12]
+
+
+def ldetect_run_params_json(wc):
+    return ldetect_run_params_json_for(wc.block_set)
+
+
+def ldetect_run_params_path(wc):
+    params_hash = ldetect_run_params_hash_for(wc.block_set)
+    return str(
+        RES_DIR
+        / "run_params"
+        / wc.block_set
+        / f"chr{wc.chrom}.{params_hash}.json"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +675,21 @@ rule interpolate_pyrho_map_macdonald_style:
 # ---------------------------------------------------------------------------
 
 
+rule write_ldetect_run_params:
+    output:
+        str(RES_DIR / "run_params" / "{block_set}" / "chr{chrom}.{params_hash}.json"),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+        params_hash=r"[0-9a-f]{12}",
+    params:
+        run_params_json=ldetect_run_params_json,
+    shell:
+        """
+        mkdir -p {RES_DIR}/run_params/{wildcards.block_set}
+        printf '%s\n' '{params.run_params_json}' > {output}
+        """
+
+
 rule run_ldetect:
     input:
         genetic_map=block_set_genetic_map,
@@ -639,6 +697,7 @@ rule run_ldetect:
         individuals=lambda wc: str(
             RES_DIR / f"{block_set_population(wc.block_set)}_inds.txt"
         ),
+        run_params=ldetect_run_params_path,
     output:
         bed=str(RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-blocks.bed"),
         vector=str(RESULTS / "{block_set}" / "chr{chrom}" / "vector-chr{chrom}.txt.gz"),
@@ -648,7 +707,6 @@ rule run_ldetect:
         partitions=str(
             RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}_partitions.txt"
         ),
-        run_params=str(RESULTS / "{block_set}" / "chr{chrom}" / "run_params.json"),
     log:
         run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
@@ -666,17 +724,6 @@ rule run_ldetect:
         n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
         matrix_backend=config.get("matrix_backend", "array"),
         ld_kernel=config.get("ld_kernel", "bitpacked"),
-        run_params_json=lambda wc: json.dumps(
-            {
-                "cov_cutoff": config["cov_cutoff"],
-                "ld_kernel": config.get("ld_kernel", "bitpacked"),
-                "matrix_backend": config.get("matrix_backend", "array"),
-                "n_snps_bw_bpoints": config["n_snps_bw_bpoints"],
-                "ne": block_set_ne(wc.block_set),
-                "subset": config["subset"],
-            },
-            sort_keys=True,
-        ),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -701,7 +748,6 @@ rule run_ldetect:
             --force-covariance \
             --workers {threads} \
             > {log.run} 2>&1
-        printf '%s\n' '{params.run_params_json}' > {output.run_params}
         """
 
 
@@ -1024,6 +1070,7 @@ rule compare_legacy_from_vcf:
             / "{block_set}"
             / "chr{chrom}"
             / "compare"
+            / "{params_hash}"
             / "raw_ldetect_lite_vs_legacy.tsv"
         ),
         legacy_final_vs_reference=str(
@@ -1031,13 +1078,29 @@ rule compare_legacy_from_vcf:
             / "{block_set}"
             / "chr{chrom}"
             / "compare"
+            / "{params_hash}"
             / "legacy_final_vs_reference.tsv"
         ),
     wildcard_constraints:
         block_set=BLOCK_SET_PATTERN,
+        params_hash=r"[0-9a-f]{12}",
     params:
         subset=config["subset"],
         tolerance=config.get("legacy_diagnostics", {}).get("tolerance", 50_000),
+        raw_ldetect_lite_vs_legacy_latest=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "compare"
+            / "raw_ldetect_lite_vs_legacy.tsv"
+        ),
+        legacy_final_vs_reference_latest=str(
+            LEGACY_RESULTS
+            / "{block_set}"
+            / "chr{chrom}"
+            / "compare"
+            / "legacy_final_vs_reference.tsv"
+        ),
     shell:
         """
         uv run python {input.script} \
@@ -1054,6 +1117,8 @@ rule compare_legacy_from_vcf:
             --tolerance {params.tolerance} \
             --raw-ldetect-lite-vs-legacy {output.raw_ldetect_lite_vs_legacy} \
             --legacy-final-vs-reference {output.legacy_final_vs_reference}
+        cp {output.raw_ldetect_lite_vs_legacy} {params.raw_ldetect_lite_vs_legacy_latest}
+        cp {output.legacy_final_vs_reference} {params.legacy_final_vs_reference_latest}
         """
 
 
