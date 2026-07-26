@@ -2,10 +2,7 @@
 
 Operations:
   1. Optional centromere removal — drop blocks overlapping a centromeric region.
-  2. Support-span trimming and empty block removal — drop edge/empty blocks
-     outside the ldetect vector support, or the filtered VCF SNP support when no
-     vector is supplied.
-  3. Optional small block merging — merge any block with fewer than *min_snps*
+  2. Optional small block merging — merge any block with fewer than *min_snps*
      SNPs (counted from a filtered VCF) into its left neighbour. Disabled when
      *min_snps* is 0.
 
@@ -70,32 +67,6 @@ def drop_nonpositive_blocks(blocks: list[tuple[int, int]]) -> list[tuple[int, in
     return [(s, e) for s, e in blocks if s < e]
 
 
-def drop_empty_blocks(
-    blocks: list[tuple[int, int]],
-    counts: list[int],
-) -> tuple[list[tuple[int, int]], list[int]]:
-    """Drop blocks with no SNPs in the filtered VCF."""
-    kept = [
-        (block, count)
-        for block, count in zip(blocks, counts, strict=True)
-        if count > 0
-    ]
-    return [block for block, _ in kept], [count for _, count in kept]
-
-
-def trim_blocks_to_snp_span(
-    blocks: list[tuple[int, int]],
-    first_snp: int,
-    last_snp: int,
-) -> list[tuple[int, int]]:
-    """Drop leading/trailing edge intervals outside the filtered VCF SNP span."""
-    return [
-        (start, end)
-        for start, end in blocks
-        if end > first_snp and start <= last_snp
-    ]
-
-
 # ---------------------------------------------------------------------------
 # SNP counting
 # ---------------------------------------------------------------------------
@@ -115,46 +86,6 @@ def count_snps_per_block(
         )
         counts.append(result.stdout.count("\n"))
     return counts
-
-
-def vcf_snp_span(vcf_path: Path, chrom: str) -> tuple[int, int]:
-    """Return first and last SNP position in *chrom* from a filtered VCF."""
-    result = subprocess.run(
-        ["bcftools", "query", "-f", "%POS\n", "-r", chrom, str(vcf_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    first: int | None = None
-    last: int | None = None
-    for line in result.stdout.splitlines():
-        if not line:
-            continue
-        position = int(line)
-        if first is None:
-            first = position
-        last = position
-    if first is None or last is None:
-        raise RuntimeError(f"No SNPs found for {chrom} in {vcf_path}")
-    return first, last
-
-
-def vector_position_span(path: Path) -> tuple[int, int]:
-    """Return first and last genomic positions from an ldetect vector file."""
-    opener = gzip.open if path.suffix.lower() in {".gz", ".gzip"} else open
-    first: int | None = None
-    last: int | None = None
-    with opener(path, "rt") as f:  # type: ignore[call-overload]
-        for line in f:
-            if not line.strip():
-                continue
-            position = int(line.split()[0])
-            if first is None:
-                first = position
-            last = position
-    if first is None or last is None:
-        raise RuntimeError(f"No vector positions found in {path}")
-    return first, last
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +159,6 @@ def main() -> None:
         ),
     )
     parser.add_argument("--min-snps", type=int, default=100)
-    parser.add_argument(
-        "--vector",
-        type=Path,
-        help=(
-            "Optional ldetect vector file used to trim edge intervals to the "
-            "actual blockable SNP span. Falls back to the filtered VCF span."
-        ),
-    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -262,32 +185,10 @@ def main() -> None:
     else:
         print("Centromere removal disabled")
 
-    # Step 2: support-span trimming, empty block removal, and optional small
-    # block merging.
-    span_source = "vector" if args.vector else "VCF"
-    first_snp, last_snp = (
-        vector_position_span(args.vector)
-        if args.vector
-        else vcf_snp_span(args.vcf, chrom)
-    )
-    n_before_span_trim = len(blocks)
-    blocks = trim_blocks_to_snp_span(blocks, first_snp, last_snp)
-    n_span_trimmed = n_before_span_trim - len(blocks)
-    if n_span_trimmed:
-        print(
-            f"After trimming {n_span_trimmed} block(s) outside {span_source} SNP span "
-            f"{first_snp}-{last_snp}: {len(blocks)} blocks"
-        )
-
-    print("Counting SNPs per block...")
-    counts = count_snps_per_block(args.vcf, chrom, blocks)
-    n_empty = sum(1 for c in counts if c == 0)
-    blocks, counts = drop_empty_blocks(blocks, counts)
-    if n_empty:
-        print(f"After dropping {n_empty} empty blocks: {len(blocks)} blocks")
-
+    # Step 2: optional small block merging
     if args.min_snps > 0:
-        print(f"Merging blocks with fewer than {args.min_snps} SNPs...")
+        print(f"Counting SNPs per block (min_snps={args.min_snps})...")
+        counts = count_snps_per_block(args.vcf, chrom, blocks)
         n_small = sum(1 for c in counts if c < args.min_snps)
         blocks = merge_small_blocks(blocks, counts, args.min_snps)
         print(f"After merging {n_small} small blocks: {len(blocks)} blocks")

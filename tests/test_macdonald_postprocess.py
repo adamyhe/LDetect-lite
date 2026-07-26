@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import importlib.util
 from pathlib import Path
 
@@ -24,46 +23,6 @@ def test_drop_nonpositive_blocks_removes_zero_and_negative_width_blocks() -> Non
     assert postprocess.drop_nonpositive_blocks(
         [(10, 10), (10, 20), (30, 25), (20, 30)]
     ) == [(10, 20), (20, 30)]
-
-
-def test_drop_empty_blocks_removes_zero_snp_blocks_only() -> None:
-    assert postprocess.drop_empty_blocks(
-        blocks=[(10, 14), (14, 100), (100, 110)],
-        counts=[0, 1, 10],
-    ) == ([(14, 100), (100, 110)], [1, 10])
-
-
-def test_trim_blocks_to_snp_span_drops_leading_block_ending_at_first_snp() -> None:
-    assert postprocess.trim_blocks_to_snp_span(
-        blocks=[(31439, 31443), (31443, 1196882)],
-        first_snp=31443,
-        last_snp=1196882,
-    ) == [(31443, 1196882)]
-
-
-def test_trim_blocks_to_snp_span_keeps_interior_small_blocks() -> None:
-    assert postprocess.trim_blocks_to_snp_span(
-        blocks=[
-            (55438332, 59565357),
-            (59565357, 59582067),
-            (59582067, 62477349),
-        ],
-        first_snp=55438332,
-        last_snp=62477349,
-    ) == [
-        (55438332, 59565357),
-        (59565357, 59582067),
-        (59582067, 62477349),
-    ]
-
-
-def test_vector_position_span_reads_gzip_vector_bounds(tmp_path: Path) -> None:
-    vector = tmp_path / "vector.txt.gz"
-    with gzip.open(vector, "wt") as f:
-        f.write("31443\t1.0\n")
-        f.write("1196882\t2.0\n")
-
-    assert postprocess.vector_position_span(vector) == (31443, 1196882)
 
 
 def test_merge_small_blocks_merges_leading_small_block_right() -> None:

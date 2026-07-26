@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +12,6 @@ from ldetect_lite._cli.cmd_run import (
     _delete_covariance_cache,
     _is_valid_covariance_partition,
     _resolve_workers,
-    _vector_position_bounds,
     register,
 )
 from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
@@ -141,15 +139,6 @@ def test_filter_window_defaults_to_scipy_periodic_and_accepts_symmetric() -> Non
 def test_filter_workers_defaults_to_one_and_accepts_override() -> None:
     assert _parse_run_args([]).filter_workers == 1
     assert _parse_run_args(["--filter-workers", "4"]).filter_workers == 4
-
-
-def test_vector_position_bounds_reads_first_and_last_positions(tmp_path: Path) -> None:
-    vector = tmp_path / "vector.txt.gz"
-    with gzip.open(vector, "wt") as f:
-        f.write("31443\t1.0\n")
-        f.write("1196882\t2.0\n")
-
-    assert _vector_position_bounds(vector) == (31443, 1196882)
 
 
 def test_delete_covariance_cache_defaults_to_false() -> None:
