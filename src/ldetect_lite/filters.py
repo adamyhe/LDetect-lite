@@ -88,12 +88,15 @@ def _convolve1d_reflect(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     n = arr.shape[0]
     klen = kernel.shape[0]
     width = klen // 2
+    conv_kernel = np.empty(klen, dtype=np.float64)
+    for k in range(klen):
+        conv_kernel[k] = kernel[klen - 1 - k]
     padded = _pad_reflect(arr, width)
     out = np.empty(n, dtype=np.float64)
     for i in range(n):
         s = 0.0
         for k in range(klen):
-            s += padded[i + k] * kernel[klen - 1 - k]
+            s += padded[i + k] * conv_kernel[k]
         out[i] = s
     return out
 

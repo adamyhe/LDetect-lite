@@ -62,38 +62,19 @@ def _find_end(
 ) -> int:
     """Exponential search upward for the smallest x where f(data, x) < val.
 
-    With ``max_workers > 1``, each round evaluates up to ``max_workers``
-    doubling candidates (x, 2x, 4x, ...) concurrently instead of one call per
-    doubling step, then returns the smallest candidate satisfying
-    ``f(data, x) < val`` -- identical result to the sequential search, since
-    the doubling sequence and the "smallest satisfying candidate" rule are
-    unchanged, just evaluated in concurrent batches.
+    This phase is intentionally sequential even when the surrounding search
+    uses workers. Later doubling candidates can be much more expensive than
+    earlier ones, so batching them can waste minutes evaluating huge filters
+    after an earlier candidate already satisfies the stopping rule.
     """
     if x <= 0:
         raise ValueError("x must be > 0")
-    if max_workers <= 1:
+    while True:
         if x >= max_srch_val:
             raise ValueError(f"Max search value {max_srch_val} exceeded")
         if f(data, x) < val:
             return x
-        return _find_end(data, f, x * 2, val, max_srch_val)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        while True:
-            chunk = []
-            candidate = x
-            for _ in range(max_workers):
-                if candidate >= max_srch_val:
-                    break
-                chunk.append(candidate)
-                candidate *= 2
-            if not chunk:
-                raise ValueError(f"Max search value {max_srch_val} exceeded")
-            values = list(pool.map(lambda c: f(data, c), chunk))
-            for c, v in zip(chunk, values):
-                if v < val:
-                    return c
-            x = candidate
+        x *= 2
 
 
 def _trackback(

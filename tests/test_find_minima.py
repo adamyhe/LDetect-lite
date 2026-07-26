@@ -49,13 +49,8 @@ def test_trackback_threaded_matches_sequential() -> None:
     assert threaded == sequential
 
 
-def test_find_end_threaded_matches_sequential() -> None:
-    """Threaded exponential search must find the identical smallest x.
-
-    Batches up to max_workers doubling candidates per round but still
-    returns the smallest x satisfying f(data, x) < val, matching the
-    sequential recursive doubling search exactly.
-    """
+def test_find_end_ignores_workers_and_matches_sequential() -> None:
+    """Exponential search must not precompute expensive later candidates."""
     arr = np.random.default_rng(2).normal(size=3000).cumsum()
 
     sequential = _find_end(arr, apply_filter_get_minima, x=10, val=15)
@@ -64,8 +59,19 @@ def test_find_end_threaded_matches_sequential() -> None:
     assert threaded == sequential
 
 
+def test_find_end_stops_before_later_doubling_candidates() -> None:
+    calls: list[int] = []
+
+    def threshold(_data: np.ndarray, width: int) -> int:
+        calls.append(width)
+        return 0 if width >= 4 else 10
+
+    assert _find_end(np.array([1.0]), threshold, x=1, val=5, max_workers=16) == 4
+    assert calls == [1, 2, 4]
+
+
 def test_find_end_threaded_raises_at_max_srch_val() -> None:
-    """Hitting max_srch_val must raise the same error, threaded or not."""
+    """Hitting max_srch_val must raise the same error regardless of workers."""
     arr = np.random.default_rng(3).normal(size=3000).cumsum()
 
     with pytest.raises(ValueError, match="Max search value"):
