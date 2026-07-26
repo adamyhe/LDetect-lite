@@ -120,7 +120,7 @@ Date: 2026-07-26
 
 The MacDonald2022 chr21 deCODE exact-match diagnostic confirmed that original ldetect's Step 4 behavior uses SciPy's periodic Hann window (`scipy.signal.get_window("hann", n)`, equivalent to `fftbins=True`), not NumPy's symmetric `np.hanning(n)` window. ldetect-lite now defaults to `scipy-periodic` across the CLI, `find_breakpoints()`, and filter helper APIs.
 
-Keep `--filter-window symmetric` only as a temporary compatibility/diagnostic knob while we finish validating downstream reproduction workflows. It should not be treated as a peer "correct" mode long term. Once the MacDonald2022 and ldetect_original reruns are stable under the periodic default, plan a deprecation/removal pass:
+Keep `--filter-window symmetric` only as a deprecated compatibility/diagnostic knob for historical output comparisons. It should not be treated as a peer "correct" mode long term. Once old-output comparisons no longer need it, plan a removal pass:
 
 - remove `symmetric` from CLI choices and public filter helper modes;
 - simplify tests that only exist to preserve symmetric-vs-periodic branching;

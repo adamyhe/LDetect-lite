@@ -106,10 +106,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         choices=("symmetric", "scipy-periodic"),
         default="scipy-periodic",
         help=(
-            "Hanning window mode for breakpoint filtering. 'symmetric' uses "
-            "np.hanning; 'scipy-periodic' matches original ldetect's "
-            "scipy.signal.get_window(..., fftbins=True) behavior "
-            "(default: scipy-periodic)."
+            "Hanning window mode for breakpoint filtering. 'scipy-periodic' "
+            "matches original ldetect's scipy.signal.get_window(..., "
+            "fftbins=True) behavior and is the supported default. "
+            "'symmetric' uses np.hanning and is deprecated; keep it only for "
+            "old diagnostic comparisons (default: scipy-periodic)."
         ),
     )
     p.add_argument(
