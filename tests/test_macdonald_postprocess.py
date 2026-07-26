@@ -25,6 +25,13 @@ def test_drop_nonpositive_blocks_removes_zero_and_negative_width_blocks() -> Non
     ) == [(10, 20), (20, 30)]
 
 
+def test_drop_empty_blocks_removes_zero_snp_blocks_only() -> None:
+    assert postprocess.drop_empty_blocks(
+        blocks=[(10, 14), (14, 100), (100, 110)],
+        counts=[0, 1, 10],
+    ) == ([(14, 100), (100, 110)], [1, 10])
+
+
 def test_merge_small_blocks_merges_leading_small_block_right() -> None:
     assert postprocess.merge_small_blocks(
         blocks=[(10, 14), (14, 100), (100, 200)],

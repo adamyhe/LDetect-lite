@@ -2,8 +2,10 @@
 
 Operations:
   1. Optional centromere removal — drop blocks overlapping a centromeric region.
-  2. Small block merging — merge any block with fewer than *min_snps* SNPs
-     (counted from a filtered VCF) into its left neighbour.
+  2. Empty block removal — drop blocks with zero SNPs in the filtered VCF.
+  3. Optional small block merging — merge any block with fewer than *min_snps*
+     SNPs (counted from a filtered VCF) into its left neighbour. Disabled when
+     *min_snps* is 0.
 
 Usage:
     uv run python scripts/postprocess.py \
@@ -64,6 +66,19 @@ def remove_centromere_blocks(
 def drop_nonpositive_blocks(blocks: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Drop invalid zero/negative-width BED intervals."""
     return [(s, e) for s, e in blocks if s < e]
+
+
+def drop_empty_blocks(
+    blocks: list[tuple[int, int]],
+    counts: list[int],
+) -> tuple[list[tuple[int, int]], list[int]]:
+    """Drop blocks with no SNPs in the filtered VCF."""
+    kept = [
+        (block, count)
+        for block, count in zip(blocks, counts, strict=True)
+        if count > 0
+    ]
+    return [block for block, _ in kept], [count for _, count in kept]
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +199,16 @@ def main() -> None:
     else:
         print("Centromere removal disabled")
 
-    # Step 2: small block merging
+    # Step 2: empty block removal and optional small block merging
+    print("Counting SNPs per block...")
+    counts = count_snps_per_block(args.vcf, chrom, blocks)
+    n_empty = sum(1 for c in counts if c == 0)
+    blocks, counts = drop_empty_blocks(blocks, counts)
+    if n_empty:
+        print(f"After dropping {n_empty} empty blocks: {len(blocks)} blocks")
+
     if args.min_snps > 0:
-        print(f"Counting SNPs per block (min_snps={args.min_snps})...")
-        counts = count_snps_per_block(args.vcf, chrom, blocks)
+        print(f"Merging blocks with fewer than {args.min_snps} SNPs...")
         n_small = sum(1 for c in counts if c < args.min_snps)
         blocks = merge_small_blocks(blocks, counts, args.min_snps)
         print(f"After merging {n_small} small blocks: {len(blocks)} blocks")
