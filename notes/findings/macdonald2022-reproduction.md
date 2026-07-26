@@ -1,17 +1,58 @@
 # MacDonald2022 reproduction — findings
 
-**Findings summary (current as of 2026-07-05).** Distilled for human review — e.g. writing up the paper. Full investigation detail, diagnostic scripts, and dated process notes: `notes/logs/macdonald2022-pyrho-handoff.md` and `notes/logs/macdonald2022-interpolation-port.md`.
+**Findings summary (current as of 2026-07-26).** Distilled for human review — e.g. writing up the paper. Full investigation detail, diagnostic scripts, and dated process notes: `notes/logs/macdonald2022-pyrho-handoff.md`, `notes/logs/macdonald2022-boundary-diagnostics.md`, and `notes/logs/macdonald2022-interpolation-port.md`.
 
 ## Status
 
-`examples/MacDonald2022` reproduces MacDonald et al. (2022)'s GRCh38 LD blocks for four block sets: `EUR` (deCODE map), `pyrho_AFR`, `pyrho_EAS`, `pyrho_EUR`. (`pyrho_SAS` is set aside — MacDonald et al. do not document an SAS-specific effective population size.) All four now perform in the same band: mean recall 0.82-0.87, with block counts exact or within one block of the reference.
+`examples/MacDonald2022` now has two distinct reproduction modes:
 
-| block set | ours | ref | delta | mean recall | mean bp-Jaccard |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `EUR` (deCODE, post-fix) | 1361 | 1361 | 0 | 0.865 | 0.773 |
-| `pyrho_AFR` | 1580 | 1580 | 0 | 0.874 | 0.988 |
-| `pyrho_EAS` | 1118 | 1121 | -3 | 0.825 | 0.983 |
-| `pyrho_EUR` | 1335 | 1336 | -1 | 0.864 | 0.979 |
+1. **deCODE/EUR replication.** Running with MacDonald's published deCODE maps and the legacy-compatible `scipy-periodic` filter reproduces the published deCODE/EUR block set essentially exactly. The only remaining structural mismatch is a tiny leading chr7 edge block (`31439-31443`) emitted by the original/legacy BED extraction convention but absent from MacDonald's published BED. All substantive internal boundaries match.
+2. **pyrho published-map replication.** Running with MacDonald's published pyrho interpolated maps gives high but not exact reproduction. The remaining pyrho divergence is concentrated in a small set of chromosomes and is already present before postprocessing, so centromere removal and small-block merging are not the main cause.
+
+Current downloaded comparison summaries:
+
+| block set | ours | ref | delta | mean recall | mean Jaccard | mean bp-Jaccard | exact chroms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `EUR` (deCODE) | 1362 | 1361 | +1 | 1.000 | 0.999 | 1.000 | 21/22 |
+| `pyrho_AFR` | 1579 | 1580 | -1 | 0.968 | 0.946 | 0.984 | 9/22 |
+| `pyrho_EAS` | 1118 | 1121 | -3 | 0.911 | 0.862 | 0.977 | 4/22 |
+| `pyrho_EUR` | 1336 | 1336 | 0 | 0.942 | 0.904 | 0.973 | 7/22 |
+
+Worst pyrho chromosomes in the current run:
+
+- `pyrho_AFR`: chr9 dominates the residual mismatch (`recall=0.600`, p90 offset 589.6 kb).
+- `pyrho_EAS`: chr4, chr9, and chr17 dominate.
+- `pyrho_EUR`: chr19, chr12, and chr9 dominate.
+
+## Focused pyrho boundary diagnostics
+
+A targeted Snakemake diagnostic now runs raw and final boundary diagnostics only for the chromosomes driving the remaining pyrho mismatch:
+
+```bash
+cd examples/MacDonald2022
+uv run snakemake --cores N pyrho_stage_diagnostics
+```
+
+Configured targets:
+
+- `pyrho_AFR`: chr9
+- `pyrho_EAS`: chr4, chr9, chr17
+- `pyrho_EUR`: chr9, chr12, chr19
+
+Outputs:
+
+```text
+results/compare/diagnostics/raw/{block_set}/chr{chrom}.boundary_diagnostics.tsv
+results/compare/diagnostics/final/{block_set}/chr{chrom}.boundary_diagnostics.tsv
+```
+
+These diagnostics annotate out-of-tolerance boundaries with mismatch class, local centromere context, local genetic-map density, and local SNP density. The downloaded `diagnostics/` bundle shows:
+
+- Raw and final are nearly identical: 310 raw mismatch rows vs. 309 final rows across the seven target chromosomes.
+- The dominant class is reciprocal shifted boundaries, not extra/missing splits: 262 shifted-boundary rows in both raw and final diagnostics.
+- Every reported boundary lies exactly on a filtered SNP and genetic-map position (`nearest_snp_distance_bp=0`, `nearest_map_distance_bp=0` for all rows).
+- Centromeres are not the broad explanation: final diagnostics have only 10/309 rows within 2 Mb of a centromere and none inside a centromere.
+- Therefore the remaining pyrho divergence is a breakpoint-placement divergence that arises upstream of postprocessing. The next fork is raw Fourier candidates vs. local-search-refined (`fourier_ls`) boundaries: if raw candidates are already shifted, investigate vector/filter/minima/input-map provenance; if raw candidates are close and local search moves away, investigate local-search objective sensitivity under these pyrho maps.
 
 ## deCODE map interpolation bug: root cause found and fixed
 
@@ -19,11 +60,11 @@
 
 **Fix**: added `interpolate_intervals()` (a direct port of the R script's interval-anchoring logic) as an alternative to `interpolate()`, exposed via `ldetect interpolate-maps --mode {point,interval}` (default `point`, preserving prior behavior for true point-sampled maps like HapMap-interpolated 1000G maps). Confirmed on real deCODE data: interval mode is 10-50x closer to MacDonald's own published interpolated map than point mode (MAE 0.00004-0.0002 cM vs. 0.0017-0.002 cM, Pearson r = 1.0 in both).
 
-Fixing the EUR block set's map source (switching from our own recomputed interpolation to MacDonald's own published already-interpolated deCODE map — the same approach already used for the pyrho maps) resolved the bulk of the divergence: mean recall **0.63 -> 0.865**, block count exact (1361/1361), median boundary offset 0.0 kb on all 22 chromosomes. EUR now sits in the same performance band as the three pyrho block sets instead of being an outlier. Worst remaining chromosomes (chr18 0.65, chr21 0.667, chr15 0.70 recall) show genuine hundreds-of-kb boundary shifts rather than razor-thin margins — likely the same genetic-map-desert mechanism described below, not a new bug.
+Historical note: switching EUR from our recomputed interpolation to MacDonald's published already-interpolated deCODE map first resolved the bulk of the divergence. Subsequent legacy-compatibility fixes (`scipy-periodic` filtering and deCODE/EUR postprocessing parity) brought the current deCODE/EUR result to exact substantive boundary correspondence, aside from the tiny chr7 edge-block convention described above.
 
 ## Why the pyrho sets aren't exact anywhere
 
-Unlike `examples/ldetect_original` (near-exact genome-wide, since it replays byte-identical archived VCF/map files the original authors used), no MacDonald pyrho chromosome is close to 100% exact: per-chromosome exact-match rates run ~29-96%, non-exact boundary rates ~17-21% genome-wide across all three populations. Two known, verified mechanisms explain this:
+Unlike `examples/ldetect_original` (near-exact genome-wide, since it replays byte-identical archived VCF/map files the original authors used), the MacDonald pyrho block sets are high-concordance but not exact genome-wide. Current final runs have several exact chromosomes, but residual non-exact boundaries remain concentrated in a handful of chromosomes across all three populations. Two known, verified mechanisms explain much of this:
 
 1. **Genetic-map deserts** (Category A — chr9, and 7 other chromosome/population combinations). Some chromosomes have large (tens-of-Mb) genetic-map dead zones (e.g. chr9's 17 Mb desert, consistent with its heterochromatic 9qh block). Legacy LDetect emits one unsplit block across the whole desert; `ldetect-lite` places an extra breakpoint inside it (same total genome-wide breakpoint budget, different placement) — confirmed directly against MacDonald's own git history (raw pre-centromere-removal BEDs).
 2. **Razor-thin local-search margins** (Category B — verified directly on EAS chr4 by replaying the actual `LocalSearch` class against real covariance data). `LocalSearch` correctly finds the true optimum in its search window every time — no bug — but tiny, legitimate numerical differences in the covariance computation (which cannot be byte-compared against legacy — no published intermediates exist) are enough to flip which of two near-tied candidates wins a sub-0.1%-margin race. The algorithm is a zero-tolerance greedy optimizer by design, so it's maximally sensitive to tiny input differences by construction, not through a defect.

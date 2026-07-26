@@ -2,6 +2,102 @@
 
 **Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
 
+## Focused pyrho stage diagnostics (2026-07-26)
+
+After deCODE/EUR was brought to exact replication except for the tiny chr7
+edge-block convention, the remaining question was whether pyrho residual
+divergence is a postprocessing artifact or an upstream breakpoint-placement
+artifact. A focused Snakemake diagnostic was added for the chromosomes driving
+the current pyrho mismatch:
+
+```yaml
+pyrho_stage_diagnostics:
+  targets:
+    pyrho_AFR: [9]
+    pyrho_EAS: [4, 9, 17]
+    pyrho_EUR: [9, 12, 19]
+  tolerance: 50000
+  window: 2000000
+```
+
+Run:
+
+```bash
+cd examples/MacDonald2022
+uv run snakemake --cores N pyrho_stage_diagnostics
+```
+
+Outputs:
+
+```text
+results/compare/diagnostics/raw/{block_set}/chr{chrom}.boundary_diagnostics.tsv
+results/compare/diagnostics/final/{block_set}/chr{chrom}.boundary_diagnostics.tsv
+```
+
+The per-chromosome rules consume the raw per-chromosome ldetect BED or the
+postprocessed final per-chromosome BED, compare against MacDonald's published
+reference BED, and pass:
+
+- the block-set genetic map used by the run,
+- one-based filtered VCF SNP positions,
+- the hg38 centromere intervals.
+
+This matters because the existing all-chromosome diagnostics could classify
+boundary mismatches but did not annotate whether a boundary lay on a filtered
+SNP/map position or in a local map/SNP desert.
+
+Downloaded diagnostic bundle reviewed locally under:
+
+```text
+diagnostics/raw/...
+diagnostics/final/...
+```
+
+Aggregate result:
+
+| stage | rows | shifted | extra | missing | nonreciprocal | boundaries on SNP | boundaries on map | within 2 Mb centromere | in centromere |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| raw | 310 | 262 | 21 | 22 | 5 | 310 | 310 | 11 | 1 |
+| final | 309 | 262 | 21 | 16 | 10 | 309 | 309 | 10 | 0 |
+
+Interpretation:
+
+- Raw and final diagnostics are nearly identical, so centromere removal and
+  small-block merging are not the source of the remaining pyrho divergence.
+- The dominant class is reciprocal `shifted_boundary`, not extra/missing
+  segmentation. This is mostly two pipelines choosing different nearby
+  candidate boundaries, not one pipeline systematically over- or under-splitting.
+- Every diagnostic boundary lies exactly on a filtered SNP and exactly on the
+  interpolated map position. This rules out an obvious BED/SNP coordinate
+  artifact for these mismatches.
+- Centromere/desert effects explain a minority of the largest individual
+  offsets, especially around chr9, but they do not explain the broad shifted
+  boundary burden across EAS chr4, EAS chr17, EUR chr12, or EUR chr19.
+
+Per-target summaries from the downloaded final diagnostics:
+
+| block set | chrom | rows | dominant class | median offset bp | p90 offset bp | max offset bp | notes |
+| --- | --- | ---: | --- | ---: | ---: | ---: | --- |
+| `pyrho_AFR` | chr9 | 56 | shifted (48/56) | 380,497 | 733,690 | 3,682,809 | largest nonreciprocal near chr9 centromere/desert |
+| `pyrho_EAS` | chr4 | 83 | shifted (68/83) | 529,085 | 1,105,988 | 2,113,924 | broad chromosome-wide shifted-boundary burden |
+| `pyrho_EAS` | chr9 | 68 | shifted (60/68) | 460,439 | 1,079,673 | 5,230,744 | includes large chr9 centromere/desert nonreciprocal |
+| `pyrho_EAS` | chr17 | 21 | shifted (18/21) | 701,634 | 2,497,016 | 4,493,648 | a few very large nonreciprocal/shifted events |
+| `pyrho_EUR` | chr12 | 28 | shifted (26/28) | 582,742 | 1,139,876 | 2,390,308 | mostly reciprocal shifts; one near-centromere nonreciprocal |
+| `pyrho_EUR` | chr19 | 31 | shifted (26/31) | 349,639 | 975,688 | 1,200,952 | mostly reciprocal shifts; several near centromere |
+| `pyrho_EUR` | chr9 | 22 | shifted (16/22) | 612,691 | 1,580,536 | 8,137,388 | two very large nonreciprocal events, one sparse-region event |
+
+Next diagnostic fork:
+
+1. Compare MacDonald-published boundaries against `breakpoints-*.json`'s raw
+   `fourier` candidates and refined `fourier_ls` candidates for these same
+   chromosomes.
+2. If `fourier` is already shifted, the cause is earlier than local search:
+   covariance-vector values, filter-window/minima behavior, or input/map
+   provenance.
+3. If `fourier` is close and `fourier_ls` moves away, use
+   `scripts/verify_local_search.py` to replay the local-search metric curve at
+   the affected breakpoint(s), as was done previously for EAS chr4.
+
 Run commands from:
 
 ```bash

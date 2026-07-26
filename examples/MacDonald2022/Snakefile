@@ -59,6 +59,12 @@ LEGACY_DIAGNOSTIC_BLOCK_SETS = config.get("legacy_diagnostics", {}).get(
 LEGACY_DIAGNOSTIC_CHROMS = [
     str(chrom) for chrom in config.get("legacy_diagnostics", {}).get("chromosomes", [])
 ]
+PYRHO_STAGE_DIAGNOSTIC_TARGETS = {
+    block_set: [str(chrom) for chrom in chroms]
+    for block_set, chroms in config.get("pyrho_stage_diagnostics", {})
+    .get("targets", {})
+    .items()
+}
 BLOCK_SET_PATTERN = "|".join(re.escape(block_set) for block_set in BLOCK_SETS)
 RAW_DIR = Path(config["raw_vcf_dir"])
 FILT_DIR = Path(config["filtered_vcf_dir"])
@@ -195,6 +201,36 @@ def legacy_diagnostic_targets(filename):
         )
         for block_set in LEGACY_DIAGNOSTIC_BLOCK_SETS
         for chrom in LEGACY_DIAGNOSTIC_CHROMS
+    ]
+
+
+def pyrho_stage_diagnostic_targets(stage, filename):
+    return [
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / stage
+            / block_set
+            / f"chr{chrom}.{filename}"
+        )
+        for block_set, chroms in PYRHO_STAGE_DIAGNOSTIC_TARGETS.items()
+        for chrom in chroms
+    ]
+
+
+def breakpoint_stage_diagnostic_targets():
+    return [
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "stages"
+            / block_set
+            / f"chr{chrom}.breakpoint_stage_diagnostics.tsv"
+        )
+        for block_set, chroms in PYRHO_STAGE_DIAGNOSTIC_TARGETS.items()
+        for chrom in chroms
     ]
 
 
@@ -372,6 +408,18 @@ rule legacy_diagnostics:
         legacy_diagnostic_targets("raw_ldetect_lite_vs_legacy.tsv"),
         legacy_diagnostic_targets("legacy_final_vs_reference.tsv"),
         legacy_diagnostic_targets("covariance_lite_vs_legacy.tsv"),
+
+
+rule pyrho_stage_diagnostics:
+    input:
+        pyrho_stage_diagnostic_targets("raw", "boundary_diagnostics.tsv"),
+        pyrho_stage_diagnostic_targets("final", "boundary_diagnostics.tsv"),
+        breakpoint_stage_diagnostic_targets(),
+
+
+rule breakpoint_stage_diagnostics:
+    input:
+        breakpoint_stage_diagnostic_targets(),
 
 
 rule vcf_map_position_diagnostics:
@@ -590,6 +638,27 @@ rule extract_snp_positions:
         """
         mkdir -p {MAPS_DIR}/snps
         bcftools query -f '%CHROM\t%POS0\t%POS\t%ID\n' {input} | bgzip > {output}
+        """
+
+
+rule extract_diagnostic_snp_positions:
+    input:
+        block_set_filtered_vcf,
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "snp_positions"
+            / "{block_set}"
+            / "chr{chrom}.tsv.gz"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    shell:
+        """
+        mkdir -p {RESULTS}/compare/diagnostics/snp_positions/{wildcards.block_set}
+        bcftools query -f '%CHROM\t%POS\n' {input} | gzip -c > {output}
         """
 
 
@@ -1615,4 +1684,105 @@ rule diagnose_raw_boundaries:
             --output {output} \
             --tolerance {params.tolerance} \
             --window {params.window}
+        """
+
+
+rule diagnose_boundary_chrom:
+    input:
+        ours=rules.postprocess.output[0],
+        ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+        centromeres=rules.download_centromeres.output[0],
+        genetic_map=block_set_genetic_map,
+        snp_positions=rules.extract_diagnostic_snp_positions.output[0],
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "final"
+            / "{block_set}"
+            / "chr{chrom}.boundary_diagnostics.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        tolerance=config.get("pyrho_stage_diagnostics", {}).get("tolerance", 50_000),
+        window=config.get("pyrho_stage_diagnostics", {}).get("window", 2_000_000),
+    shell:
+        """
+        python scripts/diagnose_boundaries.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --centromeres {input.centromeres} \
+            --genetic-map {input.genetic_map} \
+            --snp-positions {input.snp_positions} \
+            --chrom chr{wildcards.chrom} \
+            --output {output} \
+            --tolerance {params.tolerance} \
+            --window {params.window}
+        """
+
+
+rule diagnose_raw_boundary_chrom:
+    input:
+        ours=rules.run_ldetect.output.bed,
+        ref=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+        centromeres=rules.download_centromeres.output[0],
+        genetic_map=block_set_genetic_map,
+        snp_positions=rules.extract_diagnostic_snp_positions.output[0],
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "raw"
+            / "{block_set}"
+            / "chr{chrom}.boundary_diagnostics.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        tolerance=config.get("pyrho_stage_diagnostics", {}).get("tolerance", 50_000),
+        window=config.get("pyrho_stage_diagnostics", {}).get("window", 2_000_000),
+    shell:
+        """
+        python scripts/diagnose_boundaries.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --centromeres {input.centromeres} \
+            --genetic-map {input.genetic_map} \
+            --snp-positions {input.snp_positions} \
+            --chrom chr{wildcards.chrom} \
+            --output {output} \
+            --tolerance {params.tolerance} \
+            --window {params.window}
+        """
+
+
+rule compare_breakpoint_stages:
+    input:
+        breakpoints=rules.run_ldetect.output.breakpoints,
+        reference_bed=lambda wc: str(RES_DIR / block_set_reference_bed(wc.block_set)),
+        script="scripts/compare_breakpoint_stages.py",
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "stages"
+            / "{block_set}"
+            / "chr{chrom}.breakpoint_stage_diagnostics.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        tolerance=config.get("pyrho_stage_diagnostics", {}).get("tolerance", 50_000),
+    shell:
+        """
+        python {input.script} \
+            --reference-bed {input.reference_bed} \
+            --breakpoints {input.breakpoints} \
+            --chromosome chr{wildcards.chrom} \
+            --output {output} \
+            --tolerance {params.tolerance}
         """

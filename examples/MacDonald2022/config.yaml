@@ -129,6 +129,18 @@ legacy_diagnostics:
   chromosomes: [21]
   tolerance: 50000
 
+# Focused pyrho diagnostics for the chromosomes driving the residual published
+# block mismatches. These compare raw and postprocessed ldetect-lite blocks
+# against MacDonald's published BEDs and annotate mismatched boundaries with
+# local genetic-map, SNP-density, and centromere context.
+pyrho_stage_diagnostics:
+  targets:
+    pyrho_AFR: [9]
+    pyrho_EAS: [4, 9, 17]
+    pyrho_EUR: [9, 12, 19]
+  tolerance: 50000
+  window: 2000000
+
 # Directories (relative to the analysis/ directory)
 raw_vcf_dir: data/raw
 filtered_vcf_dir: data/filtered
