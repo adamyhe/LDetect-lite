@@ -148,11 +148,10 @@ n_snps_bw_bpoints: 7000
 # chromosome (~40 for human autosomes). Snakemake will reserve this many
 # cores per job, so total cores used = (simultaneous chromosome jobs) × workers.
 workers: 4
-# Use the ldetect-compatible dictionary-backed matrix-to-vector summation for
-# MacDonald deCODE replication. The faster array backend remains available via
-# `--config matrix_backend=array`, but differs from legacy on EUR chr21 even
-# when legacy itself exactly matches the published deCODE blocks.
-matrix_backend: legacy
+# Use the fast array-backed matrix-to-vector summation. The legacy dictionary
+# backend remains available via `--config matrix_backend=legacy` for targeted
+# diagnostics, but chr21 deCODE replication now matches legacy with array mode.
+matrix_backend: array
 # Use the uint8 covariance kernel for deCODE replication diagnostics. This is
 # the closest ldetect-lite covariance path to the original Python script; the
 # faster bitpacked kernel remains the package default and can be requested with
