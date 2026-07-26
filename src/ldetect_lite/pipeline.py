@@ -23,9 +23,9 @@ from ldetect_lite._util.covariance_array import (
 from ldetect_lite._util.logging import log_msg
 from ldetect_lite._util.memory import log_memory_checkpoint, max_rss_mib
 from ldetect_lite.filters import (
-    apply_filter_get_minima_numba_parallel,
     apply_filter_get_minima_serial,
-    apply_filter_numba_parallel,
+    apply_filter_get_minima_threaded,
+    apply_filter_threaded,
     get_minima_loc,
 )
 from ldetect_lite.find_minima import custom_binary_search_with_trackback
@@ -52,7 +52,7 @@ _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
 
 def _adaptive_filter_workers(workers: int, filter_workers: int) -> int:
-    """Choose Numba threads for single-candidate filter evaluations."""
+    """Choose threads for single-candidate filter evaluations."""
     if workers < 1:
         raise ValueError("workers must be >= 1")
     if filter_workers < 1:
@@ -111,7 +111,7 @@ def find_breakpoints(
         init_search_location: Starting width for exponential search.
         workers: Number of parallel workers for local search, metric
             computation, filter-width trackback candidates, and adaptive
-            single-filter Numba threading (default: 1).
+            single-filter threading (default: 1).
         metric_workers: Number of parallel workers for streaming metric row
             passes when not using Decimal arithmetic or an in-memory covariance
             cache (default: 1).
@@ -130,9 +130,9 @@ def find_breakpoints(
             whose published reference blocks were generated under scipy
             <1.1, where periodic odd-length windows were bit-identical to
             symmetric ones (see ``notes/findings/ldetect-original-reproduction.md``).
-        filter_workers: Minimum Numba threads for adaptive single-filter
+        filter_workers: Minimum threads for adaptive single-filter
             convolutions. Trackback candidate sweeps always force each
-            concurrent candidate filter to one Numba thread to avoid nested
+            concurrent candidate filter to one thread to avoid nested
             parallelism.
     """
     search_workers = workers
@@ -172,7 +172,7 @@ def find_breakpoints(
     )
     found_width = custom_binary_search_with_trackback(
         np_array,
-        lambda arr, width: apply_filter_get_minima_numba_parallel(
+        lambda arr, width: apply_filter_get_minima_threaded(
             arr,
             width,
             filter_window,
@@ -195,7 +195,7 @@ def find_breakpoints(
     # 4. Extract minima positions
     log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
-    g = apply_filter_numba_parallel(
+    g = apply_filter_threaded(
         np_array,
         found_width,
         filter_window,

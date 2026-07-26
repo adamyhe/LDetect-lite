@@ -224,9 +224,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         default=1,
         metavar="N",
         help=(
-            "Minimum Numba threads for Step 4 adaptive single-filter "
+            "Minimum threads for Step 4 adaptive single-filter "
             "convolutions. Trackback keeps candidate-width threading and "
-            "forces each candidate filter to one Numba thread to avoid nested "
+            "forces each candidate filter to one thread to avoid nested "
             "parallelism (default: 1)."
         ),
     )
