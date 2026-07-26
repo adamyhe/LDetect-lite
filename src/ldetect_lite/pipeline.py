@@ -44,6 +44,19 @@ class _LocalSearchGroupResult(TypedDict):
 
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
+
+def _filter_width_search_workers(workers: int, filter_workers: int) -> int:
+    """Choose one parallel layer for filter-width search.
+
+    Candidate-width trackback can run multiple convolutions concurrently, while
+    ``filter_workers`` runs a single convolution over multiple Numba threads.
+    Use only one of those layers at a time to avoid oversubscription.
+    """
+    if filter_workers < 1:
+        raise ValueError("filter_workers must be >= 1")
+    return workers if filter_workers == 1 else 1
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -67,6 +80,7 @@ def find_breakpoints(
     covariance_cache: ChromosomeCovariance | None = None,
     subsets: set[str] | None = None,
     filter_window: str = "symmetric",
+    filter_workers: int = 1,
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
 
@@ -109,7 +123,11 @@ def find_breakpoints(
         filter_window: Hanning window compatibility mode. ``"symmetric"`` uses
             ``np.hanning``; ``"scipy-periodic"`` matches original ldetect's
             ``scipy.signal.get_window(..., fftbins=True)`` behavior.
+        filter_workers: Numba threads for each individual filter convolution.
+            When greater than 1, candidate-width trackback threading is disabled
+            to avoid nested parallelism.
     """
+    search_workers = _filter_width_search_workers(workers, filter_workers)
     requested_subsets, explicit_subsets = _normalise_subsets(subsets)
     needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
     needs_uniform = bool(requested_subsets & {"uniform", "uniform_ls"})
@@ -137,15 +155,23 @@ def find_breakpoints(
 
     # 3. Binary search for filter width
     log_memory_checkpoint("filter_width_search_start")
-    log_msg("Searching for filter width...")
+    log_msg(
+        "Searching for filter width "
+        f"(candidate_workers={search_workers}, filter_workers={filter_workers})"
+    )
     found_width = custom_binary_search_with_trackback(
         np_array,
-        lambda arr, width: apply_filter_get_minima(arr, width, filter_window),
+        lambda arr, width: apply_filter_get_minima(
+            arr,
+            width,
+            filter_window,
+            filter_workers,
+        ),
         n_bpoints,
         trackback_delta=trackback_delta,
         trackback_step=trackback_step,
         init_search_location=init_search_location,
-        search_workers=workers,
+        search_workers=search_workers,
     )
     log_msg(f"Found width: {found_width}")
     log_memory_checkpoint("filter_width_search_end")
@@ -153,7 +179,7 @@ def find_breakpoints(
     # 4. Extract minima positions
     log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
-    g = apply_filter(np_array, found_width, filter_window)
+    g = apply_filter(np_array, found_width, filter_window, filter_workers)
     fourier_loci = get_minima_loc(g, np_array_x)
     log_memory_checkpoint("minima_extraction_end")
 

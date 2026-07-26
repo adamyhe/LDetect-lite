@@ -161,6 +161,10 @@ ld_kernel: uint8
 # Hanning filter. Keep MacDonald replication diagnostics on that legacy-periodic
 # window; the package default remains the symmetric np.hanning window.
 filter_window: scipy-periodic
+# Opt-in Numba threads for each individual filter convolution in Step 4.
+# Keep at 1 for the baseline replication run; try larger values to benchmark
+# within-convolution parallelism without nesting it with candidate-width threads.
+filter_workers: 1
 
 # LD-neighborhood separation plots around called boundaries. Each plot samples
 # pairwise r^2 from within-left, across-boundary, and within-right windows.

@@ -82,9 +82,41 @@ Also investigated, prompted by a direct question, whether `fastmath=True` introd
 
 Also investigated whether the `prange`-oversubscription concern (cited above as the reason to defer within-call multicore) is empirically real: composes fine with `nogil`/`fastmath` (no crashes), and a quick local test (unconstrained + a numba-thread-count-limited simulation) showed *no* measurable oversubscription penalty when combined with the outer `ThreadPoolExecutor` — if anything slightly faster. Could not fully replicate a genuinely CPU-affinity-constrained cluster allocation locally (no cgroups/taskset control available), so this isn't a full exoneration, but the real blocker for deferring `prange` is the API-surface refactor cost (per-phase-different filter functions), not a demonstrated performance hazard — worth revisiting if more speedup is wanted later.
 
+## Follow-up idea after MacDonald2022 pipeline fixes: split filter parallelism by search phase
+
+Date: 2026-07-26
+
+During the MacDonald2022 deCODE replication/debugging pass, we revisited whether a simple `--filter-workers N` knob should replace candidate-width threading during filter-width search. The better follow-up design is probably not either/or across the entire search, but a split policy by phase:
+
+- **Exponential search**: width choices are adaptive and must be evaluated one at a time, so within-convolution `numba.prange` is the only useful parallel layer.
+- **Binary search**: also adaptive and one width at a time, so it can likewise benefit from `prange` without any outer candidate-width pool.
+- **Trackback**: has a small but explicit candidate set per scan window (default coarse scan: 9 candidate widths; default fine scan: 19 candidate widths). Candidate-width threading is a natural coarse-grained parallel layer here and is likely preferable to `prange` for that phase.
+
+This suggests a future implementation shape:
+
+```text
+--workers N --filter-workers M
+
+exponential search: one width at a time, each convolution uses M numba threads
+binary search:      one width at a time, each convolution uses M numba threads
+trackback:          N candidate widths at a time, each convolution uses 1 numba thread
+```
+
+That would avoid nested parallelism while preserving the trackback speedup we already know helps. It also lets the adaptive phases use more than one core, which candidate-width threading cannot do there by construction.
+
+Do not pick this up until after the MacDonald2022 pipeline is stable: it touches shared `find_minima.py` plumbing (`custom_binary_search_with_trackback`, `FlexibleBoundedAccessor`, and the `f: Callable` interface) and should be benchmarked against all three modes:
+
+```text
+--workers N --filter-workers 1      # current candidate-width-only baseline
+--workers 1 --filter-workers M      # pure prange baseline
+--workers N --filter-workers M      # split policy
+```
+
+Key correctness checks when this is implemented: exact `found_width`, exact minima loci, exact BED output on the chr21 deCODE replication diagnostic, and no increase in active thread count during trackback beyond the intended outer candidate pool.
+
 ## Still open (current)
 
 - Real-cluster wall-clock re-validation of the numba kernel specifically (thread-parallelization was already re-validated on the cluster above; the numba speedup is only measured locally so far).
 - A fresh chr21 profiling run + breakpoints/BED byte-exactness diff against the pre-numba saved outputs (`plots/EUR_LD_blocks.bed`, `EUR_raw_LD_blocks.bed`) before considering this fully production-validated.
 - The binary-search phase itself remains unparallelized (adaptive, shared utility) — now benefits from the numba per-call speedup even though it isn't itself parallelized.
-- `numba.prange` for within-call multicore (on top of the per-call speedup already shipped) — deferred; would need per-phase-different filter functions to avoid oversubscription with the existing `ThreadPoolExecutor` layer during `_trackback`, touching more of `find_minima.py`'s shared plumbing than this pass's scope.
+- Split-phase `numba.prange` within-call multicore (on top of the per-call speedup already shipped) — deferred until after the MacDonald2022 pipeline is stable. The promising design is `prange` for exponential/binary search and candidate-width threading for `_trackback`, avoiding nested parallelism by forcing trackback's per-candidate convolution to one numba thread.

@@ -136,6 +136,11 @@ def test_filter_window_defaults_to_symmetric_and_accepts_scipy_periodic() -> Non
     )
 
 
+def test_filter_workers_defaults_to_one_and_accepts_override() -> None:
+    assert _parse_run_args([]).filter_workers == 1
+    assert _parse_run_args(["--filter-workers", "4"]).filter_workers == 4
+
+
 def test_delete_covariance_cache_defaults_to_false() -> None:
     assert _parse_run_args([]).delete_covariance_cache is False
 

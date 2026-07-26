@@ -12,6 +12,7 @@ import scipy.signal as sig
 
 from ldetect_lite.filters import (
     _convolve1d_reflect,
+    _convolve1d_reflect_parallel,
     _filter_window,
     _pad_reflect,
     apply_filter,
@@ -175,6 +176,39 @@ def test_convolve1d_reflect_matches_scipy_for_asymmetric_kernel():
     mine = _convolve1d_reflect(np.ascontiguousarray(arr, dtype=np.float64), kernel)
     ref = ndimage.convolve1d(arr, kernel)
     np.testing.assert_allclose(mine, ref, atol=1e-12, rtol=1e-12)
+
+
+def test_parallel_convolve1d_reflect_matches_serial_for_asymmetric_kernel():
+    arr = np.random.default_rng(4).normal(size=500).cumsum()
+    kernel = np.array([0.0, 0.2, 0.6, 0.4, 0.1])
+    serial = _convolve1d_reflect(np.ascontiguousarray(arr, dtype=np.float64), kernel)
+    parallel = _convolve1d_reflect_parallel(
+        np.ascontiguousarray(arr, dtype=np.float64),
+        kernel,
+    )
+    np.testing.assert_allclose(parallel, serial, atol=1e-12, rtol=1e-12)
+
+
+def test_apply_filter_parallel_workers_match_serial_minima():
+    arr = np.random.default_rng(5).normal(size=2000).cumsum()
+    serial = apply_filter_get_minima_ind(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+        filter_workers=1,
+    )
+    parallel = apply_filter_get_minima_ind(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+        filter_workers=2,
+    )
+    np.testing.assert_array_equal(parallel, serial)
+
+
+def test_apply_filter_rejects_nonpositive_filter_workers():
+    with pytest.raises(ValueError, match="filter_workers"):
+        apply_filter(_ARR, width=5, filter_workers=0)
 
 
 @pytest.mark.parametrize("width", [5, 50, 200])

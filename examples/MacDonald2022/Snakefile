@@ -205,6 +205,7 @@ def ldetect_run_params_for(block_set):
         "cov_cutoff": config["cov_cutoff"],
         "filter_convolution": "scipy_ndimage_convolve1d",
         "filter_window": config.get("filter_window", "symmetric"),
+        "filter_workers": config.get("filter_workers", 1),
         "ld_kernel": config.get("ld_kernel", "bitpacked"),
         "matrix_backend": config.get("matrix_backend", "array"),
         "n_snps_bw_bpoints": config["n_snps_bw_bpoints"],
@@ -718,8 +719,9 @@ rule run_ldetect:
         str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.benchmark.tsv")
     wildcard_constraints:
         block_set=BLOCK_SET_PATTERN,
-    threads: config["workers"]
+    threads: max(config["workers"], config.get("filter_workers", 1))
     params:
+        workers=config["workers"],
         output_dir=str(RESULTS / "{block_set}" / "chr{chrom}"),
         log_dir=str(RESULTS / "logs" / "{block_set}"),
         ne=lambda wc: block_set_ne(wc.block_set),
@@ -729,6 +731,7 @@ rule run_ldetect:
         matrix_backend=config.get("matrix_backend", "array"),
         ld_kernel=config.get("ld_kernel", "bitpacked"),
         filter_window=config.get("filter_window", "symmetric"),
+        filter_workers=config.get("filter_workers", 1),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -752,8 +755,9 @@ rule run_ldetect:
             --matrix-backend {params.matrix_backend} \
             --ld-kernel {params.ld_kernel} \
             --filter-window {params.filter_window} \
+            --filter-workers {params.filter_workers} \
             --force-covariance \
-            --workers {threads} \
+            --workers {params.workers} \
             > {log.run} 2>&1
         """
 

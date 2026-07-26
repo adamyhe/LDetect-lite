@@ -39,3 +39,8 @@ def test_metric_workers_defaults_to_none_and_inherits_workers() -> None:
 def test_metric_workers_override_takes_precedence() -> None:
     args = _parse_find_minima_args(["--workers", "4", "--metric-workers", "1"])
     assert _resolve_workers(args.metric_workers, args.workers) == 1
+
+
+def test_filter_workers_defaults_to_one_and_accepts_override() -> None:
+    assert _parse_find_minima_args([]).filter_workers == 1
+    assert _parse_find_minima_args(["--filter-workers", "4"]).filter_workers == 4

@@ -215,6 +215,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--filter-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Numba threads for each individual Step 4 filter convolution. "
+            "When N > 1, candidate-width threading during trackback is disabled "
+            "to avoid nested parallelism (default: 1)."
+        ),
+    )
+    p.add_argument(
         "--delete-covariance-cache",
         action="store_true",
         help=(
@@ -450,6 +461,7 @@ def _run(args: argparse.Namespace) -> int:
         n_bpoints=args.n_bpoints,
         subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
         filter_window=args.filter_window,
+        filter_workers=args.filter_workers,
     )
     log_memory_checkpoint("step4_end")
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any, TypedDict, TypeVar
 
 import numpy as np
@@ -14,10 +15,13 @@ from ldetect_lite._util.logging import log_msg
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 try:
-    from numba import njit
+    from numba import get_num_threads, njit, prange, set_num_threads
 
     _HAVE_NUMBA = True
     _numba_nogil_decorator = njit(nogil=True, fastmath=True, cache=True)
+    _numba_parallel_decorator = njit(
+        nogil=True, parallel=True, fastmath=True, cache=True
+    )
 
     def _njit_nogil(fn: _F) -> _F:
         """JIT-compile with the GIL released.
@@ -39,11 +43,39 @@ try:
         convolution that was tried and reverted (docs/optimizations.md #11).
         """
         return _numba_nogil_decorator(fn)  # type: ignore[no-any-return]
+
+    def _njit_parallel(fn: _F) -> _F:
+        return _numba_parallel_decorator(fn)  # type: ignore[no-any-return]
 except ImportError:
     _HAVE_NUMBA = False
+    prange = range
 
     def _njit_nogil(fn: _F) -> _F:
         return fn
+
+    def _njit_parallel(fn: _F) -> _F:
+        return fn
+
+    def get_num_threads() -> int:
+        return 1
+
+    def set_num_threads(_n: int) -> None:
+        return None
+
+
+@contextmanager
+def _numba_thread_limit(workers: int) -> Iterator[None]:
+    if workers < 1:
+        raise ValueError("filter_workers must be >= 1")
+    if not _HAVE_NUMBA or workers == 1:
+        yield
+        return
+    old_workers = get_num_threads()
+    set_num_threads(workers)
+    try:
+        yield
+    finally:
+        set_num_threads(old_workers)
 
 
 @_njit_nogil
@@ -101,6 +133,30 @@ def _convolve1d_reflect(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return out
 
 
+@_njit_parallel
+def _convolve1d_reflect_parallel(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """Parallel version of :func:`_convolve1d_reflect`.
+
+    Parallelism is over output rows. The reduction order within each row stays
+    fixed, preserving the flat-region behavior needed by strict minima
+    detection while allowing one filter evaluation to use multiple threads.
+    """
+    n = arr.shape[0]
+    klen = kernel.shape[0]
+    width = klen // 2
+    conv_kernel = np.empty(klen, dtype=np.float64)
+    for k in range(klen):
+        conv_kernel[k] = kernel[klen - 1 - k]
+    padded = _pad_reflect(arr, width)
+    out = np.empty(n, dtype=np.float64)
+    for i in prange(n):
+        s = 0.0
+        for k in range(klen):
+            s += padded[i + k] * conv_kernel[k]
+        out[i] = s
+    return out
+
+
 class FilterResult(TypedDict):
     """Output of :func:`apply_filter`."""
 
@@ -124,6 +180,7 @@ def apply_filter(
     np_init_array: np.ndarray,
     width: int,
     window_mode: str = "symmetric",
+    filter_workers: int = 1,
 ) -> FilterResult:
     """Apply a Hanning-window low-pass filter and find local minima.
 
@@ -135,11 +192,17 @@ def apply_filter(
         Dict with keys: width, window, filtered, filtered_minima_ind,
         filtered_minima_vals.
     """
+    if filter_workers < 1:
+        raise ValueError("filter_workers must be >= 1")
     window = _filter_window(width, window_mode)
     kernel = window / window.sum()
     if _HAVE_NUMBA:
         arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
-        smoothed = _convolve1d_reflect(arr, kernel)
+        if filter_workers > 1:
+            with _numba_thread_limit(filter_workers):
+                smoothed = _convolve1d_reflect_parallel(arr, kernel)
+        else:
+            smoothed = _convolve1d_reflect(arr, kernel)
     else:
         # Numba is a hard dependency (pyproject.toml), so this path should be
         # unreachable in a correctly-installed environment. But falling back
@@ -167,18 +230,26 @@ def apply_filter_get_minima(
     np_init_array: np.ndarray,
     width: int,
     window_mode: str = "symmetric",
+    filter_workers: int = 1,
 ) -> int:
     """Return the number of local minima for a given filter width."""
-    return len(apply_filter(np_init_array, width, window_mode)["filtered_minima_ind"])
+    return len(
+        apply_filter(np_init_array, width, window_mode, filter_workers)[
+            "filtered_minima_ind"
+        ]
+    )
 
 
 def apply_filter_get_minima_ind(
     np_init_array: np.ndarray,
     width: int,
     window_mode: str = "symmetric",
+    filter_workers: int = 1,
 ) -> np.ndarray:
     """Return the indices of local minima for a given filter width."""
-    return apply_filter(np_init_array, width, window_mode)["filtered_minima_ind"]
+    return apply_filter(np_init_array, width, window_mode, filter_workers)[
+        "filtered_minima_ind"
+    ]
 
 
 def get_minima_loc(g: FilterResult, np_init_array_x: np.ndarray) -> list[int]:
@@ -200,9 +271,10 @@ def apply_filters(
     last: int,
     step: int,
     window_mode: str = "symmetric",
+    filter_workers: int = 1,
 ) -> list[FilterResult]:
     """Apply filters at a range of widths and return all results."""
     return [
-        apply_filter(np_init_array, w, window_mode)
+        apply_filter(np_init_array, w, window_mode, filter_workers)
         for w in range(first, last + 1, step)
     ]
