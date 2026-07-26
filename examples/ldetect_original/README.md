@@ -30,7 +30,7 @@ The main outputs are:
 - `results/{POP}_LD_blocks.bed`
 - `results/compare/{POP}_block_comparison.tsv`
 
-`--cores N` lets Snakemake schedule multiple chromosome/population jobs concurrently (each claiming `workers`-many cores). `run_ldetect` exports `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS`, all set to `1`, so BLAS/numba don't add nested native threads inside the process-pooled `ldetect run` stages when several jobs land on a shared node (see `docs/optimizations.md` #13) — no action needed unless you're invoking `ldetect run` directly outside this Snakefile.
+`--cores N` lets Snakemake schedule multiple chromosome/population jobs concurrently (each claiming `workers`-many cores). `ldetect` manages native BLAS/numba thread caps at CLI startup, so `workers` remains the controlling knob for the process-pooled stages (see `docs/optimizations.md` #13).
 
 ### "Corrected" blocks (`scipy-periodic` filtering)
 
@@ -493,9 +493,7 @@ uv run python scripts/profile_run.py \
   --interval 1.0 \
   --output results/profiling/EUR-chr21.csv \
   --log-output results/profiling/EUR-chr21.log \
-  -- env OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
-  NUMEXPR_NUM_THREADS=1 NUMBA_NUM_THREADS=1 \
-  uv run ldetect run --genetic-map data/maps/chr21.interpolated_genetic_map.gz \
+  -- uv run ldetect run --genetic-map data/maps/chr21.interpolated_genetic_map.gz \
   --reference-panel results/filtered_vcf/EUR/ALL.chr21.phase1_release_v3.20101123.snps_indels_svs.genotypes.population-polymorphic.vcf.gz \
   --individuals resources/EUR_inds.txt \
   --chromosome 21 --output-dir results/profiling/EUR/21 --workers 4

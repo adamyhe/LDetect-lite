@@ -130,6 +130,8 @@ def test_missing_thread_cap_env_vars_requires_all_caps(monkeypatch) -> None:
         "OPENBLAS_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
         "NUMBA_NUM_THREADS",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -140,6 +142,8 @@ def test_missing_thread_cap_env_vars_requires_all_caps(monkeypatch) -> None:
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
         "NUMBA_NUM_THREADS",
     ]
 
