@@ -26,6 +26,12 @@ _THREAD_MANAGED_COMMANDS = {
     "matrix-to-vector",
     "run",
 }
+_COMMAND_WORKER_DEFAULTS = {
+    "calc-covariance": 1,
+    "find-minima": 1,
+    "matrix-to-vector": 1,
+    "run": 1,
+}
 
 
 def _option_int(argv: list[str], option: str, default: int) -> int:
@@ -74,8 +80,13 @@ def _configure_native_thread_caps(argv: list[str]) -> None:
     for name in _NATIVE_THREAD_CAP_ENV_VARS:
         os.environ[name] = "1"
 
+    worker_cap = _option_int(
+        argv,
+        "--workers",
+        _COMMAND_WORKER_DEFAULTS.get(command, 1),
+    )
     filter_workers = _option_int(argv, "--filter-workers", 1)
-    os.environ[_NUMBA_THREAD_CAP_ENV_VAR] = str(max(1, filter_workers))
+    os.environ[_NUMBA_THREAD_CAP_ENV_VAR] = str(max(1, worker_cap, filter_workers))
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -32,7 +32,7 @@ def test_configure_native_thread_caps_for_run_overrides_ambient_env(
         "NUMEXPR_NUM_THREADS": "1",
         "VECLIB_MAXIMUM_THREADS": "1",
         "BLIS_NUM_THREADS": "1",
-        "NUMBA_NUM_THREADS": "1",
+        "NUMBA_NUM_THREADS": "4",
     }
 
 
@@ -42,7 +42,7 @@ def test_configure_native_thread_caps_allows_filter_worker_numba_threads(
     for name in _CAPS:
         monkeypatch.delenv(name, raising=False)
 
-    _configure_native_thread_caps(["run", "--workers", "4", "--filter-workers", "3"])
+    _configure_native_thread_caps(["run", "--workers", "2", "--filter-workers", "3"])
 
     assert os.environ["OMP_NUM_THREADS"] == "1"
     assert os.environ["NUMBA_NUM_THREADS"] == "3"
