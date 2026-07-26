@@ -14,10 +14,15 @@ from ldetect_lite.filters import (
     _convolve1d_reflect,
     _convolve1d_reflect_parallel,
     _filter_window,
+    _numba_thread_limit,
     _pad_reflect,
     apply_filter,
     apply_filter_get_minima,
     apply_filter_get_minima_ind,
+    apply_filter_get_minima_ind_numba_parallel,
+    apply_filter_get_minima_serial,
+    apply_filter_numba_parallel,
+    apply_filter_serial,
     apply_filters,
     get_minima_loc,
 )
@@ -219,9 +224,57 @@ def test_apply_filter_parallel_workers_match_serial_minima():
     np.testing.assert_array_equal(parallel, serial)
 
 
+def test_explicit_parallel_filter_matches_explicit_serial_filter():
+    arr = np.random.default_rng(6).normal(size=2000).cumsum()
+
+    serial = apply_filter_serial(arr, width=50, window_mode="scipy-periodic")
+    parallel = apply_filter_numba_parallel(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+        workers=2,
+    )
+
+    np.testing.assert_array_equal(
+        parallel["filtered_minima_ind"],
+        serial["filtered_minima_ind"],
+    )
+
+
+def test_explicit_minima_helpers_match():
+    arr = np.random.default_rng(7).normal(size=2000).cumsum()
+
+    serial_count = apply_filter_get_minima_serial(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+    )
+    parallel_ind = apply_filter_get_minima_ind_numba_parallel(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+        workers=2,
+    )
+
+    assert parallel_ind.size == serial_count
+
+
 def test_apply_filter_rejects_nonpositive_filter_workers():
     with pytest.raises(ValueError, match="filter_workers"):
         apply_filter(_ARR, width=5, filter_workers=0)
+
+
+def test_numba_thread_limit_restores_serial_baseline(monkeypatch):
+    import ldetect_lite.filters as filters_mod
+
+    calls: list[int] = []
+    monkeypatch.setattr(filters_mod, "_HAVE_NUMBA", True)
+    monkeypatch.setattr(filters_mod, "set_num_threads", calls.append)
+
+    with _numba_thread_limit(4):
+        pass
+
+    assert calls == [4, 1]
 
 
 @pytest.mark.parametrize("width", [5, 50, 200])

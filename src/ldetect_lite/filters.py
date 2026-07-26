@@ -15,7 +15,7 @@ from ldetect_lite._util.logging import log_msg
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 try:
-    from numba import get_num_threads, njit, prange, set_num_threads
+    from numba import njit, prange, set_num_threads
 
     _HAVE_NUMBA = True
     _numba_nogil_decorator = njit(nogil=True, fastmath=True, cache=True)
@@ -56,11 +56,11 @@ except ImportError:
     def _njit_parallel(fn: _F) -> _F:
         return fn
 
-    def get_num_threads() -> int:
-        return 1
-
     def set_num_threads(_n: int) -> None:
         return None
+
+
+_NUMBA_BASELINE_THREADS = 1
 
 
 @contextmanager
@@ -70,12 +70,15 @@ def _numba_thread_limit(workers: int) -> Iterator[None]:
     if not _HAVE_NUMBA or workers == 1:
         yield
         return
-    old_workers = get_num_threads()
     set_num_threads(workers)
     try:
         yield
     finally:
-        set_num_threads(old_workers)
+        # Treat NUMBA_NUM_THREADS as a ceiling, not the ambient active thread
+        # count. Leaving the active count high after a prange section can leak
+        # into the next process-pool startup and cause transient
+        # oversubscription.
+        set_num_threads(_NUMBA_BASELINE_THREADS)
 
 
 @_njit_nogil
@@ -176,6 +179,67 @@ def _filter_window(width: int, mode: str = "scipy-periodic") -> np.ndarray:
     raise ValueError(f"Unknown filter window mode: {mode}")
 
 
+def _filter_result(
+    width: int,
+    window: np.ndarray,
+    smoothed: np.ndarray,
+) -> FilterResult:
+    minima_ind = sig.argrelextrema(smoothed, np.less)[0]
+    minima_vals = [smoothed[i] for i in minima_ind]
+
+    log_msg(f"Filter width={2 * width + 1}, minima count={len(minima_ind)}")
+
+    return {
+        "width": width,
+        "window": window,
+        "filtered": smoothed,
+        "filtered_minima_ind": minima_ind,
+        "filtered_minima_vals": minima_vals,
+    }
+
+
+def apply_filter_serial(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+) -> FilterResult:
+    """Apply the serial direct-convolution filter implementation."""
+    window = _filter_window(width, window_mode)
+    kernel = window / window.sum()
+    if _HAVE_NUMBA:
+        arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
+        smoothed = _convolve1d_reflect(arr, kernel)
+    else:
+        # Numba is a hard dependency (pyproject.toml), so this path should be
+        # unreachable in a correctly-installed environment. But falling back
+        # to an un-jitted `_convolve1d_reflect` here would be catastrophic
+        # (a pure-Python O(N*width) triple-nested loop, ~10^8 iterations at
+        # production widths) rather than just slower -- fall back to the
+        # original scipy implementation instead, which is merely non-optimal.
+        smoothed = ndimage.convolve1d(np_init_array, kernel)
+    return _filter_result(width, window, smoothed)
+
+
+def apply_filter_numba_parallel(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+    workers: int = 1,
+) -> FilterResult:
+    """Apply the Numba-prange filter implementation with a scoped worker count."""
+    if workers < 1:
+        raise ValueError("filter_workers must be >= 1")
+    if workers == 1 or not _HAVE_NUMBA:
+        return apply_filter_serial(np_init_array, width, window_mode)
+
+    window = _filter_window(width, window_mode)
+    kernel = window / window.sum()
+    arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
+    with _numba_thread_limit(workers):
+        smoothed = _convolve1d_reflect_parallel(arr, kernel)
+    return _filter_result(width, window, smoothed)
+
+
 def apply_filter(
     np_init_array: np.ndarray,
     width: int,
@@ -194,36 +258,11 @@ def apply_filter(
     """
     if filter_workers < 1:
         raise ValueError("filter_workers must be >= 1")
-    window = _filter_window(width, window_mode)
-    kernel = window / window.sum()
-    if _HAVE_NUMBA:
-        arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
-        if filter_workers > 1:
-            with _numba_thread_limit(filter_workers):
-                smoothed = _convolve1d_reflect_parallel(arr, kernel)
-        else:
-            smoothed = _convolve1d_reflect(arr, kernel)
-    else:
-        # Numba is a hard dependency (pyproject.toml), so this path should be
-        # unreachable in a correctly-installed environment. But falling back
-        # to an un-jitted `_convolve1d_reflect` here would be catastrophic
-        # (a pure-Python O(N*width) triple-nested loop, ~10^8 iterations at
-        # production widths) rather than just slower -- fall back to the
-        # original scipy implementation instead, which is merely non-optimal.
-        smoothed = ndimage.convolve1d(np_init_array, kernel)
-
-    minima_ind = sig.argrelextrema(smoothed, np.less)[0]
-    minima_vals = [smoothed[i] for i in minima_ind]
-
-    log_msg(f"Filter width={2 * width + 1}, minima count={len(minima_ind)}")
-
-    return {
-        "width": width,
-        "window": window,
-        "filtered": smoothed,
-        "filtered_minima_ind": minima_ind,
-        "filtered_minima_vals": minima_vals,
-    }
+    if filter_workers > 1:
+        return apply_filter_numba_parallel(
+            np_init_array, width, window_mode, workers=filter_workers
+        )
+    return apply_filter_serial(np_init_array, width, window_mode)
 
 
 def apply_filter_get_minima(
@@ -240,6 +279,31 @@ def apply_filter_get_minima(
     )
 
 
+def apply_filter_get_minima_serial(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+) -> int:
+    """Return the local-minima count using the serial filter implementation."""
+    return len(
+        apply_filter_serial(np_init_array, width, window_mode)["filtered_minima_ind"]
+    )
+
+
+def apply_filter_get_minima_numba_parallel(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+    workers: int = 1,
+) -> int:
+    """Return the local-minima count using the Numba-prange filter implementation."""
+    return len(
+        apply_filter_numba_parallel(np_init_array, width, window_mode, workers=workers)[
+            "filtered_minima_ind"
+        ]
+    )
+
+
 def apply_filter_get_minima_ind(
     np_init_array: np.ndarray,
     width: int,
@@ -250,6 +314,18 @@ def apply_filter_get_minima_ind(
     return apply_filter(np_init_array, width, window_mode, filter_workers)[
         "filtered_minima_ind"
     ]
+
+
+def apply_filter_get_minima_ind_numba_parallel(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+    workers: int = 1,
+) -> np.ndarray:
+    """Return local-minima indices using the Numba-prange filter implementation."""
+    return apply_filter_numba_parallel(
+        np_init_array, width, window_mode, workers=workers
+    )["filtered_minima_ind"]
 
 
 def get_minima_loc(g: FilterResult, np_init_array_x: np.ndarray) -> list[int]:

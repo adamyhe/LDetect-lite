@@ -22,7 +22,12 @@ from ldetect_lite._util.covariance_array import (
 )
 from ldetect_lite._util.logging import log_msg
 from ldetect_lite._util.memory import log_memory_checkpoint, max_rss_mib
-from ldetect_lite.filters import apply_filter, apply_filter_get_minima, get_minima_loc
+from ldetect_lite.filters import (
+    apply_filter_get_minima_numba_parallel,
+    apply_filter_get_minima_serial,
+    apply_filter_numba_parallel,
+    get_minima_loc,
+)
 from ldetect_lite.find_minima import custom_binary_search_with_trackback
 from ldetect_lite.io.covariance import MetricDict
 from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
@@ -41,6 +46,7 @@ class _LocalSearchGroupResult(TypedDict):
 
     loci: list[int]
     metrics: list[_LocalSearchDetails | None]
+
 
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
@@ -166,22 +172,21 @@ def find_breakpoints(
     )
     found_width = custom_binary_search_with_trackback(
         np_array,
-        lambda arr, width: apply_filter_get_minima(
+        lambda arr, width: apply_filter_get_minima_numba_parallel(
             arr,
             width,
             filter_window,
-            adaptive_filter_workers,
+            workers=adaptive_filter_workers,
         ),
         n_bpoints,
         trackback_delta=trackback_delta,
         trackback_step=trackback_step,
         init_search_location=init_search_location,
         search_workers=search_workers,
-        trackback_f=lambda arr, width: apply_filter_get_minima(
+        trackback_f=lambda arr, width: apply_filter_get_minima_serial(
             arr,
             width,
             filter_window,
-            1,
         ),
     )
     log_msg(f"Found width: {found_width}")
@@ -190,7 +195,12 @@ def find_breakpoints(
     # 4. Extract minima positions
     log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
-    g = apply_filter(np_array, found_width, filter_window, adaptive_filter_workers)
+    g = apply_filter_numba_parallel(
+        np_array,
+        found_width,
+        filter_window,
+        workers=adaptive_filter_workers,
+    )
     fourier_loci = get_minima_loc(g, np_array_x)
     log_memory_checkpoint("minima_extraction_end")
 
@@ -423,11 +433,7 @@ def _log_metric(metric_out: MetricDict) -> None:
         # sum/N_zero are always both-Decimal or both-float/int at runtime
         # (see MetricDict/Metric.use_decimal); mypy can't see that invariant.
         metric = metric_out["sum"] / n_zero  # type: ignore[operator]
-        log_msg(
-            f"  sum={metric_out['sum']:.6f}  "
-            f"N_zero={n_zero}  "
-            f"metric={metric:.6e}"
-        )
+        log_msg(f"  sum={metric_out['sum']:.6f}  N_zero={n_zero}  metric={metric:.6e}")
 
 
 def _midpoint(a: int, b: int) -> int:
