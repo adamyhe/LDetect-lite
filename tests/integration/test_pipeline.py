@@ -34,6 +34,58 @@ def _parse_bed(path: Path) -> list[tuple[str, int, int]]:
     return regions
 
 
+def _full_pipeline_bed_regions(
+    example_store,
+    tmp_path: Path,
+    *,
+    filter_window: str = "scipy-periodic",
+) -> list[tuple[str, int, int]]:
+    """Run the toy full pipeline and return BED regions for one filter mode."""
+    from ldetect_lite.io.bed import write_bed
+    from ldetect_lite.matrix_analysis import MatrixAnalysis
+    from ldetect_lite.pipeline import find_breakpoints
+
+    vector_path = tmp_path / f"vector-{filter_window}.txt.gz"
+    MatrixAnalysis("chr2", example_store).calc_diag_lean(vector_path)
+
+    bp_path = tmp_path / f"breakpoints-{filter_window}.json"
+    find_breakpoints(
+        input_path=vector_path,
+        chr_name="chr2",
+        store=example_store,
+        n_snps_bw_bpoints=50,
+        output_path=bp_path,
+        filter_window=filter_window,
+    )
+
+    data = json.loads(bp_path.read_text())
+    bed_path = tmp_path / f"out-{filter_window}.bed"
+    write_bed(
+        "chr2",
+        data["fourier_ls"]["loci"],
+        snp_first=39967768,
+        snp_last=40067768,
+        output=bed_path,
+    )
+    return _parse_bed(bed_path)
+
+
+SCIPY_PERIODIC_TOY_BED_REGIONS = [
+    ("chr2", 39967768, 39969251),
+    ("chr2", 39969251, 39981559),
+    ("chr2", 39981559, 39992589),
+    ("chr2", 39992589, 40004249),
+    ("chr2", 40004249, 40016259),
+    ("chr2", 40016259, 40026000),
+    ("chr2", 40026000, 40031569),
+    ("chr2", 40031569, 40036215),
+    ("chr2", 40036215, 40041445),
+    ("chr2", 40041445, 40048031),
+    ("chr2", 40048031, 40064899),
+    ("chr2", 40064899, 40067769),
+]
+
+
 # ---------------------------------------------------------------------------
 # Step 3: matrix-to-vector
 # ---------------------------------------------------------------------------
@@ -337,29 +389,7 @@ def test_find_breakpoints_uses_supplied_covariance_cache(
 
 def test_full_pipeline_bed_structure(example_store, tmp_path):
     """End-to-end pipeline must produce a BED file with correct structure."""
-    from ldetect_lite.io.bed import write_bed
-    from ldetect_lite.matrix_analysis import MatrixAnalysis
-    from ldetect_lite.pipeline import find_breakpoints
-
-    vector_path = tmp_path / "vector.txt.gz"
-    MatrixAnalysis("chr2", example_store).calc_diag_lean(vector_path)
-
-    bp_path = tmp_path / "breakpoints.json"
-    find_breakpoints(
-        input_path=vector_path,
-        chr_name="chr2",
-        store=example_store,
-        n_snps_bw_bpoints=50,
-        output_path=bp_path,
-    )
-
-    data = json.loads(bp_path.read_text())
-    loci = data["fourier_ls"]["loci"]
-
-    bed_path = tmp_path / "out.bed"
-    write_bed("chr2", loci, snp_first=39967768, snp_last=40067768, output=bed_path)
-
-    regions = _parse_bed(bed_path)
+    regions = _full_pipeline_bed_regions(example_store, tmp_path)
     assert len(regions) > 0
 
     # Regions are contiguous
@@ -371,36 +401,42 @@ def test_full_pipeline_bed_structure(example_store, tmp_path):
     assert regions[-1][2] == 40067769  # snp_last + 1
 
 
-def test_full_pipeline_bed_matches_reference(example_data_dir, example_store, tmp_path):
-    """End-to-end pipeline BED output should match the reference BED file.
+def test_full_pipeline_bed_matches_scipy_periodic_expected(
+    example_store,
+    tmp_path,
+):
+    """Default periodic Hann output has its own exactness fixture.
 
-    NOTE: This test verifies numeric reproducibility.  If the algorithm diverges
-    from the reference implementation, update the expected values accordingly.
+    The deprecated symmetric Hann fixture has one additional raw minimum around
+    40.015-40.021 Mb.  The supported scipy-periodic path smooths that local dip
+    away, yielding 11 internal boundaries and 12 BED blocks for this toy input.
     """
-    from ldetect_lite.io.bed import write_bed
-    from ldetect_lite.matrix_analysis import MatrixAnalysis
-    from ldetect_lite.pipeline import find_breakpoints
-
-    vector_path = tmp_path / "vector.txt.gz"
-    MatrixAnalysis("chr2", example_store).calc_diag_lean(vector_path)
-
-    bp_path = tmp_path / "breakpoints.json"
-    find_breakpoints(
-        input_path=vector_path,
-        chr_name="chr2",
-        store=example_store,
-        n_snps_bw_bpoints=50,
-        output_path=bp_path,
+    assert (
+        _full_pipeline_bed_regions(
+            example_store,
+            tmp_path,
+            filter_window="scipy-periodic",
+        )
+        == SCIPY_PERIODIC_TOY_BED_REGIONS
     )
 
-    data = json.loads(bp_path.read_text())
-    loci = data["fourier_ls"]["loci"]
 
-    bed_path = tmp_path / "out.bed"
-    write_bed("chr2", loci, snp_first=39967768, snp_last=40067768, output=bed_path)
+@pytest.mark.deprecated
+def test_full_pipeline_bed_matches_symmetric_reference(
+    example_data_dir,
+    example_store,
+    tmp_path,
+):
+    """Deprecated symmetric Hann mode preserves the historical toy fixture.
 
+    Delete this test when the deprecated ``symmetric`` filter mode is removed.
+    """
     ref_regions = _parse_bed(example_data_dir / "bed/EUR-chr2-50-39967768-40067768.bed")
-    out_regions = _parse_bed(bed_path)
+    out_regions = _full_pipeline_bed_regions(
+        example_store,
+        tmp_path,
+        filter_window="symmetric",
+    )
 
     assert len(out_regions) == len(ref_regions), (
         f"Region count mismatch: got {len(out_regions)}, expected {len(ref_regions)}"
