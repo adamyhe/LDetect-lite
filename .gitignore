@@ -12,6 +12,16 @@ examples/*/ref/
 examples/*/resources/
 examples/*/work/
 
+# Downloaded ad hoc comparison/diagnostic artifacts copied into the repository
+# root during reproduction investigations.
+diagnostics/
+raw/
+*_block_comparison.tsv
+*_boundary_offsets.tsv
+map_ref_comparison*.tsv
+map_summary.tsv
+chr7_edge_debug.*
+
 # Large downloaded inputs and optional legacy toy data for replication examples.
 examples/ldetect_original/**/*.vcf.gz
 examples/ldetect_original/**/*.vcf.gz.tbi

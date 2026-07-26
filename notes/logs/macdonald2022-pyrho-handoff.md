@@ -2,7 +2,7 @@
 
 **Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
 
-Last updated: 2026-07-05
+Last updated: 2026-07-26
 
 ## Goal
 
@@ -20,7 +20,7 @@ diagnosed and fixed 2026-07-05 — see "Keep deCODE notes separate" below —
 and is no longer a special case; it now performs in the same band as the
 pyrho sets.
 
-## Current State (2026-07-04)
+## Current State (2026-07-26)
 
 All MacDonald2022 workflow/diagnostic code referenced in this note is
 committed on the `macdonald` branch (rebased onto current `main` as of
@@ -28,6 +28,13 @@ committed on the `macdonald` branch (rebased onto current `main` as of
 changed before trusting this note's file references. `results/` and most of
 `resources/`/`data/` are gitignored — cached local intermediates (BEDs, maps,
 comparison TSVs) may or may not be present in a fresh checkout.
+
+The latest downloaded `diagnostics/` bundle confirms the focused
+stage/local-search interpretation: the remaining pyrho mismatch is not a
+postprocessing problem or local-search reachability bug. In the clean
+`local_search_moved_away` cases, MacDonald's boundaries are inside the search
+window and exactly evaluated, but lose by tiny objective margins under our
+covariance signal. Keep the current exact greedy local-search behavior.
 
 A full genome-wide remote run (float64, no `--high-precision`) completed
 2026-07-04 and its `results/` output was pulled back locally — final/raw
@@ -39,8 +46,9 @@ vectors) were not synced back** — if this checkout still has them, a
 targeted rerun to inspect Category B chromosomes' real LD signal (see step 6
 below) can skip straight to analysis; if not, that rerun still needs doing.
 
-See "Genome-wide `pyrho_EUR` results" and "Why almost nothing is exact
-anywhere" below for the most recent substantive findings.
+See "Genome-wide `pyrho_EUR` results", "Why almost nothing is exact
+anywhere", and "Focused stage/local-search replay confirmation" below for the
+most recent substantive findings.
 
 ## Pipeline Changes Already Made
 
@@ -466,11 +474,8 @@ computation) — about as resolved as this gets without literally having
 legacy's own covariance matrices to diff against, which don't exist
 publicly.
 
-**Not extended to the other Category B loci this session** (AFR
-chr10/chr11 already explained via sub-mechanism 1 above; EAS chr14, EUR
-chr21/chr16 not yet run through `verify_local_search.py`) — but there's no
-reason to expect a different conclusion; the tooling and method are ready
-to reuse if worth confirming on the others.
+This was later extended by the focused stage/local-search replay diagnostics
+added 2026-07-26; see "Focused stage/local-search replay confirmation" below.
 
 ## Is there an algorithmic bug behind the razor-thin margins? (2026-07-04) — investigated and ruled out
 
@@ -479,7 +484,7 @@ genuine *algorithmic* issue (not just "tiny legitimate covariance
 differences") explains the razor-thin margins. Investigated four angles:
 
 1. **Window-bound computation.** Compared legacy's actual local-search
-   driver (`_reference/ldetect_original/ldetect/examples/P02_minima_pipeline.py`,
+   driver (`examples/ldetect_original/scripts/legacy_ldetect/P02_minima_pipeline.py`,
    `run_local_search_complete`) against `src/ldetect_lite/pipeline.py`'s
    `_run_local_search`/`_midpoint`. **No deviation** — both compute every
    breakpoint's search window from the same raw, un-refined candidate list;
@@ -663,7 +668,8 @@ only asserts `len(intersection) == expected_count` — a same-size,
 different-membership drift would pass silently.
 
 Both our script and MacDonald's own documented recipe
-(`_reference/LDblocks_GRCh38/README.md`) use the **identical mechanism**:
+([`README.md`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/README.md))
+use the **identical mechanism**:
 scrape each subpop's *live* 1000G FTP directory listing
 (`data/<SUBPOP>/`), union across subpops, intersect with the VCF header. No
 randomness, deterministic given a fixed FTP listing — but the FTP listing
@@ -898,10 +904,10 @@ But MacDonald's README states they used **their own R script**
 (`interpolate.R`) to do this interpolation, not joepickrell's tool — and,
 critically, **MacDonald's actual GitHub repository publishes the resulting
 already-interpolated deCODE maps**, exactly the same way they publish the
-pyrho maps: `_reference/LDblocks_GRCh38/data/deCODE_interpolated_maps/chr{1..22}.tab.gz`
-(confirmed via `git log` inside that nested checkout: commit `2c5a7e9
-"Added interpolated deCODE map files"`, part of their real published
-history, not something we generated). We have simply never wired the
+pyrho maps:
+`https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps/chr{1..22}.tab.gz`
+(confirmed from MacDonald's published GitHub history: commit `2c5a7e9
+"Added interpolated deCODE map files"`). We have simply never wired the
 Snakefile up to use it, unlike pyrho.
 
 Confirmed this is a drop-in, no-reformatting substitution: both
@@ -1030,18 +1036,15 @@ EUR's worst chromosomes were finally checked 2026-07-04 after a genome-wide
   chr18; EUR chr9, chr19, chr22. Nothing further to do here beyond what's
   already documented — these are instances of the same parked issue, not a
   separate bug.
-- **Category B — resolved 2026-07-04, not a bug** (see "Category B resolved
-  for EAS chr4" above for the full writeup): AFR chr10, chr11 are a genuine
-  extra split (confirmed from already-cached boundary-offset data, no rerun
-  needed). EAS chr4 was verified directly against real covariance data via
-  `scripts/verify_local_search.py` — `LocalSearch` correctly finds the true
-  optimum in both affected windows; reference's own boundaries score only
-  0.007-0.06% worse. Not extended to EAS chr14 or EUR chr21/chr16 yet, but
-  the tooling (`sync_results.sh` + `verify_local_search.py`) is ready to
-  reuse — see that section for the exact HDF5-partition-identification
-  method (use `snp_bottom`/`snp_top`, i.e. the neighboring raw breakpoints
-  themselves, not just the search-window midpoints, or you'll undercount
-  which files are needed like the first attempt here did).
+- **Category B — resolved, not a bug** (see "Category B resolved for EAS
+  chr4" and "Focused stage/local-search replay confirmation" for the full
+  writeup): AFR chr10, chr11 are a genuine extra split (confirmed from
+  already-cached boundary-offset data, no rerun needed). EAS chr4 was first
+  verified directly against real covariance data via
+  `scripts/verify_local_search.py`; the later focused replay generalized this
+  to all 21 clean moved-away cases across the targeted pyrho chromosomes.
+  `LocalSearch` correctly finds the true optimum in its window, and
+  MacDonald-like boundaries lose by only 0.003-0.172% in the objective.
 
 Also see "Why almost nothing is exact anywhere" above and "Category B
 resolved for EAS chr4" — the pervasive, genome-wide ~17-21% non-exact rate
@@ -1057,6 +1060,55 @@ the aggregate pattern. This is very likely at, or very near, the practical
 end of this investigation — closing the remaining gap further would mean
 literally obtaining legacy's own covariance intermediates, which don't
 exist publicly.
+
+## Focused stage/local-search replay confirmation (2026-07-26)
+
+The EAS chr4 spot-check above was generalized to the focused set of pyrho
+chromosomes driving the remaining mismatches:
+
+- `pyrho_AFR`: chr9
+- `pyrho_EAS`: chr4, chr9, chr17
+- `pyrho_EUR`: chr9, chr12, chr19
+
+Two Snakemake diagnostics now run under `pyrho_stage_diagnostics`:
+
+```text
+results/compare/diagnostics/stages/{block_set}/chr{chrom}.breakpoint_stage_diagnostics.tsv
+results/compare/diagnostics/local_search/{block_set}/chr{chrom}.local_search_moved_away.tsv
+```
+
+Stage-level result across 365 published internal boundaries:
+
+- 35 were close at raw Fourier.
+- 224 were close after `fourier_ls`.
+- 141 remained outside the 50 kb tolerance after local search.
+
+Residual classes:
+
+- `local_search_worsened_already_shifted`: 90
+- `local_search_improved_but_still_far`: 30
+- `local_search_moved_away`: 21
+
+The 21 `local_search_moved_away` cases are the cleanest local-search
+sensitivity examples because raw Fourier was already within 50 kb of the
+published MacDonald boundary and local search moved outside tolerance.
+Replaying the actual `LocalSearch` implementation on all 21 found:
+
+- 21/21 MacDonald boundaries were inside the local-search window.
+- 21/21 MacDonald boundaries were exactly evaluated.
+- 21/21 replayed searches matched the pipeline's recorded `fourier_ls` locus.
+- 21/21 full metric-curve optima matched the recorded `fourier_ls` locus.
+
+Metric margins at MacDonald's boundary relative to our selected optimum were
+tiny: 0.003239-0.171736%, median 0.019591%, p90 0.080100%. Six of the 21 were
+within 0.01%, 16/21 within 0.05%, and 19/21 within 0.1%.
+
+Interpretation: the current implementation is behaving correctly under its
+objective/data. The published boundary is usually reachable and plausible, but
+it loses a near tie under our computed covariance signal. This rules out a
+local-search reachability/windowing/replay bug and makes an algorithmic
+"recovery" of the MacDonald boundaries undesirable unless we deliberately add
+a non-default heuristic. Keep the current exact greedy local-search behavior.
 
 ## Validation Commands
 

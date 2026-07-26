@@ -2,6 +2,193 @@
 
 **Agent-oriented working log.** Raw, dated investigation notes — not proofread for external readability. For current, human-readable status, see `notes/findings/`.
 
+## Focused pyrho stage diagnostics (2026-07-26)
+
+After deCODE/EUR was brought to exact replication except for the tiny chr7
+edge-block convention, the remaining question was whether pyrho residual
+divergence is a postprocessing artifact or an upstream breakpoint-placement
+artifact. A focused Snakemake diagnostic was added for the chromosomes driving
+the current pyrho mismatch:
+
+```yaml
+pyrho_stage_diagnostics:
+  targets:
+    pyrho_AFR: [9]
+    pyrho_EAS: [4, 9, 17]
+    pyrho_EUR: [9, 12, 19]
+  tolerance: 50000
+  window: 2000000
+```
+
+Run:
+
+```bash
+cd examples/MacDonald2022
+uv run snakemake --cores N pyrho_stage_diagnostics
+```
+
+Outputs:
+
+```text
+results/compare/diagnostics/raw/{block_set}/chr{chrom}.boundary_diagnostics.tsv
+results/compare/diagnostics/final/{block_set}/chr{chrom}.boundary_diagnostics.tsv
+results/compare/diagnostics/stages/{block_set}/chr{chrom}.breakpoint_stage_diagnostics.tsv
+results/compare/diagnostics/local_search/{block_set}/chr{chrom}.local_search_moved_away.tsv
+```
+
+The per-chromosome rules consume the raw per-chromosome ldetect BED or the
+postprocessed final per-chromosome BED, compare against MacDonald's published
+reference BED, and pass:
+
+- the block-set genetic map used by the run,
+- one-based filtered VCF SNP positions,
+- the hg38 centromere intervals.
+
+This matters because the existing all-chromosome diagnostics could classify
+boundary mismatches but did not annotate whether a boundary lay on a filtered
+SNP/map position or in a local map/SNP desert.
+
+Downloaded diagnostic bundle reviewed locally under:
+
+```text
+diagnostics/raw/...
+diagnostics/final/...
+```
+
+Aggregate result:
+
+| stage | rows | shifted | extra | missing | nonreciprocal | boundaries on SNP | boundaries on map | within 2 Mb centromere | in centromere |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| raw | 310 | 262 | 21 | 22 | 5 | 310 | 310 | 11 | 1 |
+| final | 309 | 262 | 21 | 16 | 10 | 309 | 309 | 10 | 0 |
+
+Interpretation:
+
+- Raw and final diagnostics are nearly identical, so centromere removal and
+  small-block merging are not the source of the remaining pyrho divergence.
+- The dominant class is reciprocal `shifted_boundary`, not extra/missing
+  segmentation. This is mostly two pipelines choosing different nearby
+  candidate boundaries, not one pipeline systematically over- or under-splitting.
+- Every diagnostic boundary lies exactly on a filtered SNP and exactly on the
+  interpolated map position. This rules out an obvious BED/SNP coordinate
+  artifact for these mismatches.
+- Centromere/desert effects explain a minority of the largest individual
+  offsets, especially around chr9, but they do not explain the broad shifted
+  boundary burden across EAS chr4, EAS chr17, EUR chr12, or EUR chr19.
+
+Per-target summaries from the downloaded final diagnostics:
+
+| block set | chrom | rows | dominant class | median offset bp | p90 offset bp | max offset bp | notes |
+| --- | --- | ---: | --- | ---: | ---: | ---: | --- |
+| `pyrho_AFR` | chr9 | 56 | shifted (48/56) | 380,497 | 733,690 | 3,682,809 | largest nonreciprocal near chr9 centromere/desert |
+| `pyrho_EAS` | chr4 | 83 | shifted (68/83) | 529,085 | 1,105,988 | 2,113,924 | broad chromosome-wide shifted-boundary burden |
+| `pyrho_EAS` | chr9 | 68 | shifted (60/68) | 460,439 | 1,079,673 | 5,230,744 | includes large chr9 centromere/desert nonreciprocal |
+| `pyrho_EAS` | chr17 | 21 | shifted (18/21) | 701,634 | 2,497,016 | 4,493,648 | a few very large nonreciprocal/shifted events |
+| `pyrho_EUR` | chr12 | 28 | shifted (26/28) | 582,742 | 1,139,876 | 2,390,308 | mostly reciprocal shifts; one near-centromere nonreciprocal |
+| `pyrho_EUR` | chr19 | 31 | shifted (26/31) | 349,639 | 975,688 | 1,200,952 | mostly reciprocal shifts; several near centromere |
+| `pyrho_EUR` | chr9 | 22 | shifted (16/22) | 612,691 | 1,580,536 | 8,137,388 | two very large nonreciprocal events, one sparse-region event |
+
+### Breakpoint-stage diagnostics
+
+The next diagnostic fork was implemented as
+`scripts/compare_breakpoint_stages.py`, which compares MacDonald's published
+internal boundaries against the raw `fourier` candidates and refined
+`fourier_ls` candidates in `breakpoints-*.json`.
+
+Across the seven focused pyrho chromosomes, 365 published internal boundaries
+were checked:
+
+| class | count | interpretation |
+| --- | ---: | --- |
+| close at raw Fourier | 35 | raw candidate already agrees with MacDonald |
+| close after `fourier_ls` | 224 | local search moves toward MacDonald enough to match |
+| residual after `fourier_ls` | 141 | still outside 50 kb after local search |
+
+Residual classes:
+
+| stage class | count |
+| --- | ---: |
+| `local_search_worsened_already_shifted` | 90 |
+| `local_search_improved_but_still_far` | 30 |
+| `local_search_moved_away` | 21 |
+
+Per-target residual burden:
+
+| block set | chrom | residual / boundaries | dominant residual |
+| --- | --- | ---: | --- |
+| `pyrho_AFR` | chr9 | 26/66 | worsened already shifted |
+| `pyrho_EAS` | chr4 | 40/79 | worsened already shifted |
+| `pyrho_EAS` | chr9 | 32/47 | worsened already shifted |
+| `pyrho_EAS` | chr17 | 8/27 | worsened already shifted |
+| `pyrho_EUR` | chr9 | 9/57 | worsened already shifted |
+| `pyrho_EUR` | chr12 | 13/61 | worsened already shifted |
+| `pyrho_EUR` | chr19 | 13/28 | mixed |
+
+Interpretation: local search is not globally destructive. It helps many more
+published boundaries than it hurts, but the remaining mismatches are dominated
+by cases where the local objective lands on a neighboring candidate rather than
+MacDonald's published one.
+
+### Local-search moved-away replay
+
+The cleanest residual class is `local_search_moved_away`: raw Fourier is
+within 50 kb of MacDonald's published boundary, but `fourier_ls` moves outside
+the 50 kb tolerance. `scripts/replay_local_search_stage_misses.py` replayed the
+actual `LocalSearch` class for all 21 such cases.
+
+Replay result:
+
+- 21/21 MacDonald boundaries were inside the local-search window.
+- 21/21 MacDonald boundaries were exactly evaluated
+  (`reference_nearest_evaluated_distance_bp = 0`).
+- 21/21 replayed `LocalSearch.search()` calls matched the recorded
+  `fourier_ls` locus.
+- 21/21 full metric-curve optima matched the recorded `fourier_ls` locus.
+
+Metric margin at MacDonald's boundary relative to our chosen optimum:
+
+| margin bin | count |
+| --- | ---: |
+| <= 0.01% | 6 |
+| <= 0.05% | 10 |
+| <= 0.1% | 3 |
+| <= 0.5% | 2 |
+
+Summary statistics:
+
+| statistic | value |
+| --- | ---: |
+| min | 0.003239% |
+| median | 0.019591% |
+| p90 | 0.080100% |
+| max | 0.171736% |
+
+Largest margins:
+
+| block set | chrom | ref | raw | local search | raw offset | LS offset | margin |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `pyrho_EAS` | chr9 | 91,136,525 | 91,158,095 | 90,897,671 | 21,570 | 238,854 | 0.171736% |
+| `pyrho_EAS` | chr17 | 66,962,871 | 66,941,095 | 66,806,071 | 21,776 | 156,800 | 0.139819% |
+| `pyrho_EAS` | chr9 | 133,752,119 | 133,776,591 | 133,904,423 | 24,472 | 152,304 | 0.080100% |
+| `pyrho_EAS` | chr4 | 28,927,393 | 28,943,144 | 29,126,750 | 15,751 | 199,357 | 0.066317% |
+| `pyrho_EAS` | chr4 | 84,513,834 | 84,540,016 | 85,420,277 | 26,182 | 906,443 | 0.057712% |
+
+Smallest margins:
+
+| block set | chrom | ref | raw | local search | raw offset | LS offset | margin |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `pyrho_EUR` | chr12 | 108,876,352 | 108,838,690 | 108,311,827 | 37,662 | 564,525 | 0.003239% |
+| `pyrho_AFR` | chr9 | 105,069,068 | 105,048,523 | 104,865,693 | 20,545 | 203,375 | 0.004542% |
+| `pyrho_EAS` | chr9 | 78,316,848 | 78,318,104 | 77,677,091 | 1,256 | 639,757 | 0.005646% |
+| `pyrho_EAS` | chr9 | 7,515,713 | 7,516,610 | 8,088,895 | 897 | 573,182 | 0.007488% |
+
+Interpretation: this rules out a reachability bug, a local-search window bug,
+and a mismatch between the recorded pipeline output and the replayed
+implementation. MacDonald's boundary is often a perfectly plausible nearby
+candidate, but under our objective/data it loses by a tiny margin. We should
+keep the current exact greedy local-search behavior rather than adding a
+deadband/stability heuristic purely to recover published boundaries.
+
 Run commands from:
 
 ```bash

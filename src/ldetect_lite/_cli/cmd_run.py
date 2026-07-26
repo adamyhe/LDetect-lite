@@ -178,6 +178,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         ),
     )
     p.add_argument(
+        "--matrix-backend",
+        choices=("array", "legacy"),
+        default="array",
+        help=(
+            "Backend for Step 3 matrix-to-vector conversion. 'array' is faster; "
+            "'legacy' uses the dictionary-backed ldetect-compatible summation "
+            "path for replication diagnostics (default: array)."
+        ),
+    )
+    p.add_argument(
         "--metric-workers",
         type=int,
         default=None,
@@ -193,6 +203,29 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         help="Use 50-digit Decimal arithmetic for local search (slower).",
     )
     p.add_argument(
+        "--filter-window",
+        choices=("symmetric", "scipy-periodic"),
+        default="scipy-periodic",
+        help=(
+            "Hanning window mode for breakpoint filtering. 'scipy-periodic' "
+            "matches original ldetect's scipy.signal.get_window(..., "
+            "fftbins=True) behavior and is the supported default. "
+            "'symmetric' uses np.hanning and is deprecated; keep it only for "
+            "old diagnostic comparisons (default: scipy-periodic)."
+        ),
+    )
+    p.add_argument(
+        "--filter-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Numba threads for each individual Step 4 filter convolution. "
+            "When N > 1, candidate-width threading during trackback is disabled "
+            "to avoid nested parallelism (default: 1)."
+        ),
+    )
+    p.add_argument(
         "--delete-covariance-cache",
         action="store_true",
         help=(
@@ -200,6 +233,15 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "completes successfully, to reclaim disk space. Trades away Step "
             "2's skip-already-computed-partitions restart/resume speedup for "
             "this chromosome and output directory (default: keep the cache)."
+        ),
+    )
+    p.add_argument(
+        "--force-covariance",
+        action="store_true",
+        help=(
+            "Recompute this chromosome's covariance partitions even if cached "
+            "partition files already exist. Useful when changing diagnostic "
+            "covariance backends or cache parameters."
         ),
     )
     p.set_defaults(func=_run)
@@ -319,8 +361,14 @@ def _run(args: argparse.Namespace) -> int:
 
     pending = []
     invalid = 0
+    forced = 0
     for start, end in partitions:
         partition_path = store.partition_path(chrom, start, end)
+        if args.force_covariance and partition_path.exists():
+            partition_path.unlink()
+            forced += 1
+            pending.append((start, end))
+            continue
         if not partition_path.exists():
             pending.append((start, end))
             continue
@@ -333,6 +381,8 @@ def _run(args: argparse.Namespace) -> int:
     skipped = len(partitions) - len(pending)
     if skipped:
         log_msg(f"  Skipping {skipped} already-completed partition(s)")
+    if forced:
+        log_msg(f"  Forcing recomputation of {forced} cached partition(s)")
     if invalid:
         log_msg(f"  Regenerating {invalid} invalid cached partition(s)")
 
@@ -376,10 +426,17 @@ def _run(args: argparse.Namespace) -> int:
     # Step 3: Matrix → vector                                             #
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
-    log_msg(f"Step 3: Converting matrix to vector (workers={matrix_workers})")
+    log_msg(
+        "Step 3: Converting matrix to vector "
+        f"(backend={args.matrix_backend}, workers={matrix_workers})"
+    )
     log_memory_checkpoint("step3_start")
     analysis = MatrixAnalysis(name=chrom, store=store)
-    analysis.calc_diag_lean(vector_path, matrix_workers=matrix_workers)
+    analysis.calc_diag_lean(
+        vector_path,
+        matrix_workers=matrix_workers,
+        backend=args.matrix_backend,
+    )
     log_memory_checkpoint("step3_end")
 
     # ------------------------------------------------------------------ #
@@ -403,6 +460,8 @@ def _run(args: argparse.Namespace) -> int:
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
         subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
+        filter_window=args.filter_window,
+        filter_workers=args.filter_workers,
     )
     log_memory_checkpoint("step4_end")
 
@@ -424,7 +483,11 @@ def _run(args: argparse.Namespace) -> int:
     loci: list[int] = data[args.subset]["loci"]
 
     write_bed(
-        name=chrom, loci=loci, snp_first=snp_first, snp_last=snp_last, output=bed_path
+        name=chrom,
+        loci=loci,
+        snp_first=snp_first,
+        snp_last=snp_last,
+        output=bed_path,
     )
 
     if args.delete_covariance_cache:

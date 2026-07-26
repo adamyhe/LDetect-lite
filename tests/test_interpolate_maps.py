@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from ldetect_lite.interpolate_maps import interpolate, interpolate_intervals
+from ldetect_lite.interpolate_maps import (
+    interpolate,
+    interpolate_hapmap,
+    interpolate_intervals,
+    interpolate_macdonald_decode,
+    interpolate_macdonald_pyrho,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,6 +122,25 @@ def test_output_rs_ids_preserved(tmp_path):
     assert set(result.keys()) == set(_EXPECTED.keys())
 
 
+def test_snp_bed_skips_header_and_comments(tmp_path):
+    snp_file = tmp_path / "snps.bed"
+    snp_file.write_text(
+        "#chr start end rs_id\n"
+        "track name=snps\n"
+        "browser position chr1:1-2000\n"
+        "chr1 0 1000 rs_exact\n"
+    )
+    map_file = tmp_path / "map.gz"
+    with gzip.open(map_file, "wt") as f:
+        f.write(_MAP_HEADER)
+        f.write(_MAP_ENTRIES)
+    output = tmp_path / "out.gz"
+
+    interpolate(snp_file, map_file, output)
+
+    assert _read_output(output) == {"rs_exact": pytest.approx(0.1, abs=1e-10)}
+
+
 def test_single_map_entry_all_clamped(tmp_path):
     """When the map has only one entry, all SNPs return that gpos or 0."""
     snp_file = tmp_path / "snps.bed"
@@ -157,6 +182,7 @@ _INTERVAL_BED_CONTENT = (
     "chr1 0 500 rs_before\n"     # before first interval's Begin
     "chr1 0 1000 rs_i0_start\n"  # exact at I0's Begin
     "chr1 0 1500 rs_i0_mid\n"    # mid I0, startcm=0
+    "chr1 0 2000 rs_i1_start\n"  # exact at I1's Begin
     "chr1 0 2500 rs_i1_mid\n"    # mid I1, startcm=cumcM[I0]
     "chr1 0 3500 rs_extrap\n"    # past I2's Begin -> extrapolate with I2's rate
 )
@@ -165,6 +191,7 @@ _INTERVAL_EXPECTED = {
     "rs_before": 0.0,
     "rs_i0_start": 0.0,
     "rs_i0_mid": 0.0005,
+    "rs_i1_start": 0.001,
     "rs_i1_mid": 0.002,
     "rs_extrap": 0.00325,
 }
@@ -204,6 +231,13 @@ def test_interval_mid_first_interval(tmp_path):
     assert result["rs_i0_mid"] == pytest.approx(0.0005, abs=1e-10)
 
 
+def test_interval_exact_at_later_begin_is_previous_cumulative_cm(tmp_path):
+    snp_file, map_file, output = _write_interval_fixtures(tmp_path)
+    interpolate_intervals(snp_file, map_file, output)
+    result = _read_output(output)
+    assert result["rs_i1_start"] == pytest.approx(0.001, abs=1e-10)
+
+
 def test_interval_mid_later_interval(tmp_path):
     snp_file, map_file, output = _write_interval_fixtures(tmp_path)
     interpolate_intervals(snp_file, map_file, output)
@@ -227,6 +261,26 @@ def test_interval_output_matches_expected(tmp_path):
     result = _read_output(output)
     for rs_id, expected in _INTERVAL_EXPECTED.items():
         assert result[rs_id] == pytest.approx(expected, abs=1e-10), rs_id
+
+
+def test_macdonald_decode_sets_first_interval_begin_to_zero(tmp_path):
+    snp_file = tmp_path / "snps.bed"
+    snp_file.write_text("chr1 0 500 rs_before_first_begin\n")
+    map_file = tmp_path / "map.gz"
+    with gzip.open(map_file, "wt") as f:
+        f.write(_INTERVAL_MAP_HEADER)
+        f.write(_INTERVAL_MAP_ENTRIES)
+
+    interval_output = tmp_path / "interval.gz"
+    macdonald_output = tmp_path / "macdonald.gz"
+    interpolate_intervals(snp_file, map_file, interval_output)
+    interpolate_macdonald_decode(snp_file, map_file, macdonald_output)
+
+    assert _read_output(interval_output)["rs_before_first_begin"] == pytest.approx(0.0)
+    assert _read_output(macdonald_output)["rs_before_first_begin"] == pytest.approx(
+        0.0005,
+        abs=1e-10,
+    )
 
 
 def test_interval_vs_point_diverge_on_interval_rate_data(tmp_path):
@@ -253,3 +307,103 @@ def test_interval_vs_point_diverge_on_interval_rate_data(tmp_path):
     # Past the last interval: point-mode clamps, interval-mode extrapolates.
     assert point_result["rs_extrap"] == pytest.approx(0.0035, abs=1e-10)
     assert interval_result["rs_extrap"] == pytest.approx(0.00325, abs=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# interpolate_hapmap: interval-rate maps with cumulative cM at row positions
+# ---------------------------------------------------------------------------
+#
+# HapMap-style rows are (position, rate_cM_Mb, cumulative_cM_at_position).
+# The cumulative cM is the anchor for the row's own interval, not the endpoint
+# of the previous interval.
+
+_HAPMAP_ENTRIES = (
+    "1000 1.0 0.000\n"
+    "2000 2.0 0.001\n"
+    "3000 0.5 0.003\n"
+)
+
+_HAPMAP_SHIFTED_TO_INTERVAL_ENTRIES = (
+    "1000 1.0 0.001\n"
+    "2000 2.0 0.003\n"
+    "3000 0.5 0.003\n"
+)
+
+_HAPMAP_EXPECTED = {
+    "rs_before": 0.0,
+    "rs_i0_start": 0.0,
+    "rs_i0_mid": 0.0005,
+    "rs_i1_mid": 0.002,
+    "rs_extrap": 0.00325,
+}
+
+
+def _write_hapmap_fixtures(
+    tmp_path: Path,
+    entries: str = _HAPMAP_ENTRIES,
+) -> tuple[Path, Path, Path]:
+    snp_file = tmp_path / "snps.bed"
+    snp_file.write_text(_INTERVAL_BED_CONTENT)
+
+    map_file = tmp_path / "hapmap.gz"
+    with gzip.open(map_file, "wt") as f:
+        f.write("position rate_cM_Mb map_cM\n")
+        f.write(entries)
+
+    output = tmp_path / "out.gz"
+    return snp_file, map_file, output
+
+
+def test_hapmap_output_matches_expected(tmp_path):
+    snp_file, map_file, output = _write_hapmap_fixtures(tmp_path)
+    interpolate_hapmap(snp_file, map_file, output)
+    result = _read_output(output)
+    for rs_id, expected in _HAPMAP_EXPECTED.items():
+        assert result[rs_id] == pytest.approx(expected, abs=1e-10), rs_id
+
+
+def test_hapmap_matches_shifted_interval_representation(tmp_path):
+    snp_file, hapmap_file, hapmap_output = _write_hapmap_fixtures(tmp_path)
+    interval_file = tmp_path / "interval.gz"
+    with gzip.open(interval_file, "wt") as f:
+        f.write(_INTERVAL_MAP_HEADER)
+        f.write(_HAPMAP_SHIFTED_TO_INTERVAL_ENTRIES)
+    interval_output = tmp_path / "interval_out.gz"
+
+    interpolate_hapmap(snp_file, hapmap_file, hapmap_output)
+    interpolate_intervals(snp_file, interval_file, interval_output)
+
+    assert _read_output(hapmap_output) == pytest.approx(
+        _read_output(interval_output),
+        abs=1e-10,
+    )
+
+
+def test_interval_mode_on_unshifted_hapmap_reproduces_bad_convention(tmp_path):
+    snp_file, map_file, output = _write_hapmap_fixtures(tmp_path)
+    interpolate_intervals(snp_file, map_file, output)
+    result = _read_output(output)
+
+    # This is the off-by-one cumulative-cM convention behind the nonmonotone
+    # MacDonald pyrho maps: interval 1 starts from row 0's cM instead of row 1's.
+    assert result["rs_i1_mid"] == pytest.approx(0.001, abs=1e-10)
+    assert result["rs_i1_mid"] < result["rs_i0_mid"] + 0.001
+
+
+def test_macdonald_pyrho_reproduces_dataframe_mutations(tmp_path):
+    snp_file = tmp_path / "snps.bed"
+    snp_file.write_text(
+        "chr1 0 500 rs_before_original_first\n"
+        "chr1 0 3500 rs_after_last_position\n"
+    )
+    map_file = tmp_path / "hapmap.gz"
+    with gzip.open(map_file, "wt") as f:
+        f.write("position rate_cM_Mb map_cM\n")
+        f.write(_HAPMAP_ENTRIES)
+
+    output = tmp_path / "macdonald.gz"
+    interpolate_macdonald_pyrho(snp_file, map_file, output)
+    result = _read_output(output)
+
+    assert result["rs_before_original_first"] == pytest.approx(0.0005, abs=1e-10)
+    assert result["rs_after_last_position"] == pytest.approx(1.7515, abs=1e-10)

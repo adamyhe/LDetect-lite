@@ -102,6 +102,29 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         help="Use 50-digit Decimal arithmetic for local search (slower).",
     )
     p.add_argument(
+        "--filter-window",
+        choices=("symmetric", "scipy-periodic"),
+        default="scipy-periodic",
+        help=(
+            "Hanning window mode for breakpoint filtering. 'scipy-periodic' "
+            "matches original ldetect's scipy.signal.get_window(..., "
+            "fftbins=True) behavior and is the supported default. "
+            "'symmetric' uses np.hanning and is deprecated; keep it only for "
+            "old diagnostic comparisons (default: scipy-periodic)."
+        ),
+    )
+    p.add_argument(
+        "--filter-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Numba threads for each individual filter convolution. When N > 1, "
+            "candidate-width threading during trackback is disabled to avoid "
+            "nested parallelism (default: 1)."
+        ),
+    )
+    p.add_argument(
         "--n-bpoints",
         type=int,
         default=None,
@@ -146,5 +169,7 @@ def _run(args: argparse.Namespace) -> int:
         use_decimal=args.high_precision,
         n_bpoints=args.n_bpoints,
         subsets=set(args.subset) if args.subset else None,
+        filter_window=args.filter_window,
+        filter_workers=args.filter_workers,
     )
     return 0

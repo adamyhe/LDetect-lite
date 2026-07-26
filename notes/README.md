@@ -11,7 +11,7 @@ Internal working notes — not the polished public documentation (that's `README
   - `implementation-plan.md` — original architecture/porting plan (historical).
   - `ldetect-original-main-pipeline-audit.md` — full dated audit log behind `findings/ldetect-original-reproduction.md`.
   - `local-search-divergence-asn22.md` — investigation and fix for a historical array-vs-Decimal local-search bug.
-  - `macdonald2022-boundary-diagnostics.md` — early MacDonald2022 boundary-diagnostic session notes.
+  - `macdonald2022-boundary-diagnostics.md` — focused boundary, stage, and local-search diagnostics for MacDonald2022 residual pyrho mismatches.
   - `macdonald2022-pyrho-handoff.md` — full dated handoff log behind `findings/macdonald2022-reproduction.md`.
   - `macdonald2022-interpolation-port.md` — full root-cause writeup for the deCODE interval-interpolation bug.
   - `post-covariance-optimization-review.md` — post-covariance-optimization performance review and roadmap.

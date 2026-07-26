@@ -546,7 +546,7 @@ too strong; both parts need correction:**
    EUR-chr8-12/AFR-chr11/chr22 reproduction rerun tied to this change.
 
 2. **Reading the legacy matrix-insertion code directly weakens the "different
-   precedence" theory.** `_reference/ldetect_original/ldetect/baselib/flat_file.py:104`
+   precedence" theory.** `examples/ldetect_original/scripts/legacy_ldetect/ldetect/baselib/flat_file.py`
    (`insert_into_matrix`) only inserts `matrix[l]['data'][r]` `if r not in
    matrix[l]['data']` — i.e. legacy is **first-insert-wins**, not last-wins as
    originally assumed here. Because covariance rows are written in `allpos`
@@ -616,7 +616,8 @@ either.
 Date: 2026-07-02
 
 Item 2 above ("settle the duplicate-position question empirically") is now
-closed. Direct comparison of legacy `_reference/ldetect_original/ldetect/` code
+closed. Direct comparison of the shipped legacy diagnostic bundle
+(`examples/ldetect_original/scripts/legacy_ldetect/`) code
 against current `src/ldetect_lite` (branch `ldetect-original-fix`), followed by new
 regression tests, both point the same way: **duplicate-VCF-position and
 cross-partition-overlap handling in the current codebase are legacy-faithful,
@@ -731,7 +732,7 @@ AFR chr11/chr22 the only failures) as a control on each candidate.
 
 ### Partition-boundary `Ne` hardcoding — real divergence, doesn't explain the failures
 
-`_reference/ldetect_original/ldetect/examples/P00_00_partition_chromosome.py`
+Original LDetect's `P00_00_partition_chromosome.py`
 line 53 hardcodes `exp(-4.0*11418.0*df/(2.0*nind))` — literally `11418.0`,
 not a parameter — for the partition-boundary-extension step, for *every*
 population including AFR and ASN. Current `ldetect-lite`
@@ -751,7 +752,7 @@ own behavior here before (only speculated about it, in
 
 ### EUR sample list — definitively confirmed correct, byte-for-byte
 
-`_reference/ldetect_original/ldetect/examples/example_data/eurinds.txt` is
+The original LDetect toy example's `eurinds.txt` is
 the *actual* 379-individual EUR sample list distributed with the original
 `ldetect` toy example — a real artifact from the original authors, not an
 inference. Diffed directly against `examples/ldetect_original/resources/EUR_inds.txt`
@@ -769,8 +770,8 @@ sample list. Since EUR chr8-12 still diverge despite the EUR sample list
 being *proven* identical, this closes off "wrong EUR sample composition" as
 an explanation entirely — not just unlikely, but directly disproven.
 
-No equivalent original AFR/ASN individual list is distributed anywhere in
-`_reference/` (the toy example is EUR/chr2 only), so the same direct check
+No equivalent original AFR/ASN individual list is distributed with the toy
+example (it is EUR/chr2 only), so the same direct check
 isn't available for AFR — AFR sample-list correctness remains only as
 well-supported as the existing count-matching checks (246 individuals,
 consistent across all four VCF releases), not a byte-for-byte proof like EUR.

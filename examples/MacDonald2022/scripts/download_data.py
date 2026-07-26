@@ -2,6 +2,7 @@
 
 Downloads:
   - 1000G GRCh38 Dec 2018 biallelic SNV VCFs (one per chromosome + index)
+  - pyrho GRCh38 recombination map archive
   - deCODE recombination map (Halldorsson et al. 2019)
   - UCSC GRCh38 centromere coordinates
 
@@ -70,6 +71,13 @@ def main() -> None:
             raw_dir / f"{fname}.tbi",
             f"chr{chrom} index",
         )
+
+    # ------------------------------------------------------------------ #
+    # pyrho recombination maps                                             #
+    # ------------------------------------------------------------------ #
+    print("\nDownloading pyrho GRCh38 recombination maps...")
+    pyrho_dest = maps_dir / "pyrho_raw" / "hg38_maps.tar.gz"
+    _download(cfg["pyrho_raw_map_url"], pyrho_dest, "pyrho hg38 maps")
 
     # ------------------------------------------------------------------ #
     # deCODE recombination map                                             #

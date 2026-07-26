@@ -48,9 +48,9 @@ Two of the three search phases evaluate a boundable/predictable set of candidate
 
 **Not parallelized**: the core binary search (`find_le_ind`, `_util/binary_search.py`). Each of its steps is adaptive on the previous comparison (can't be pre-batched without a fundamentally different k-ary-search algorithm), and it's a shared utility used elsewhere — changing its core algorithm was judged out of scope for this pass given the added verification burden versus the smaller share of total calls it represents (~13 of 41 in the observed trace).
 
-Wired via a new `search_workers` parameter on `custom_binary_search_with_trackback`, reusing `find_breakpoints`'s existing `workers` argument (already meant for local search, which hasn't started yet at the point the filter-width search runs — no oversubscription risk, confirmed via the flat single-core CPU/RSS in the profiling plot showing no other multiprocessing active during this phase).
+Wired via a new `search_workers` parameter on `custom_binary_search_with_trackback`, reusing `find_breakpoints`'s existing `workers` argument (already meant for local search, which hasn't started yet at the point the filter-width search runs — no oversubscription risk, confirmed via the flat single-core CPU/RSS in the profiling plot showing no other multiprocessing active during this phase). Later MacDonald2022 diagnostics exposed that batching the exponential doubling phase was a mistake with large `workers`: it could evaluate very large, very expensive widths after an earlier candidate in the same batch already satisfied the stopping rule. `_find_end` is now sequential; trackback remains threaded.
 
-Verified via `tests/test_find_minima.py`: `test_trackback_threaded_matches_sequential`, `test_find_end_threaded_matches_sequential`, `test_find_end_threaded_raises_at_max_srch_val` — threaded (`search_workers=4`) vs. sequential (`search_workers=1`) produce identical `found_width` and identical error behavior on a real noisy synthetic vector. Full suite (227 tests), ruff, mypy all clean.
+Verified via `tests/test_find_minima.py`: `test_trackback_threaded_matches_sequential`, `test_find_end_ignores_workers_and_matches_sequential`, `test_find_end_stops_before_later_doubling_candidates`, `test_find_end_threaded_raises_at_max_srch_val` — threaded (`search_workers=4`) vs. sequential (`search_workers=1`) produce identical `found_width` and identical error behavior, while `_find_end` stops before later doubling candidates. Full suite (227 tests), ruff, mypy all clean.
 
 ## Still open (as of the thread-parallelization pass above)
 
@@ -82,9 +82,55 @@ Also investigated, prompted by a direct question, whether `fastmath=True` introd
 
 Also investigated whether the `prange`-oversubscription concern (cited above as the reason to defer within-call multicore) is empirically real: composes fine with `nogil`/`fastmath` (no crashes), and a quick local test (unconstrained + a numba-thread-count-limited simulation) showed *no* measurable oversubscription penalty when combined with the outer `ThreadPoolExecutor` — if anything slightly faster. Could not fully replicate a genuinely CPU-affinity-constrained cluster allocation locally (no cgroups/taskset control available), so this isn't a full exoneration, but the real blocker for deferring `prange` is the API-surface refactor cost (per-phase-different filter functions), not a demonstrated performance hazard — worth revisiting if more speedup is wanted later.
 
+## Follow-up idea after MacDonald2022 pipeline fixes: split filter parallelism by search phase
+
+Date: 2026-07-26
+
+During the MacDonald2022 deCODE replication/debugging pass, we revisited whether a simple `--filter-workers N` knob should replace candidate-width threading during filter-width search. The better follow-up design is probably not either/or across the entire search, but a split policy by phase:
+
+- **Exponential search**: width choices are adaptive and must be evaluated one at a time, so within-convolution `numba.prange` is the only useful parallel layer.
+- **Binary search**: also adaptive and one width at a time, so it can likewise benefit from `prange` without any outer candidate-width pool.
+- **Trackback**: has a small but explicit candidate set per scan window (default coarse scan: 9 candidate widths; default fine scan: 19 candidate widths). Candidate-width threading is a natural coarse-grained parallel layer here and is likely preferable to `prange` for that phase.
+
+This suggests a future implementation shape:
+
+```text
+--workers N --filter-workers M
+
+exponential search: one width at a time, each convolution uses M numba threads
+binary search:      one width at a time, each convolution uses M numba threads
+trackback:          N candidate widths at a time, each convolution uses 1 numba thread
+```
+
+That would avoid nested parallelism while preserving the trackback speedup we already know helps. It also lets the adaptive phases use more than one core, which candidate-width threading cannot do there by construction.
+
+Do not pick this up until after the MacDonald2022 pipeline is stable: it touches shared `find_minima.py` plumbing (`custom_binary_search_with_trackback`, `FlexibleBoundedAccessor`, and the `f: Callable` interface) and should be benchmarked against all three modes:
+
+```text
+--workers N --filter-workers 1      # current candidate-width-only baseline
+--workers 1 --filter-workers M      # pure prange baseline
+--workers N --filter-workers M      # split policy
+```
+
+Key correctness checks when this is implemented: exact `found_width`, exact minima loci, exact BED output on the chr21 deCODE replication diagnostic, and no increase in active thread count during trackback beyond the intended outer candidate pool.
+
+## Follow-up: deprecate and eventually remove symmetric Hann mode
+
+Date: 2026-07-26
+
+The MacDonald2022 chr21 deCODE exact-match diagnostic confirmed that original ldetect's Step 4 behavior uses SciPy's periodic Hann window (`scipy.signal.get_window("hann", n)`, equivalent to `fftbins=True`), not NumPy's symmetric `np.hanning(n)` window. ldetect-lite now defaults to `scipy-periodic` across the CLI, `find_breakpoints()`, and filter helper APIs.
+
+Keep `--filter-window symmetric` only as a deprecated compatibility/diagnostic knob for historical output comparisons. It should not be treated as a peer "correct" mode long term. Once old-output comparisons no longer need it, plan a removal pass:
+
+- remove `symmetric` from CLI choices and public filter helper modes;
+- simplify tests that only exist to preserve symmetric-vs-periodic branching;
+- update docs to describe the single Hann behavior as original-ldetect-compatible;
+- keep historical notes explaining why older outputs using `np.hanning` may differ.
+
 ## Still open (current)
 
 - Real-cluster wall-clock re-validation of the numba kernel specifically (thread-parallelization was already re-validated on the cluster above; the numba speedup is only measured locally so far).
 - A fresh chr21 profiling run + breakpoints/BED byte-exactness diff against the pre-numba saved outputs (`plots/EUR_LD_blocks.bed`, `EUR_raw_LD_blocks.bed`) before considering this fully production-validated.
 - The binary-search phase itself remains unparallelized (adaptive, shared utility) — now benefits from the numba per-call speedup even though it isn't itself parallelized.
-- `numba.prange` for within-call multicore (on top of the per-call speedup already shipped) — deferred; would need per-phase-different filter functions to avoid oversubscription with the existing `ThreadPoolExecutor` layer during `_trackback`, touching more of `find_minima.py`'s shared plumbing than this pass's scope.
+- Split-phase `numba.prange` within-call multicore (on top of the per-call speedup already shipped) — deferred until after the MacDonald2022 pipeline is stable. The promising design is `prange` for exponential/binary search and candidate-width threading for `_trackback`, avoiding nested parallelism by forcing trackback's per-candidate convolution to one numba thread.
+- Deprecate and eventually remove the temporary `symmetric` Hann-window mode after MacDonald2022 and ldetect_original reruns are stable under the original-ldetect-compatible periodic default.

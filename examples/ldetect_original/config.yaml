@@ -27,6 +27,10 @@ n_snps_bw_bpoints: 10000
 subset: fourier_ls
 workers: 4
 
+# LD-neighborhood separation plots around called/published boundaries.
+ld_neighborhood_window_bp: 500000
+ld_neighborhood_sample_limit: 200000
+
 # Post-processing
 min_snps_per_block: 0   # original ldetect does not merge small blocks
 

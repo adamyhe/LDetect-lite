@@ -2,8 +2,9 @@
 
 Operations:
   1. Optional centromere removal — drop blocks overlapping a centromeric region.
-  2. Small block merging — merge any block with fewer than *min_snps* SNPs
-     (counted from a filtered VCF) into its left neighbour.
+  2. Optional small block merging — merge any block with fewer than *min_snps*
+     SNPs (counted from a filtered VCF) into its left neighbour. Disabled when
+     *min_snps* is 0.
 
 Usage:
     uv run python scripts/postprocess.py \
@@ -61,6 +62,11 @@ def remove_centromere_blocks(
     return [(s, e) for s, e in blocks if not overlaps_any(s, e, centromeres)]
 
 
+def drop_nonpositive_blocks(blocks: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Drop invalid zero/negative-width BED intervals."""
+    return [(s, e) for s, e in blocks if s < e]
+
+
 # ---------------------------------------------------------------------------
 # SNP counting
 # ---------------------------------------------------------------------------
@@ -91,7 +97,11 @@ def merge_small_blocks(
     counts: list[int],
     min_snps: int,
 ) -> list[tuple[int, int]]:
-    """Merge blocks with fewer than *min_snps* SNPs into their left neighbour."""
+    """Merge blocks with fewer than *min_snps* SNPs into a neighbour.
+
+    Interior small blocks follow MacDonald's left-merge convention. A leading
+    small block has no left neighbour, so merge it into the right block instead.
+    """
     if not blocks:
         return blocks
 
@@ -111,6 +121,14 @@ def merge_small_blocks(
                 _, curr_end = merged[i]
                 new_blocks[-1] = (prev_start, curr_end)
                 new_counts[-1] += snp_counts[i]
+                changed = True
+            elif snp_counts[i] < min_snps and i + 1 < len(merged):
+                # Leading small block: merge into right neighbour.
+                curr_start, _ = merged[i]
+                _, next_end = merged[i + 1]
+                new_blocks.append((curr_start, next_end))
+                new_counts.append(snp_counts[i] + snp_counts[i + 1])
+                i += 1
                 changed = True
             else:
                 new_blocks.append(merged[i])
@@ -148,6 +166,11 @@ def main() -> None:
     n_raw = len(blocks)
     print(f"Input: {n_raw} blocks on {chrom}")
 
+    blocks = drop_nonpositive_blocks(blocks)
+    n_nonpositive = n_raw - len(blocks)
+    if n_nonpositive:
+        print(f"After dropping nonpositive-width blocks: {len(blocks)} blocks")
+
     # Step 1: optional centromere removal
     if args.remove_centromeres:
         centromeres = load_centromeres(args.centromeres, chrom)
@@ -162,12 +185,15 @@ def main() -> None:
     else:
         print("Centromere removal disabled")
 
-    # Step 2: small block merging
-    print(f"Counting SNPs per block (min_snps={args.min_snps})...")
-    counts = count_snps_per_block(args.vcf, chrom, blocks)
-    n_small = sum(1 for c in counts if c < args.min_snps)
-    blocks = merge_small_blocks(blocks, counts, args.min_snps)
-    print(f"After merging {n_small} small blocks: {len(blocks)} blocks")
+    # Step 2: optional small block merging
+    if args.min_snps > 0:
+        print(f"Counting SNPs per block (min_snps={args.min_snps})...")
+        counts = count_snps_per_block(args.vcf, chrom, blocks)
+        n_small = sum(1 for c in counts if c < args.min_snps)
+        blocks = merge_small_blocks(blocks, counts, args.min_snps)
+        print(f"After merging {n_small} small blocks: {len(blocks)} blocks")
+    else:
+        print("Small-block merging disabled")
 
     write_block_bed(chrom, blocks, args.output)
     print(f"Output: {args.output}")

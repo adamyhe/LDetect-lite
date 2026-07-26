@@ -104,7 +104,7 @@ def first_write_wins_pair_value(
     """Independent, from-scratch oracle for legacy's cross-partition precedence.
 
     Mirrors ``insert_into_matrix``/``insert_into_matrix_lean``
-    (``_reference/ldetect_original/ldetect/baselib/flat_file.py``): partitions
+    (mirroring the shipped legacy ``flat_file.py``): partitions
     are read in the given (ascending/list) order into one shared mapping, and
     a pair already present in that mapping is never replaced. Deliberately
     reimplemented with plain Python containers here rather than importing

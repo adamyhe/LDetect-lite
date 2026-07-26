@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ldetect-lite"
-version = "0.2.2"
+version = "0.2.3"
 description = "Fast calculation of approximately independent LD blocks"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -21,6 +21,8 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 dependencies = [
@@ -98,6 +100,7 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "deprecated: coverage for deprecated compatibility behavior",
     "integration: slow end-to-end tests against example data (deselect with -m 'not integration')",
 ]
 

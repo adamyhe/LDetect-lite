@@ -24,7 +24,7 @@ This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, a
 
 The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the VCF/BCFs must be indexed before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
-**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`, or use `uv sync --extra heatmap` from a source checkout. Generating covariance heatmaps requires a matplotlib install.
+**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`/`uv tool install ldetect-lite[heatmap]`. Generating covariance heatmaps requires a matplotlib install.
 
 ### Development
 
@@ -78,21 +78,6 @@ If `--workers` is greater than 1 and none of `OMP_NUM_THREADS`/`OPENBLAS_NUM_THR
 
 Each of the five stages (partition, covariance, matrix-to-vector, find-minima, extract-bpoints) can also be run individually, along with a `covariance-summary` inspection utility — see `docs/pipeline-steps.md`.
 
-### Pipeline schematics
-
-From a development checkout, the compact pipeline overview can be regenerated
-with:
-
-```bash
-python3 schematics/plot_figure1_panels.py
-```
-
-The per-step pipeline schematics can be regenerated with:
-
-```bash
-uv run --extra heatmap python schematics/plot_pipeline_schematics.py
-```
-
 The overview command writes `pipeline-overview.svg`; the per-step schematic
 command writes SVG/PDF figures under `schematics/plots/`.
 
@@ -111,9 +96,11 @@ Arguments:
 - `--snp-file PATH` — bgzipped BED file of SNP positions (columns: `chrom start end rs_id`); typically extracted from a filtered VCF with `bcftools query -f '%CHROM\t%POS0\t%POS\t%ID\n'`
 - `--genetic-map PATH` — gzipped recombination map; interpolation is used to assign a cM value to each SNP position
 - `--output PATH` — gzipped output map in the 3-column format expected by steps 1 and 2 (`rs_id  position  cM`)
-- `--mode {point,interval}` (default: `point`) — interpolation algorithm:
+- `--mode {point,interval,hapmap,macdonald-decode,macdonald-pyrho}` (default: `point`) — interpolation algorithm:
   - `point` — treats `--genetic-map` as discrete `(position, cM)` points and linearly interpolates between the two points bracketing each SNP. Correct for point-sampled maps (e.g. HapMap-interpolated 1000G maps).
-  - `interval` — treats each map row as the start of a genomic interval with its own recombination rate (`Begin, rate_cM_Mb, cumulative_cM_at_End`), matching MacDonald et al.'s R interpolation scripts ([`interpolate.R`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/scripts/interpolate.R)/[`interpolate_pyhro.R`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/scripts/interpolate_pyhro.R)). Required for interval-rate maps such as the deCODE map — feeding those into `point` mode silently uses the *next* interval's rate for SNPs in the *current* interval, an off-by-one bug that produced a ~0.001–0.003 cM error per SNP in earlier testing (see `notes/findings/macdonald2022-reproduction.md`).
+  - `interval` — treats each map row as the start of a genomic interval with its own recombination rate (`Begin, rate_cM_Mb, cumulative_cM_at_End`). Correct for interval-rate maps such as deCODE; feeding those into `point` mode silently uses the *next* interval's rate for SNPs in the *current* interval.
+  - `hapmap` — treats each map row's cM as the cumulative genetic position at that row's physical position, with the row's rate applying to the following interval. Correct for pyrho/HapMap-format maps.
+  - `macdonald-decode` / `macdonald-pyrho` — compatibility modes for reproducing MacDonald et al.'s R interpolation scripts, including their dataframe/indexing conventions. Use these only for replication diagnostics; use `interval`/`hapmap` for corrected coordinates.
 
 ## Algorithm
 
@@ -129,7 +116,7 @@ The available breakpoint sets are `fourier` and `uniform` (raw minima from Fouri
 
 ## Known limitations
 
-`ldetect-lite` reproduces the published Berisa & Pickrell (2016) 1000 Genomes LD blocks exactly for ASN (all 22 autosomes) and AFR (all chromosomes except chr22), and matches EUR block counts and coverage exactly but with shifted internal boundaries on chr8–chr12. These two residual divergences (EUR chr8-12, AFR chr22) likelystem from an unidentified upstream input/provenance difference from the original authors' pipeline, not a bug in this implementation — an extensive diagnostic effort ruled out VCF release-version provenance, SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, and reference-BED integrity as causes. See `notes/findings/ldetect-original-reproduction.md` for the full writeup, and `notes/findings/macdonald2022-reproduction.md` for the equivalent status reproducing MacDonald et al. (2022)'s GRCh38 blocks.
+`ldetect-lite` reproduces the published Berisa & Pickrell (2016) 1000 Genomes LD blocks exactly for ASN (all 22 autosomes) and AFR (all chromosomes except chr22), and matches EUR block counts and coverage exactly but with shifted internal boundaries on chr8–chr12. These two residual divergences (EUR chr8-12, AFR chr22) likely stem from an unidentified upstream input/provenance difference from the original authors' pipeline, not a bug in this implementation — an extensive diagnostic effort ruled out VCF release-version provenance, SNP filtering, genetic map family, `Ne` assignment, duplicate/cross-partition handling, and reference-BED integrity as causes. MacDonald et al. (2022) reproduction is exact for substantive deCODE/EUR boundaries and high-concordance but not exact for pyrho maps; the remaining pyrho gap is documented as local-search near-tie sensitivity plus map-desert effects, not a planned code change. See `notes/findings/ldetect-original-reproduction.md` and `notes/findings/macdonald2022-reproduction.md` for the full writeups.
 
 ## Pre-computed LD blocks
 

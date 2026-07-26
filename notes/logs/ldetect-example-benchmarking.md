@@ -8,8 +8,8 @@ Date: 2026-07-12
 ## Motivation
 
 The application note needed benchmark claims tied to the original LDetect toy
-example, starting from VCF input rather than relying on a local `_reference/`
-checkout or pre-existing generated intermediates. Earlier benchmark drafts mixed
+example, starting from VCF input rather than relying on a local-only checkout
+or pre-existing generated intermediates. Earlier benchmark drafts mixed
 legacy function calls with LDetect-lite CLI calls and also overemphasized
 parallelization, which is not the main source of the implementation speedup.
 

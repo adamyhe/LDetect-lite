@@ -124,7 +124,7 @@ Most likely candidates:
 The reference implementation lives at:
 
 ```text
-_reference/ldetect_original/ldetect/pipeline_elements/E08_local_search.py
+examples/ldetect_original/scripts/legacy_ldetect/ldetect/pipeline_elements/E08_local_search.py
 ```
 
 The current implementation lives at:
@@ -225,17 +225,17 @@ appropriate for European populations.
 
 In code:
 
-- `_reference/ldetect_original/ldetect/examples/P00_01_calc_covariance.py`
+- `examples/ldetect_original/scripts/legacy_ldetect/ldetect/examples/P00_01_calc_covariance.py`
   reads `NE = float(sys.argv[3])`.
-- `_reference/ldetect_original/ldetect/examples/P00_00_partition_chromosome.py`
+- Original LDetect's `P00_00_partition_chromosome.py`
   hardcodes `11418.0` in the partition-extension calculation.
 
 For the MacDonald2022 reference:
 
-- `_reference/LDblocks_GRCh38/scripts/runAllCov.sh` accepts `popsize=$3`.
-- `_reference/LDblocks_GRCh38/scripts/runCov.sh` passes that value to
+- MacDonald's upstream `scripts/runAllCov.sh` accepts `popsize=$3`.
+- MacDonald's upstream `scripts/runCov.sh` passes that value to
   `P00_01_calc_covariance.py`.
-- `_reference/LDblocks_GRCh38/README.md` shows `runAllCov.sh eurinds.txt EUR
+- MacDonald's upstream `README.md` shows `runAllCov.sh eurinds.txt EUR
   11418` and describes the final argument as the effective population size for
   Europeans.
 

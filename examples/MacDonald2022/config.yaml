@@ -22,37 +22,73 @@ populations:
     # No HapMap II SAS-specific default is cited by SHAPEIT; keep CEU default.
     ne: 11418
 
-# Output block sets. The original deCODE EUR target keeps the historical
-# result name (EUR). The pyrho targets reproduce the four published
-# superpopulation BEDs from the MacDonald reference repository.
+# Output block sets. EUR/deCODE is the current default reproduction target and
+# uses MacDonald's published already-interpolated deCODE maps directly. pyrho
+# targets remain available as opt-in diagnostics, but are not part of the
+# default run because MacDonald's published pyrho maps contain nonmonotone cM
+# coordinates that original ldetect cannot process cleanly.
 block_sets:
   EUR:
     population: EUR
     map_source: decode
+    decode_interpolation: published
     reference_bed: deCODE_EUR_LD_blocks.bed
     remove_centromere_blocks: false
+    min_snps_per_block: 0
   pyrho_AFR:
     population: AFR
     map_source: pyrho
     map_pop: GWD
+    pyrho_interpolation: published
     reference_bed: pyrho_AFR_LD_blocks.bed
     remove_centromere_blocks: true
   pyrho_EAS:
     population: EAS
     map_source: pyrho
     map_pop: CHB
+    pyrho_interpolation: published
     reference_bed: pyrho_EAS_LD_blocks.bed
     remove_centromere_blocks: true
   pyrho_EUR:
     population: EUR
     map_source: pyrho
     map_pop: IBS
+    pyrho_interpolation: published
     reference_bed: pyrho_EUR_LD_blocks.bed
     remove_centromere_blocks: true
   pyrho_SAS:
     population: SAS
     map_source: pyrho
     map_pop: GIH
+    pyrho_interpolation: published
+    reference_bed: pyrho_SAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_AFR_corrected:
+    population: AFR
+    map_source: pyrho
+    map_pop: GWD
+    pyrho_interpolation: corrected
+    reference_bed: pyrho_AFR_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_EAS_corrected:
+    population: EAS
+    map_source: pyrho
+    map_pop: CHB
+    pyrho_interpolation: corrected
+    reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_EUR_corrected:
+    population: EUR
+    map_source: pyrho
+    map_pop: IBS
+    pyrho_interpolation: corrected
+    reference_bed: pyrho_EUR_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_SAS_corrected:
+    population: SAS
+    map_source: pyrho
+    map_pop: GIH
+    pyrho_interpolation: corrected
     reference_bed: pyrho_SAS_LD_blocks.bed
     remove_centromere_blocks: true
   # Experimental: same as pyrho_EAS, but the VCF is filtered with true
@@ -71,16 +107,39 @@ block_sets:
     population: EAS
     map_source: pyrho
     map_pop: CHB
+    pyrho_interpolation: published
     reference_bed: pyrho_EAS_LD_blocks.bed
     remove_centromere_blocks: true
     maf_filter: minor
 
-# Default targets for rule all. SAS is kept as an available block set above,
-# but is excluded from the default reproduction target because MacDonald et al.
-# do not document an SAS-specific effective population size and the current
-# CEU fallback gives poor concordance. pyrho_EAS_minormaf is an opt-in
-# experimental variant (see above) and is also deliberately excluded.
-active_block_sets: [EUR, pyrho_AFR, pyrho_EAS, pyrho_EUR]
+# Default targets for rule all. Focus on the documented, monotone deCODE/EUR
+# path. pyrho block sets above can still be requested explicitly.
+active_block_sets: [EUR]
+
+# Opt-in legacy end-to-end diagnostic. This runs the vendored original ldetect
+# scripts from the exact filtered VCF/map/individual inputs used by the normal
+# ldetect-lite rule, then compares raw ldetect-lite vs raw legacy and
+# postprocessed legacy vs MacDonald's published BED. Kept deliberately small by
+# default: EUR chr21 uses MacDonald's published deCODE map, which is monotone
+# and can be passed to unmodified original ldetect. Published pyrho maps are
+# intentionally excluded from this clean legacy diagnostic because their
+# nonmonotone cM coordinates trigger original ldetect covariance overflows.
+legacy_diagnostics:
+  block_sets: [EUR]
+  chromosomes: [21]
+  tolerance: 50000
+
+# Focused pyrho diagnostics for the chromosomes driving the residual published
+# block mismatches. These compare raw and postprocessed ldetect-lite blocks
+# against MacDonald's published BEDs and annotate mismatched boundaries with
+# local genetic-map, SNP-density, and centromere context.
+pyrho_stage_diagnostics:
+  targets:
+    pyrho_AFR: [9]
+    pyrho_EAS: [4, 9, 17]
+    pyrho_EUR: [9, 12, 19]
+  tolerance: 50000
+  window: 2000000
 
 # Directories (relative to the analysis/ directory)
 raw_vcf_dir: data/raw
@@ -102,6 +161,28 @@ n_snps_bw_bpoints: 7000
 # chromosome (~40 for human autosomes). Snakemake will reserve this many
 # cores per job, so total cores used = (simultaneous chromosome jobs) × workers.
 workers: 4
+# Use the fast array-backed matrix-to-vector summation. The legacy dictionary
+# backend remains available via `--config matrix_backend=legacy` for targeted
+# diagnostics, but chr21 deCODE replication now matches legacy with array mode.
+matrix_backend: array
+# Use the uint8 covariance kernel for deCODE replication diagnostics. This is
+# the closest ldetect-lite covariance path to the original Python script; the
+# faster bitpacked kernel remains the package default and can be requested with
+# `--config ld_kernel=bitpacked`.
+ld_kernel: uint8
+# Original ldetect uses scipy.signal.get_window(..., fftbins=True) for its
+# Hanning filter. Keep MacDonald replication diagnostics on that legacy-periodic
+# window, which is also the ldetect-lite CLI default.
+filter_window: scipy-periodic
+# Opt-in Numba threads for each individual filter convolution in Step 4.
+# Keep at 1 for the baseline replication run; try larger values to benchmark
+# within-convolution parallelism without nesting it with candidate-width threads.
+filter_workers: 1
+
+# LD-neighborhood separation plots around called boundaries. Each plot samples
+# pairwise r^2 from within-left, across-boundary, and within-right windows.
+ld_neighborhood_window_bp: 500000
+ld_neighborhood_sample_limit: 200000
 
 # Post-processing
 min_snps_per_block: 100
@@ -119,17 +200,23 @@ sample_data_base_url: "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections
 
 # deCODE recombination map (Halldorsson et al. 2019, Science).
 # NOTE: requires journal access; download manually if behind paywall and place at
-#       data/maps/decode_raw/aau1043_datas3.gz. Only used by the diagnostic
-#       convert_decode_map/interpolate_map/compare_maps rules (regression-checks
-#       our own ldetect interpolate-maps against MacDonald's published output
-#       below) -- the EUR block set itself uses decode_interpolated_map_base_url.
+#       data/maps/decode_raw/aau1043_datas3.gz. The EUR/deCODE block set uses
+#       this raw-derived map after convert_decode_map/interpolate_map; compare_maps
+#       checks it against MacDonald's published output below.
 decode_map_url: "https://www.science.org/doi/suppl/10.1126/science.aau1043/suppl_file/aau1043_datas3.gz"
 
-# MacDonald et al. published already-interpolated pyrho AND deCODE maps in the
-# reference repository. These are in the chr/position/cM format accepted by
-# ldetect run, used directly (no local interpolation) for both the pyrho and
-# EUR/deCODE block sets.
-pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
+# pyrho GRCh38 maps. The pyrho project publishes per-population maps at Zenodo
+# record 11437540. The workflow downloads the hg38 archive, extracts files named
+# {pop}_recombination_map_hapmap_format_hg38_chr_{chrom}.txt, converts their
+# HapMap-style columns (chromosome, position, rate cM/Mb, cumulative cM), and
+# runs our interval interpolator. These raw-derived maps are the default pyrho
+# source used by ldetect run.
+pyrho_raw_map_url: "https://zenodo.org/api/records/11437540/files/hg38_maps.tar.gz/content"
+
+# MacDonald et al. published already-interpolated pyrho and deCODE maps in the
+# reference repository. These files are kept as validation targets for the
+# raw-derived maps.
+macdonald_pyrho_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps"
 decode_interpolated_map_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/deCODE_interpolated_maps"
 reference_bed_base_url: "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data"
 

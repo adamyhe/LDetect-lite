@@ -1,7 +1,8 @@
 """Compare our interpolated genetic maps against MacDonald et al. (2022) reference maps.
 
-MacDonald's maps (deCODE_interpolated_maps/chr{N}.tab.gz) were produced by an R
-interpolation script and represent the ground-truth target for our pipeline.
+MacDonald's maps (deCODE_interpolated_maps/chr{N}.tab.gz and
+pyrho_interpolated_maps/{pop}/chr{N}.tab.gz) were produced by R interpolation
+scripts and are the reference targets for interpolation checks.
 
 Both maps are joined on physical position. For SNPs present in both, we compute:
   - Pearson correlation of cM values
@@ -28,7 +29,7 @@ import math
 import statistics
 from pathlib import Path
 
-MACDONALDS_MAP_URL = (
+DEFAULT_MACDONALDS_MAP_URL = (
     "https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38"
     "/master/data/deCODE_interpolated_maps/chr{chrom}.tab.gz"
 )
@@ -129,6 +130,14 @@ def main() -> None:
     parser.add_argument("--ref-dir", required=True, type=Path,
                         help="Directory containing MacDonald's reference maps "
                              "(downloaded here if absent).")
+    parser.add_argument(
+        "--ref-url-template",
+        default=DEFAULT_MACDONALDS_MAP_URL,
+        help=(
+            "URL template used to download missing reference maps. Must accept "
+            "{chrom}, where chrom is the chromosome number without the chr prefix."
+        ),
+    )
     parser.add_argument("--output", required=True, type=Path,
                         help="Output TSV with per-chromosome comparison metrics.")
     args = parser.parse_args()
@@ -146,7 +155,7 @@ def main() -> None:
         ref_path = args.ref_dir / f"chr{chrom_n}.tab.gz"
 
         if not ref_path.exists():
-            url = MACDONALDS_MAP_URL.format(chrom=chrom_n)
+            url = args.ref_url_template.format(chrom=chrom_n)
             print(f"  Downloading {chrom} reference map...")
             urllib.request.urlretrieve(url, ref_path)
 

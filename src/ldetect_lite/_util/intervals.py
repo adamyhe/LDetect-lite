@@ -64,8 +64,21 @@ def boundary_jaccard(a: list[int], b: list[int], tolerance: int) -> float:
     """Jaccard index on boundary sets under a bp tolerance."""
     if not a or not b:
         return float("nan")
-    intersection = sum(1 for offset in nearest_offsets(a, b) if offset <= tolerance)
-    union = len(a) + len(b) - intersection
+    a_unique = sorted(set(a))
+    b_unique = sorted(set(b))
+    i = j = 0
+    intersection = 0
+    while i < len(a_unique) and j < len(b_unique):
+        delta = a_unique[i] - b_unique[j]
+        if abs(delta) <= tolerance:
+            intersection += 1
+            i += 1
+            j += 1
+        elif delta < 0:
+            i += 1
+        else:
+            j += 1
+    union = len(a_unique) + len(b_unique) - intersection
     return intersection / union if union else float("nan")
 
 

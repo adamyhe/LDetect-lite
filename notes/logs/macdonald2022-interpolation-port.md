@@ -121,7 +121,8 @@ Two alternative explanations for this residual were checked and ruled out:
   here) — ruled out.
 
 One genuine anomaly surfaced but not resolved: MacDonald's own
-`_reference/LDblocks_GRCh38/README.md` states their downloaded
+[`README.md`](https://github.com/jmacdon/LDblocks_GRCh38/blob/master/README.md)
+states their downloaded
 `aau1043_datas3.gz` "has a gz extension, but is not compressed," whereas
 our fresh download is legitimately gzip-compressed (`file`/`gzip -l`
 confirm a real gzip stream, with an internal timestamp of Aug 2, 2018 —
