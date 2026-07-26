@@ -777,6 +777,7 @@ rule run_ldetect:
 rule postprocess:
     input:
         bed=rules.run_ldetect.output.bed,
+        vector=rules.run_ldetect.output.vector,
         vcf=block_set_filtered_vcf,
         centromeres=rules.download_centromeres.output[0],
     output:
@@ -790,6 +791,7 @@ rule postprocess:
         """
         uv run python scripts/postprocess.py \
             --bed {input.bed} \
+            --vector {input.vector} \
             --vcf {input.vcf} \
             --centromeres {input.centromeres} \
             {params.remove_centromeres} \
@@ -1044,6 +1046,7 @@ rule run_legacy_from_vcf:
 rule postprocess_legacy_from_vcf:
     input:
         bed=rules.run_legacy_from_vcf.output.bed,
+        vector=rules.run_legacy_from_vcf.output.vector,
         vcf=block_set_filtered_vcf,
         centromeres=rules.download_centromeres.output[0],
     output:
@@ -1063,6 +1066,7 @@ rule postprocess_legacy_from_vcf:
         """
         uv run python scripts/postprocess.py \
             --bed {input.bed} \
+            --vector {input.vector} \
             --vcf {input.vcf} \
             --centromeres {input.centromeres} \
             {params.remove_centromeres} \

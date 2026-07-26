@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import importlib.util
 from pathlib import Path
 
@@ -54,6 +55,15 @@ def test_trim_blocks_to_snp_span_keeps_interior_small_blocks() -> None:
         (59565357, 59582067),
         (59582067, 62477349),
     ]
+
+
+def test_vector_position_span_reads_gzip_vector_bounds(tmp_path: Path) -> None:
+    vector = tmp_path / "vector.txt.gz"
+    with gzip.open(vector, "wt") as f:
+        f.write("31443\t1.0\n")
+        f.write("1196882\t2.0\n")
+
+    assert postprocess.vector_position_span(vector) == (31443, 1196882)
 
 
 def test_merge_small_blocks_merges_leading_small_block_right() -> None:
