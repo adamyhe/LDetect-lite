@@ -170,9 +170,9 @@ class FilterResult(TypedDict):
 def _filter_window(width: int, mode: str = "scipy-periodic") -> np.ndarray:
     n = 2 * width + 1
     if mode == "symmetric":
-        return np.hanning(n)
+        return np.asarray(np.hanning(n), dtype=np.float64)
     if mode == "scipy-periodic":
-        return sig.get_window("hann", n)
+        return np.asarray(sig.get_window("hann", n), dtype=np.float64)
     raise ValueError(f"Unknown filter window mode: {mode}")
 
 
