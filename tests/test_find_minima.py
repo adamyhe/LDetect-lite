@@ -49,6 +49,40 @@ def test_trackback_threaded_matches_sequential() -> None:
     assert threaded == sequential
 
 
+def test_trackback_can_use_separate_evaluator() -> None:
+    adaptive_calls: list[int] = []
+    trackback_calls: list[int] = []
+
+    def count_for_width(width: int) -> int:
+        if width < 16:
+            return 20
+        if width < 32:
+            return 10
+        return 1
+
+    def adaptive_count(_data: np.ndarray, width: int) -> int:
+        adaptive_calls.append(width)
+        return count_for_width(width)
+
+    def trackback_count(_data: np.ndarray, width: int) -> int:
+        trackback_calls.append(width)
+        return count_for_width(width)
+
+    custom_binary_search_with_trackback(
+        np.array([1.0]),
+        adaptive_count,
+        srch_val=10,
+        init_search_location=4,
+        trackback_delta=8,
+        trackback_step=4,
+        search_workers=2,
+        trackback_f=trackback_count,
+    )
+
+    assert adaptive_calls
+    assert trackback_calls
+
+
 def test_find_end_ignores_workers_and_matches_sequential() -> None:
     """Exponential search must not precompute expensive later candidates."""
     arr = np.random.default_rng(2).normal(size=3000).cumsum()

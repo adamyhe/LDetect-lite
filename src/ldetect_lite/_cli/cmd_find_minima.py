@@ -121,9 +121,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         default=1,
         metavar="N",
         help=(
-            "Numba threads for each individual filter convolution. When N > 1, "
-            "candidate-width threading during trackback is disabled to avoid "
-            "nested parallelism (default: 1)."
+            "Minimum Numba threads for adaptive single-filter convolutions. "
+            "Trackback keeps candidate-width threading and forces each "
+            "candidate filter to one Numba thread to avoid nested parallelism "
+            "(default: 1)."
         ),
     )
     p.add_argument(

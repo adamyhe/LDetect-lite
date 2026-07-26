@@ -158,6 +158,7 @@ def custom_binary_search_with_trackback(
     trackback_step: int = 20,
     init_search_location: int = 1000,
     search_workers: int = 1,
+    trackback_f: Callable[[np.ndarray, int], int] | None = None,
 ) -> int:
     """Find the filter width that produces exactly *srch_val* minima.
 
@@ -171,14 +172,18 @@ def custom_binary_search_with_trackback(
         trackback_delta: Coarse search range for trackback.
         trackback_step: Coarse step size for trackback.
         init_search_location: Starting width for exponential search.
-        search_workers: Threads for the exponential search and trackback
-            refinement pass (default: 1, sequential). Both scan a
-            predictable/boundable set of candidates per round and apply the
-            same decision rule to concurrently-computed results, so the
-            returned width is identical regardless of this value. The
-            binary-search phase (`find_le_ind`) stays single-threaded: each
-            of its steps is adaptive on the previous comparison, so it
-            cannot be pre-batched the same way.
+        search_workers: Threads for the trackback refinement pass (default:
+            1, sequential). Trackback scans a predictable/boundable set of
+            candidates per round and applies the same decision rule to
+            concurrently-computed results, so the returned width is identical
+            regardless of this value. The exponential and binary-search phases
+            stay single-candidate: each step is adaptive on the previous
+            comparison, so they cannot be pre-batched the same way.
+        trackback_f: Optional alternate function for trackback candidate
+            evaluations. This lets callers use within-convolution threading
+            for adaptive single-candidate phases while forcing each concurrent
+            trackback candidate to use a serial convolution, avoiding nested
+            parallelism.
 
     Returns:
         Filter width (in samples) that yields *srch_val* minima.
@@ -190,13 +195,16 @@ def custom_binary_search_with_trackback(
     )
     log_msg(f"Exponential search end: {end_v}")
 
-    wrapper = FlexibleBoundedAccessor(np_init_array, f, 0, end_v, invert=True)
-    found_width_raw = find_le_ind(wrapper, srch_val)
+    binary_wrapper = FlexibleBoundedAccessor(np_init_array, f, 0, end_v, invert=True)
+    found_width_raw = find_le_ind(binary_wrapper, srch_val)
     found_width = end_v - found_width_raw
     log_msg(f"Binary search found_width: {found_width}")
 
+    trackback_wrapper = FlexibleBoundedAccessor(
+        np_init_array, trackback_f or f, 0, end_v, invert=True
+    )
     found_width_trackback_raw = _trackback(
-        wrapper,
+        trackback_wrapper,
         srch_val,
         found_width_raw,
         trackback_delta,
