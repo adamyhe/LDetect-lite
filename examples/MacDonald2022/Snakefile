@@ -108,6 +108,13 @@ def block_set_remove_centromeres(block_set):
     )
 
 
+def block_set_min_snps_per_block(block_set):
+    return config["block_sets"][block_set].get(
+        "min_snps_per_block",
+        config.get("min_snps_per_block", 100),
+    )
+
+
 def block_set_maf_filter(block_set):
     """'nref' (default, matches MacDonald's literal bcftools command) or
     'minor' (true minor-allele-frequency filtering, matching MacDonald's
@@ -777,7 +784,7 @@ rule postprocess:
     wildcard_constraints:
         block_set=BLOCK_SET_PATTERN,
     params:
-        min_snps=config["min_snps_per_block"],
+        min_snps=lambda wc: block_set_min_snps_per_block(wc.block_set),
         remove_centromeres=remove_centromeres_param,
     shell:
         """
@@ -1050,7 +1057,7 @@ rule postprocess_legacy_from_vcf:
     wildcard_constraints:
         block_set=BLOCK_SET_PATTERN,
     params:
-        min_snps=config["min_snps_per_block"],
+        min_snps=lambda wc: block_set_min_snps_per_block(wc.block_set),
         remove_centromeres=remove_centromeres_param,
     shell:
         """

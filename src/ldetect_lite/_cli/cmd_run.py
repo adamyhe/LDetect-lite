@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import os
 import shutil
 import sys
@@ -288,6 +289,24 @@ def _resolve_workers(explicit: int | None, default: int) -> int:
     return default if explicit is None else explicit
 
 
+def _vector_position_bounds(path: Path) -> tuple[int, int]:
+    """Return first and last genomic positions from a vector file."""
+    opener = gzip.open if path.suffix.lower() in {".gz", ".gzip"} else open
+    first: int | None = None
+    last: int | None = None
+    with opener(path, "rt") as f:  # type: ignore[call-overload]
+        for line in f:
+            if not line.strip():
+                continue
+            position = int(line.split()[0])
+            if first is None:
+                first = position
+            last = position
+    if first is None or last is None:
+        raise ValueError(f"Vector file is empty: {path}")
+    return first, last
+
+
 def _run(args: argparse.Namespace) -> int:
     import json
 
@@ -414,9 +433,6 @@ def _run(args: argparse.Namespace) -> int:
             log_msg(f"  Partition {start}-{end} done")
     log_memory_checkpoint("step2_end")
 
-    snp_first = partitions[0][0]
-    snp_last = partitions[-1][1]
-
     matrix_workers = _resolve_workers(args.matrix_workers, args.workers)
     local_search_workers = _resolve_workers(args.local_search_workers, args.workers)
     metric_workers = _resolve_workers(args.metric_workers, args.workers)
@@ -480,9 +496,14 @@ def _run(args: argparse.Namespace) -> int:
         )
         return 1
     loci: list[int] = data[args.subset]["loci"]
+    bed_first, bed_last = _vector_position_bounds(vector_path)
 
     write_bed(
-        name=chrom, loci=loci, snp_first=snp_first, snp_last=snp_last, output=bed_path
+        name=chrom,
+        loci=loci,
+        snp_first=bed_first,
+        snp_last=bed_last,
+        output=bed_path,
     )
 
     if args.delete_covariance_cache:

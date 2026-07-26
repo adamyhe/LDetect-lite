@@ -34,6 +34,7 @@ block_sets:
     decode_interpolation: published
     reference_bed: deCODE_EUR_LD_blocks.bed
     remove_centromere_blocks: false
+    min_snps_per_block: 0
   pyrho_AFR:
     population: AFR
     map_source: pyrho

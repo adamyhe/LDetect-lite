@@ -39,3 +39,12 @@ def test_merge_small_blocks_merges_interior_small_block_left() -> None:
         counts=[200, 1, 200],
         min_snps=100,
     ) == [(10, 110), (110, 200)]
+
+
+def test_merge_small_blocks_disabled_when_min_snps_is_zero() -> None:
+    blocks = [(10, 100), (100, 110), (110, 200)]
+    assert postprocess.merge_small_blocks(
+        blocks=blocks,
+        counts=[200, 1, 200],
+        min_snps=0,
+    ) == blocks

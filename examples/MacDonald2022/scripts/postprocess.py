@@ -185,11 +185,14 @@ def main() -> None:
         print("Centromere removal disabled")
 
     # Step 2: small block merging
-    print(f"Counting SNPs per block (min_snps={args.min_snps})...")
-    counts = count_snps_per_block(args.vcf, chrom, blocks)
-    n_small = sum(1 for c in counts if c < args.min_snps)
-    blocks = merge_small_blocks(blocks, counts, args.min_snps)
-    print(f"After merging {n_small} small blocks: {len(blocks)} blocks")
+    if args.min_snps > 0:
+        print(f"Counting SNPs per block (min_snps={args.min_snps})...")
+        counts = count_snps_per_block(args.vcf, chrom, blocks)
+        n_small = sum(1 for c in counts if c < args.min_snps)
+        blocks = merge_small_blocks(blocks, counts, args.min_snps)
+        print(f"After merging {n_small} small blocks: {len(blocks)} blocks")
+    else:
+        print("Small-block merging disabled")
 
     write_block_bed(chrom, blocks, args.output)
     print(f"Output: {args.output}")
