@@ -169,6 +169,14 @@ def test_convolve1d_reflect_matches_scipy_direct_convolution(n, width):
     np.testing.assert_allclose(mine, ref, atol=1e-9, rtol=1e-9)
 
 
+def test_convolve1d_reflect_matches_scipy_for_asymmetric_kernel():
+    arr = np.arange(10, dtype=np.float64)
+    kernel = np.array([1.0, 2.0, 4.0])
+    mine = _convolve1d_reflect(np.ascontiguousarray(arr, dtype=np.float64), kernel)
+    ref = ndimage.convolve1d(arr, kernel)
+    np.testing.assert_allclose(mine, ref, atol=1e-12, rtol=1e-12)
+
+
 @pytest.mark.parametrize("width", [5, 50, 200])
 def test_minima_exact_match_scipy_on_flat_plateau_fixtures(width):
     """The exact fixtures that exposed the FFT bug: numba and scipy must

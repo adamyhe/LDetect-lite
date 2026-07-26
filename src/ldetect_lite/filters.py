@@ -75,10 +75,7 @@ def _pad_reflect(arr: np.ndarray, width: int) -> np.ndarray:
 @_njit_nogil
 def _convolve1d_reflect(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     """Direct convolution matching `scipy.ndimage.convolve1d` with its
-    default `mode='reflect'`, `origin=0`. `kernel` must be odd-length; the
-    Hanning window used by `apply_filter` is symmetric, so convolution and
-    correlation coincide here -- do not reuse this with an asymmetric kernel
-    without adding the flip back.
+    default `mode='reflect'`, `origin=0`. `kernel` must be odd-length.
 
     Same shift-invariant summation structure at every output position as a
     direct convolution (same kernel, same loop, applied uniformly per `i`) --
@@ -96,7 +93,7 @@ def _convolve1d_reflect(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     for i in range(n):
         s = 0.0
         for k in range(klen):
-            s += padded[i + k] * kernel[k]
+            s += padded[i + k] * kernel[klen - 1 - k]
         out[i] = s
     return out
 
