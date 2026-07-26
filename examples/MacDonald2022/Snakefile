@@ -234,6 +234,21 @@ def breakpoint_stage_diagnostic_targets():
     ]
 
 
+def local_search_stage_miss_targets():
+    return [
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "local_search"
+            / block_set
+            / f"chr{chrom}.local_search_moved_away.tsv"
+        )
+        for block_set, chroms in PYRHO_STAGE_DIAGNOSTIC_TARGETS.items()
+        for chrom in chroms
+    ]
+
+
 def vcf_map_position_targets():
     return [
         str(RESULTS / "compare" / "vcf_map_positions" / block_set / f"chr{chrom}.tsv")
@@ -415,11 +430,17 @@ rule pyrho_stage_diagnostics:
         pyrho_stage_diagnostic_targets("raw", "boundary_diagnostics.tsv"),
         pyrho_stage_diagnostic_targets("final", "boundary_diagnostics.tsv"),
         breakpoint_stage_diagnostic_targets(),
+        local_search_stage_miss_targets(),
 
 
 rule breakpoint_stage_diagnostics:
     input:
         breakpoint_stage_diagnostic_targets(),
+
+
+rule local_search_stage_miss_diagnostics:
+    input:
+        local_search_stage_miss_targets(),
 
 
 rule vcf_map_position_diagnostics:
@@ -1785,4 +1806,32 @@ rule compare_breakpoint_stages:
             --chromosome chr{wildcards.chrom} \
             --output {output} \
             --tolerance {params.tolerance}
+        """
+
+
+rule replay_local_search_stage_misses:
+    input:
+        stage_diagnostics=rules.compare_breakpoint_stages.output[0],
+        breakpoints=rules.run_ldetect.output.breakpoints,
+        script="scripts/replay_local_search_stage_misses.py",
+    output:
+        str(
+            RESULTS
+            / "compare"
+            / "diagnostics"
+            / "local_search"
+            / "{block_set}"
+            / "chr{chrom}.local_search_moved_away.tsv"
+        ),
+    wildcard_constraints:
+        block_set=BLOCK_SET_PATTERN,
+    params:
+        results_dir=str(RESULTS / "{block_set}" / "chr{chrom}"),
+    shell:
+        """
+        python {input.script} \
+            --stage-diagnostics {input.stage_diagnostics} \
+            --results-dir {params.results_dir} \
+            --chrom chr{wildcards.chrom} \
+            --output {output}
         """
