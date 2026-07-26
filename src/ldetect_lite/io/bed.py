@@ -104,11 +104,14 @@ def write_bed(
         snp_last: End of the last region (inclusive; written as snp_last + 1).
         output: Output path. Writes to stdout if None.
     """
+    internal_loci = sorted({locus for locus in loci if snp_first < locus <= snp_last})
+
     lines: list[str] = ["#chr\tstart\tstop"]
-    lines.append(f"{name}\t{snp_first}\t{loci[0]}")
-    for i in range(len(loci) - 1):
-        lines.append(f"{name}\t{loci[i]}\t{loci[i + 1]}")
-    lines.append(f"{name}\t{loci[-1]}\t{snp_last + 1}")
+    left = snp_first
+    for locus in internal_loci:
+        lines.append(f"{name}\t{left}\t{locus}")
+        left = locus
+    lines.append(f"{name}\t{left}\t{snp_last + 1}")
 
     text = "\n".join(lines) + "\n"
 

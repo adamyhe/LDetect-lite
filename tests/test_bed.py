@@ -80,6 +80,27 @@ def test_write_bed_single_locus(tmp_path):
     assert int(fields_2[2]) == 801
 
 
+def test_write_bed_drops_endpoint_loci(tmp_path):
+    out = tmp_path / "out.bed"
+    write_bed("chr7", [100, 300, 801], snp_first=100, snp_last=800, output=out)
+
+    assert out.read_text().splitlines() == [
+        "#chr\tstart\tstop",
+        "chr7\t100\t300",
+        "chr7\t300\t801",
+    ]
+
+
+def test_write_bed_allows_no_internal_loci(tmp_path):
+    out = tmp_path / "out.bed"
+    write_bed("chr7", [100], snp_first=100, snp_last=800, output=out)
+
+    assert out.read_text().splitlines() == [
+        "#chr\tstart\tstop",
+        "chr7\t100\t801",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # stdout output
 # ---------------------------------------------------------------------------
