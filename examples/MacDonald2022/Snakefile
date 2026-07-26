@@ -204,7 +204,7 @@ def ldetect_run_params_for(block_set):
         "all_breakpoint_subsets": True,
         "cov_cutoff": config["cov_cutoff"],
         "filter_convolution": "scipy_ndimage_convolve1d",
-        "filter_window": config.get("filter_window", "symmetric"),
+        "filter_window": config.get("filter_window", "scipy-periodic"),
         "filter_workers": config.get("filter_workers", 1),
         "ld_kernel": config.get("ld_kernel", "bitpacked"),
         "matrix_backend": config.get("matrix_backend", "array"),
@@ -730,7 +730,7 @@ rule run_ldetect:
         n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
         matrix_backend=config.get("matrix_backend", "array"),
         ld_kernel=config.get("ld_kernel", "bitpacked"),
-        filter_window=config.get("filter_window", "symmetric"),
+        filter_window=config.get("filter_window", "scipy-periodic"),
         filter_workers=config.get("filter_workers", 1),
     shell:
         """

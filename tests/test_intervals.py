@@ -24,6 +24,14 @@ def test_boundary_jaccard_uses_tolerance():
     assert boundary_jaccard([100, 200, 300], [105, 300], 10) == 2 / 3
 
 
+def test_boundary_jaccard_deduplicates_boundaries():
+    assert boundary_jaccard([100, 100, 200], [100, 200], 0) == 1.0
+
+
+def test_boundary_jaccard_uses_one_to_one_tolerance_matches():
+    assert boundary_jaccard([100, 101], [100], 5) == 0.5
+
+
 def test_merge_intervals_merges_overlaps_and_touching_edges():
     assert merge_intervals([(10, 20), (20, 30), (40, 45), (42, 50)]) == [
         (10, 30),

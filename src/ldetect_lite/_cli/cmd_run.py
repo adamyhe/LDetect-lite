@@ -205,13 +205,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     p.add_argument(
         "--filter-window",
         choices=("symmetric", "scipy-periodic"),
-        default="symmetric",
+        default="scipy-periodic",
         help=(
             "Hanning window mode for breakpoint filtering. 'symmetric' uses "
-            "np.hanning and is the ldetect-lite default; 'scipy-periodic' "
-            "matches original ldetect's scipy.signal.get_window(..., "
-            "fftbins=True) behavior for replication diagnostics "
-            "(default: symmetric)."
+            "np.hanning; 'scipy-periodic' matches original ldetect's "
+            "scipy.signal.get_window(..., fftbins=True) behavior "
+            "(default: scipy-periodic)."
         ),
     )
     p.add_argument(

@@ -79,7 +79,7 @@ def find_breakpoints(
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
     subsets: set[str] | None = None,
-    filter_window: str = "symmetric",
+    filter_window: str = "scipy-periodic",
     filter_workers: int = 1,
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
@@ -120,9 +120,9 @@ def find_breakpoints(
             for normal float metrics.
         subsets: Optional breakpoint subsets to compute and write.  ``None``
             preserves the historical behavior and writes all four subsets.
-        filter_window: Hanning window compatibility mode. ``"symmetric"`` uses
-            ``np.hanning``; ``"scipy-periodic"`` matches original ldetect's
-            ``scipy.signal.get_window(..., fftbins=True)`` behavior.
+        filter_window: Hanning window compatibility mode. ``"scipy-periodic"``
+            matches original ldetect's ``scipy.signal.get_window(...,
+            fftbins=True)`` behavior; ``"symmetric"`` uses ``np.hanning``.
         filter_workers: Numba threads for each individual filter convolution.
             When greater than 1, candidate-width trackback threading is disabled
             to avoid nested parallelism.

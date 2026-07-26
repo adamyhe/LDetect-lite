@@ -159,7 +159,7 @@ matrix_backend: array
 ld_kernel: uint8
 # Original ldetect uses scipy.signal.get_window(..., fftbins=True) for its
 # Hanning filter. Keep MacDonald replication diagnostics on that legacy-periodic
-# window; the package default remains the symmetric np.hanning window.
+# window, which is also the ldetect-lite CLI default.
 filter_window: scipy-periodic
 # Opt-in Numba threads for each individual filter convolution in Step 4.
 # Keep at 1 for the baseline replication run; try larger values to benchmark

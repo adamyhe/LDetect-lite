@@ -167,19 +167,19 @@ class FilterResult(TypedDict):
     filtered_minima_vals: list[float]
 
 
-def _filter_window(width: int, mode: str = "symmetric") -> np.ndarray:
+def _filter_window(width: int, mode: str = "scipy-periodic") -> np.ndarray:
     n = 2 * width + 1
     if mode == "symmetric":
         return np.hanning(n)
     if mode == "scipy-periodic":
-        return np.hanning(n + 1)[:-1]
+        return sig.get_window("hann", n)
     raise ValueError(f"Unknown filter window mode: {mode}")
 
 
 def apply_filter(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "symmetric",
+    window_mode: str = "scipy-periodic",
     filter_workers: int = 1,
 ) -> FilterResult:
     """Apply a Hanning-window low-pass filter and find local minima.
@@ -229,7 +229,7 @@ def apply_filter(
 def apply_filter_get_minima(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "symmetric",
+    window_mode: str = "scipy-periodic",
     filter_workers: int = 1,
 ) -> int:
     """Return the number of local minima for a given filter width."""
@@ -243,7 +243,7 @@ def apply_filter_get_minima(
 def apply_filter_get_minima_ind(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "symmetric",
+    window_mode: str = "scipy-periodic",
     filter_workers: int = 1,
 ) -> np.ndarray:
     """Return the indices of local minima for a given filter width."""
@@ -270,7 +270,7 @@ def apply_filters(
     first: int,
     last: int,
     step: int,
-    window_mode: str = "symmetric",
+    window_mode: str = "scipy-periodic",
     filter_workers: int = 1,
 ) -> list[FilterResult]:
     """Apply filters at a range of widths and return all results."""

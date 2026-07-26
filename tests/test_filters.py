@@ -69,9 +69,22 @@ def test_scipy_periodic_filter_window_matches_get_window_default():
     )
 
 
-def test_default_filter_window_is_symmetric_hanning():
+def test_default_filter_window_is_scipy_periodic():
     width = 7
-    np.testing.assert_array_equal(_filter_window(width), np.hanning(2 * width + 1))
+    np.testing.assert_allclose(
+        _filter_window(width),
+        sig.get_window("hann", 2 * width + 1),
+        atol=1e-15,
+        rtol=1e-15,
+    )
+
+
+def test_symmetric_filter_window_is_np_hanning():
+    width = 7
+    np.testing.assert_array_equal(
+        _filter_window(width, "symmetric"),
+        np.hanning(2 * width + 1),
+    )
 
 
 def test_apply_filter_filtered_length():
@@ -216,7 +229,11 @@ def test_minima_exact_match_scipy_on_flat_plateau_fixtures(width):
     """The exact fixtures that exposed the FFT bug: numba and scipy must
     agree exactly on minima indices, not just approximately."""
     for arr in (_ARR, _ARR2):
-        numba_minima = apply_filter_get_minima_ind(arr, width)
+        numba_minima = apply_filter_get_minima_ind(
+            arr,
+            width,
+            window_mode="symmetric",
+        )
         window = np.hanning(2 * width + 1)
         kernel = window / window.sum()
         scipy_smoothed = ndimage.convolve1d(arr, kernel)
@@ -231,7 +248,7 @@ def test_minima_exact_match_scipy_on_random_vectors():
         arr = np.abs(rng.normal(size=n)).cumsum() * rng.uniform(0.01, 1.0)
         width = int(rng.integers(50, min(9000, n // 2)))
         numba_minima = apply_filter_get_minima_ind(arr, width)
-        window = np.hanning(2 * width + 1)
+        window = sig.get_window("hann", 2 * width + 1)
         kernel = window / window.sum()
         scipy_smoothed = ndimage.convolve1d(arr, kernel)
         scipy_minima = sig.argrelextrema(scipy_smoothed, np.less)[0]
@@ -302,7 +319,7 @@ def test_apply_filter_falls_back_to_scipy_when_numba_unavailable(monkeypatch):
     monkeypatch.setattr(filters_mod, "_HAVE_NUMBA", False)
 
     width = 5
-    window = np.hanning(2 * width + 1)
+    window = sig.get_window("hann", 2 * width + 1)
     kernel = window / window.sum()
     expected = ndimage.convolve1d(_ARR, kernel)
 

@@ -41,6 +41,14 @@ def test_metric_workers_override_takes_precedence() -> None:
     assert _resolve_workers(args.metric_workers, args.workers) == 1
 
 
+def test_filter_window_defaults_to_scipy_periodic_and_accepts_symmetric() -> None:
+    assert _parse_find_minima_args([]).filter_window == "scipy-periodic"
+    assert (
+        _parse_find_minima_args(["--filter-window", "symmetric"]).filter_window
+        == "symmetric"
+    )
+
+
 def test_filter_workers_defaults_to_one_and_accepts_override() -> None:
     assert _parse_find_minima_args([]).filter_workers == 1
     assert _parse_find_minima_args(["--filter-workers", "4"]).filter_workers == 4

@@ -114,9 +114,23 @@ Do not pick this up until after the MacDonald2022 pipeline is stable: it touches
 
 Key correctness checks when this is implemented: exact `found_width`, exact minima loci, exact BED output on the chr21 deCODE replication diagnostic, and no increase in active thread count during trackback beyond the intended outer candidate pool.
 
+## Follow-up: deprecate and eventually remove symmetric Hann mode
+
+Date: 2026-07-26
+
+The MacDonald2022 chr21 deCODE exact-match diagnostic confirmed that original ldetect's Step 4 behavior uses SciPy's periodic Hann window (`scipy.signal.get_window("hann", n)`, equivalent to `fftbins=True`), not NumPy's symmetric `np.hanning(n)` window. ldetect-lite now defaults to `scipy-periodic` across the CLI, `find_breakpoints()`, and filter helper APIs.
+
+Keep `--filter-window symmetric` only as a temporary compatibility/diagnostic knob while we finish validating downstream reproduction workflows. It should not be treated as a peer "correct" mode long term. Once the MacDonald2022 and ldetect_original reruns are stable under the periodic default, plan a deprecation/removal pass:
+
+- remove `symmetric` from CLI choices and public filter helper modes;
+- simplify tests that only exist to preserve symmetric-vs-periodic branching;
+- update docs to describe the single Hann behavior as original-ldetect-compatible;
+- keep historical notes explaining why older outputs using `np.hanning` may differ.
+
 ## Still open (current)
 
 - Real-cluster wall-clock re-validation of the numba kernel specifically (thread-parallelization was already re-validated on the cluster above; the numba speedup is only measured locally so far).
 - A fresh chr21 profiling run + breakpoints/BED byte-exactness diff against the pre-numba saved outputs (`plots/EUR_LD_blocks.bed`, `EUR_raw_LD_blocks.bed`) before considering this fully production-validated.
 - The binary-search phase itself remains unparallelized (adaptive, shared utility) — now benefits from the numba per-call speedup even though it isn't itself parallelized.
 - Split-phase `numba.prange` within-call multicore (on top of the per-call speedup already shipped) — deferred until after the MacDonald2022 pipeline is stable. The promising design is `prange` for exponential/binary search and candidate-width threading for `_trackback`, avoiding nested parallelism by forcing trackback's per-candidate convolution to one numba thread.
+- Deprecate and eventually remove the temporary `symmetric` Hann-window mode after MacDonald2022 and ldetect_original reruns are stable under the original-ldetect-compatible periodic default.
