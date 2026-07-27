@@ -356,14 +356,28 @@ def _genetic_stop_bounds_impl(
     n_ind: float,
     cutoff: float,
 ) -> np.ndarray:
-    """Find the exclusive right bound for each SNP after genetic-distance pruning."""
+    """Find the exclusive right bound for each SNP after genetic-distance pruning.
+
+    Compares in exponent units rather than converting the cutoff into a
+    genetic-distance threshold. ``exp(-4*ne*df/(2*n_ind)) < cutoff`` is
+    algebraically equivalent to ``-4*ne*df/(2*n_ind) < log(cutoff)``, but
+    converting to a distance threshold (``-log(cutoff) / decay_scale``)
+    divides the single rounding error in ``log(cutoff)`` by ``decay_scale``,
+    which can amplify it well past 1 ULP for realistic ``ne``/``n_ind``
+    values -- shifting the pair-inclusion decision for genuinely borderline
+    pairs relative to the original per-pair `exp()` comparison this
+    replaces. Comparing the exponent argument directly against
+    ``log(cutoff)`` needs only the one unavoidable transcendental call
+    (`log`, computed once) with no division to amplify its error, and
+    computes the exponent argument with the exact same expression/operator
+    order as the original `exp()` call, matching its rounding exactly.
+    """
     n_snps = gpos_arr.shape[0]
     stops = np.empty(n_snps, dtype=np.int32)
     if cutoff <= 0.0:
         stops.fill(n_snps)
         return stops
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
-    max_gdist = -math.log(cutoff) / decay_scale
+    log_cutoff = math.log(cutoff)
     stop = 0
     for i in range(n_snps):
         if stop < i:
@@ -371,7 +385,8 @@ def _genetic_stop_bounds_impl(
         gpos1 = gpos_arr[i]
         while stop < n_snps:
             df = gpos_arr[stop] - gpos1
-            if df > max_gdist:
+            exponent = -4.0 * ne * df / (2.0 * n_ind)
+            if exponent < log_cutoff:
                 break
             stop += 1
         stops[i] = stop

@@ -276,6 +276,11 @@ rule run_ldetect:
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
+        filter_window=config.get("filter_window", "scipy-periodic"),
+        ld_kernel=config.get("ld_kernel", "bitpacked"),
+        force_covariance_flag=(
+            "--force-covariance" if config.get("force_covariance", False) else ""
+        ),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -294,9 +299,12 @@ rule run_ldetect:
             --ne {params.ne} \
             --cov-cutoff {params.cutoff} \
             --covariance-cache {params.covariance_cache} \
+            --ld-kernel {params.ld_kernel} \
+            {params.force_covariance_flag} \
             --n-snps-bw-bpoints {params.n_snps} \
             --subset {params.subset} \
             --workers {params.workers} \
+            --filter-window {params.filter_window} \
             >{log.run} 2>&1
         """
 
