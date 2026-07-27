@@ -2,7 +2,7 @@
 
 `ldetect run` (see `README.md`) chains all five stages below end-to-end and is the recommended way to run the pipeline. This doc covers running each stage individually — useful for debugging, restarting a partial run, or inspecting intermediate outputs.
 
-Several of these stages accept their own `--workers`/`--metric-workers`. The CLI manages native BLAS/OpenMP/NumExpr/Numba thread caps before importing numpy/scipy/numba-backed modules, so those worker flags remain the user-facing controls for parallelism. Process-parallel stages pin BLAS/OpenMP-style pools to one thread; Numba's ceiling follows the worker budget so phase-specific `prange` sections can opt into that budget without user-managed environment variables.
+Several of these stages accept their own `--workers`/`--metric-workers`. The CLI manages native BLAS/OpenMP/NumExpr/Numba thread caps before importing numpy/scipy/numba-backed modules, so those worker flags remain the user-facing controls for parallelism. Process-parallel stages pin BLAS/OpenMP-style pools to one thread; `find-minima`'s adaptive filter-width search uses `--filter-workers` for its own within-call threading (a row-chunked `ThreadPoolExecutor`, not Numba `prange` — see `docs/optimizations.md` #15).
 
 The pipeline has five stages that can be run individually:
 

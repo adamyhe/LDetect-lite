@@ -164,10 +164,18 @@ Narrowed the vectorization gap further with a minimal isolated benchmark compari
 
 See `docs/optimizations.md` #15 and `notes/findings/multicore-utilization.md` for the distilled summary.
 
+## Follow-up: full-pipeline reproduction, and a stale-plot false alarm
+
+Date: 2026-07-26
+
+Re-ran the standard profiling command (`scripts/profile_run.py` wrapping plain `ldetect run --workers 4`, the exact command documented in this example's README) twice more on the fixed code, independently of the isolated `--workers 1` A/B above. Both reproduced the fix cleanly: `filter_width_search` 4s (exponential 0s / binary 1s / trackback 3s), total run 58s, versus the original pre-fix baseline's 7s phase / 61s total. Every phase this change doesn't touch — covariance calc, matrix-to-vector, local search — matched the pre-fix baseline to the second (local search specifically: 9.880s and 9.945s across the two new runs vs. 9.950s originally), confirming the improvement is cleanly isolated to the targeted phase and not confounded by run-to-run cluster noise.
+
+One of these re-runs' checked-in `EUR-chr21-timeline.png`/`.pdf` (`examples/ldetect_original/profiling/`) showed an alarming ~3700%, one-sample CPU spike right at the Step 2 -> Step 3 boundary. Investigated before concluding anything: the `EUR-chr21.csv` the plot was supposedly generated from had a maximum of 401.8% across every sample (`awk -F, 'NR>1 && $3+0>1000'` on the file returned nothing), and regenerating the plot fresh from that exact CSV/log pair via `scripts/plot_profile_timeline.py` produced a clean render with no spike anywhere. The image on disk didn't match its own paired data file — a stale render left over from a different invocation, not a real oversubscription regression in the current code. (A genuine one-sample ~3700% spike was found, but in an unrelated file — `EUR-21-serial-v2.csv`, at elapsed=2s during process startup, not the ~30s mark shown in the stale plot, and from a run 3+ minutes long, not the ~65s span the stale plot's x-axis showed — ruling it out as the source too.) Regenerating and re-checking-in the plot from the correct pair resolved it. Worth remembering for future profiling sessions: always spot-check a plot's own backing CSV before trusting an alarming feature in the render, especially when files get shuffled between local and remote checkouts under reused filenames.
+
 ## Still open (current)
 
 - Real-cluster wall-clock re-validation of the numba kernel specifically (thread-parallelization was already re-validated on the cluster above; the numba speedup is only measured locally so far).
 - A fresh chr21 profiling run + breakpoints/BED byte-exactness diff against the pre-numba saved outputs (`plots/EUR_LD_blocks.bed`, `EUR_raw_LD_blocks.bed`) before considering this fully production-validated.
 - The binary-search phase itself remains unparallelized (adaptive, shared utility) — now benefits from the numba per-call speedup even though it isn't itself parallelized.
-- The row-chunked threaded convolution that replaced `prange` (see above) is validated on an isolated chr21 run and a standalone kernel microbenchmark, but not yet on the full 22-chromosome x 3-population replication.
+- The row-chunked threaded convolution that replaced `prange` (see above) is validated on isolated and full-pipeline chr21 runs (reproduced twice) and a standalone kernel microbenchmark, but not yet on the full 22-chromosome x 3-population replication (in progress as of this writing).
 - Deprecate and eventually remove the temporary `symmetric` Hann-window mode after MacDonald2022 and ldetect_original reruns are stable under the original-ldetect-compatible periodic default.
