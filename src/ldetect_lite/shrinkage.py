@@ -71,16 +71,28 @@ def _shrink_ld_values(
     nx1: float,
     gpos_i: float,
     gpos_j: float,
-    inv_n_total: float,
+    n_total: float,
     shrink_scale: float,
-    decay_scale: float,
+    ne: float,
+    n_ind: float,
 ) -> tuple[float, float]:
-    """Return naive and Wen/Stephens-shrunk covariance for one SNP pair."""
-    f11 = n11 * inv_n_total
-    f1 = n1x * inv_n_total
-    f2 = nx1 * inv_n_total
+    """Return naive and Wen/Stephens-shrunk covariance for one SNP pair.
+
+    Divides by ``n_total`` and computes the exponent argument as
+    ``-4.0 * ne * df / (2.0 * n_ind)`` (rather than hoisting a precomputed
+    reciprocal/decay-scale constant and multiplying) to match the original
+    per-pair rounding exactly -- multiplying by a precomputed reciprocal, or
+    dividing before multiplying by ``df``, is not bit-identical to this
+    expression order and was shown to perturb ~40-65% of pairs by ~1-3 ULP,
+    which is enough to occasionally flip a close-call minimum downstream.
+    """
+    f11 = n11 / n_total
+    f1 = n1x / n_total
+    f2 = nx1 / n_total
     d_naive = f11 - f1 * f2
-    ds2 = shrink_scale * d_naive * math.exp(-decay_scale * (gpos_j - gpos_i))
+    df = gpos_j - gpos_i
+    ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+    ds2 = shrink_scale * d_naive * ee
     return d_naive, ds2
 
 
@@ -132,9 +144,8 @@ def _count_pairwise_ld_impl(
     """Count emitted uint8-backend pairs before materializing full output arrays."""
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
 
     cnt = 0
     for i in range(n_snps):
@@ -152,9 +163,10 @@ def _count_pairwise_ld_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -191,9 +203,8 @@ def _pairwise_ld_impl(
     """
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
     n_pairs = _count_pairwise_ld_impl(
         hap_mat, gpos_arr, hap_sums, j_stop_by_i, ne, n_ind, theta, cutoff
@@ -220,9 +231,10 @@ def _pairwise_ld_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -254,9 +266,8 @@ def _count_pairwise_ld_by_i_impl(
     """Count compact covariance rows owned by each left-hand SNP index."""
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     counts = np.zeros(n_snps, dtype=np.int64)
 
     for i in range(n_snps):
@@ -275,9 +286,10 @@ def _count_pairwise_ld_by_i_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -305,9 +317,8 @@ def _pairwise_ld_compact_range_impl(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Materialize compact uint8-backend pairs for a contiguous i-index range."""
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(n_pairs, dtype=np.int32)
@@ -330,9 +341,10 @@ def _pairwise_ld_compact_range_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -409,10 +421,9 @@ def _pairwise_ld_compact_chunk_impl(
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
     """Generate one bounded compact-output chunk with the uint8 backend."""
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     n_snps = hap_mat.shape[0]
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(capacity, dtype=np.int32)
@@ -436,9 +447,10 @@ def _pairwise_ld_compact_chunk_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -475,11 +487,10 @@ def _pairwise_ld_compact_chunk_bitpacked_impl(
     capacity: int,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
     """Generate one bounded compact-output chunk with packed haplotypes."""
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     n_snps = packed_hap_mat.shape[0]
     n_words = packed_hap_mat.shape[1]
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(capacity, dtype=np.int32)
@@ -509,9 +520,10 @@ def _pairwise_ld_compact_chunk_bitpacked_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:

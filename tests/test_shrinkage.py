@@ -22,6 +22,7 @@ from ldetect_lite.shrinkage import (
     _genetic_stop_bounds_impl,
     _pack_haplotypes_impl,
     _popcount64,
+    _shrink_ld_values,
     calc_covariance,
     partition_chromosome,
 )
@@ -864,6 +865,50 @@ def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
                 expected[i] += 1
 
     np.testing.assert_array_equal(counts, expected)
+
+
+def test_shrink_ld_values_matches_naive_per_pair_formula_bit_exactly() -> None:
+    """Guards against reintroducing precomputed-reciprocal/decay-scale hoisting.
+
+    Precomputing ``1.0 / n_total`` (multiplying by the reciprocal instead of
+    dividing) or ``(4.0 * ne) / (2.0 * n_ind)`` (dividing before multiplying
+    by ``df`` instead of after) is algebraically equivalent but not
+    bit-identical. 2fa1705 made exactly this change and it silently
+    perturbed ~40-65% of covariance pairs by 1-3 ULP -- enough to flip
+    discrete minima downstream and regress LDetect block reproduction. This
+    checks the kernel against the original division/inline-exponent
+    expression order across realistic haplotype counts and genetic
+    distances.
+    """
+    ne = 11418.0
+    n_ind = 1006.0
+    n_total = 2.0 * n_ind
+    theta = 0.001
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+
+    rng = np.random.default_rng(0)
+    mismatches = 0
+    for _ in range(20_000):
+        n11 = float(rng.integers(0, int(n_total) + 1))
+        n1x = float(rng.integers(0, int(n_total) + 1))
+        nx1 = float(rng.integers(0, int(n_total) + 1))
+        df = float(rng.uniform(0.0, 0.05))
+        gpos_i, gpos_j = 0.0, df
+
+        f11 = n11 / n_total
+        f1 = n1x / n_total
+        f2 = nx1 / n_total
+        d_naive_expected = f11 - f1 * f2
+        ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+        ds2_expected = (1.0 - theta) ** 2 * d_naive_expected * ee
+
+        d_naive, ds2 = _shrink_ld_values(
+            n11, n1x, nx1, gpos_i, gpos_j, n_total, shrink_scale, ne, n_ind
+        )
+        if d_naive != d_naive_expected or ds2 != ds2_expected:
+            mismatches += 1
+
+    assert mismatches == 0
 
 
 def test_pack_haplotypes_word_boundaries() -> None:
