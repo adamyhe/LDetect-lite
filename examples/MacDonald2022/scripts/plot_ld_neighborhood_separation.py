@@ -11,16 +11,22 @@ pairwise LD (r^2) from three local neighborhoods:
 The resulting box/whisker plot is an orthogonal benchmark to exact boundary
 matching: useful boundaries should tend to make the across-boundary LD
 distribution lower than the within-neighborhood distributions.
+
+Unlike `ldetect run --generate-ld-neighborhood-plot` (which only ever
+samples around a run's own just-computed breakpoints), this script also
+supports sampling around an arbitrary reference BED's boundaries -- used by
+this example's "published" comparison rules to check LD separation quality
+at the published ldetect blocks, not just our own. It also writes a
+per-boundary summary TSV, consumed by `plot_ld_neighborhood_genomewide.py`
+to build a cross-chromosome comparison.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import os
 import random
 import statistics
-from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -28,13 +34,16 @@ import numpy as np
 from ldetect_lite.io.bed import Block, read_genome_bed
 from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
 from ldetect_lite.io.partitions import CovarianceStore, read_partitions
-
-CATEGORY_ORDER = ("left", "across", "right")
-COLORS = {
-    "left": "#4c78a8",
-    "across": "#e45756",
-    "right": "#54a24b",
-}
+from ldetect_lite.ld_neighborhood import (
+    CATEGORY_ORDER,
+    SeparationSamples,
+    category_masks,
+    owned_bounds,
+    r2_for_pairs,
+    read_diagonal_index,
+    reservoir_extend,
+    write_separation_boxplot,
+)
 
 
 def internal_boundaries(blocks: list[Block]) -> list[int]:
@@ -61,93 +70,6 @@ def resolve_chrom_blocks(
     )
 
 
-def read_diagonal_index(
-    name: str,
-    store: CovarianceStore,
-    partitions: list[tuple[int, int]],
-) -> tuple[np.ndarray, np.ndarray]:
-    pos_chunks: list[np.ndarray] = []
-    val_chunks: list[np.ndarray] = []
-    for start, end in partitions:
-        path = store.partition_path(name, start, end)
-        with open_covariance_reader(path, start, end) as reader:
-            pos, val = reader.read_diagonal()
-        if pos.size:
-            pos_chunks.append(pos.astype(np.int64, copy=False))
-            val_chunks.append(val.astype(np.float64, copy=False))
-
-    if not pos_chunks:
-        return np.array([], dtype=np.int64), np.array([], dtype=np.float64)
-
-    pos = np.concatenate(pos_chunks)
-    val = np.concatenate(val_chunks)
-    order = np.argsort(pos, kind="stable")
-    pos = pos[order]
-    val = val[order]
-    unique_pos, unique_idx = np.unique(pos, return_index=True)
-    return unique_pos, val[unique_idx]
-
-
-def r2_for_pairs(
-    lo: np.ndarray,
-    hi: np.ndarray,
-    shrink_ld: np.ndarray,
-    diag_pos: np.ndarray,
-    diag_val: np.ndarray,
-) -> np.ndarray:
-    if lo.size == 0 or diag_pos.size == 0:
-        return np.array([], dtype=np.float64)
-
-    lo_idx = np.searchsorted(diag_pos, lo)
-    hi_idx = np.searchsorted(diag_pos, hi)
-    has_diag = (lo_idx < diag_pos.size) & (hi_idx < diag_pos.size)
-    safe_lo_idx = np.minimum(lo_idx, diag_pos.size - 1)
-    safe_hi_idx = np.minimum(hi_idx, diag_pos.size - 1)
-    has_diag &= (diag_pos[safe_lo_idx] == lo) & (diag_pos[safe_hi_idx] == hi)
-    if not np.any(has_diag):
-        return np.array([], dtype=np.float64)
-
-    lo_idx = lo_idx[has_diag]
-    hi_idx = hi_idx[has_diag]
-    shrink = shrink_ld[has_diag]
-    denom = diag_val[lo_idx] * diag_val[hi_idx]
-    positive = denom > 0.0
-    if not np.any(positive):
-        return np.array([], dtype=np.float64)
-
-    values = shrink[positive] * shrink[positive] / denom[positive]
-    return values[np.isfinite(values)]
-
-
-def owned_bounds(
-    partitions: list[tuple[int, int]],
-    p_index: int,
-    snp_first: int,
-    snp_last: int,
-) -> tuple[int, int, bool]:
-    start = partitions[p_index][0]
-    lower_min = snp_first if p_index == 0 else start
-    lower_max = (
-        partitions[p_index + 1][0] if p_index + 1 < len(partitions) else snp_last
-    )
-    return lower_min, lower_max, p_index == 0
-
-
-def category_masks(
-    lo: np.ndarray,
-    hi: np.ndarray,
-    boundary: int,
-    left: int,
-    right: int,
-) -> dict[str, np.ndarray]:
-    in_window = (lo >= left) & (hi <= right) & (lo < hi)
-    return {
-        "left": in_window & (hi < boundary),
-        "across": in_window & (lo < boundary) & (hi >= boundary),
-        "right": in_window & (lo >= boundary),
-    }
-
-
 def summarize(values: list[float]) -> dict[str, object]:
     if not values:
         return {
@@ -169,25 +91,6 @@ def summarize(values: list[float]) -> dict[str, object]:
     }
 
 
-def reservoir_extend(
-    sample: list[float],
-    values: Iterable[float],
-    *,
-    seen: int,
-    limit: int,
-    rng: random.Random,
-) -> int:
-    for value in values:
-        seen += 1
-        if len(sample) < limit:
-            sample.append(float(value))
-            continue
-        replacement = rng.randrange(seen)
-        if replacement < limit:
-            sample[replacement] = float(value)
-    return seen
-
-
 def boundary_rows_and_samples(
     *,
     chrom: str,
@@ -198,14 +101,14 @@ def boundary_rows_and_samples(
     sample_limit: int,
     seed: int,
     chunk_rows: int,
-) -> tuple[list[dict[str, object]], dict[str, list[float]]]:
+) -> tuple[list[dict[str, object]], SeparationSamples]:
     partitions = read_partitions(name, store)
     diag_pos, diag_val = read_diagonal_index(name, store, partitions)
     if diag_pos.size == 0:
         raise RuntimeError(f"No diagonal rows found for {name} in {store.root}")
 
     rows: list[dict[str, object]] = []
-    samples: dict[str, list[float]] = {category: [] for category in CATEGORY_ORDER}
+    samples: SeparationSamples = {category: [] for category in CATEGORY_ORDER}
     seen = {category: 0 for category in CATEGORY_ORDER}
     rng = random.Random(seed)
 
@@ -297,87 +200,6 @@ def write_summary(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
-def configure_matplotlib_cache(path: Path) -> None:
-    cache_root = path.parent / ".matplotlib"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(cache_root))
-    os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
-
-
-def write_boxplot(
-    path: Path,
-    samples: dict[str, list[float]],
-    *,
-    title: str,
-    window_bp: int,
-) -> None:
-    configure_matplotlib_cache(path)
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    labels = ["left", "across", "right"]
-    data = [samples[category] for category in CATEGORY_ORDER]
-    positions = [1.0, 1.26, 1.52]
-    fig, ax = plt.subplots(figsize=(2.25, 1.9))
-    box = ax.boxplot(
-        data,
-        positions=positions,
-        tick_labels=labels,
-        patch_artist=True,
-        showfliers=False,
-        widths=0.15,
-        medianprops={"color": "black", "linewidth": 1.1},
-        whiskerprops={"color": "0.35", "linewidth": 0.8},
-        capprops={"color": "0.35", "linewidth": 0.8},
-    )
-    for patch, category in zip(box["boxes"], CATEGORY_ORDER, strict=True):
-        patch.set_facecolor(COLORS[category])
-        patch.set_alpha(0.65)
-        patch.set_edgecolor("0.25")
-
-    ax.set_title(title, fontsize=8, pad=2)
-    ax.set_ylabel("$r^2$", labelpad=0)
-    ax.set_ylim(bottom=0.0)
-    ax.set_xlim(0.89, 1.63)
-    ax.grid(axis="y", color="0.9", linewidth=0.6)
-    ax.tick_params(axis="both", labelsize=7, pad=0)
-    fig.subplots_adjust(left=0.16, right=0.995, bottom=0.16, top=0.88)
-    fig.savefig(path, bbox_inches="tight", pad_inches=0.005)
-    plt.close(fig)
-
-
-def write_empty_plot(path: Path, *, title: str) -> None:
-    configure_matplotlib_cache(path)
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(2.25, 1.9))
-    ax.text(
-        0.5,
-        0.52,
-        "no internal\nboundaries",
-        ha="center",
-        va="center",
-        fontsize=8,
-        color="0.35",
-        transform=ax.transAxes,
-    )
-    ax.set_title(title, fontsize=8, pad=2)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_color("0.85")
-    fig.subplots_adjust(left=0.04, right=0.995, bottom=0.04, top=0.88)
-    fig.savefig(path, bbox_inches="tight", pad_inches=0.005)
-    plt.close(fig)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bed", required=True, type=Path)
@@ -401,13 +223,18 @@ def main() -> None:
     args = parser.parse_args()
 
     chrom, blocks = resolve_chrom_blocks(read_genome_bed(args.bed), args.chrom)
+    title = args.title
+    if not title:
+        block_set = args.covariance_root.parent.name
+        title = f"{block_set} {chrom}: LD neighborhood separation"
+
     if len(blocks) < 2:
         write_summary(args.output_tsv, [])
-        title = args.title
-        if not title:
-            block_set = args.covariance_root.parent.name
-            title = f"{block_set} {chrom}: LD neighborhood separation"
-        write_empty_plot(args.plot, title=title)
+        write_separation_boxplot(
+            args.plot,
+            {category: [] for category in CATEGORY_ORDER},
+            title=title,
+        )
         print(f"{args.bed} has fewer than two blocks for {chrom}; wrote empty plot")
         print(f"Wrote {args.output_tsv} and {args.plot}")
         return
@@ -423,12 +250,7 @@ def main() -> None:
         chunk_rows=args.chunk_rows,
     )
     write_summary(args.output_tsv, rows)
-
-    title = args.title
-    if not title:
-        block_set = args.covariance_root.parent.name
-        title = f"{block_set} {chrom}: LD neighborhood separation"
-    write_boxplot(args.plot, samples, title=title, window_bp=args.window_bp)
+    write_separation_boxplot(args.plot, samples, title=title)
 
     aggregate = {
         category: statistics.median(values) if values else float("nan")

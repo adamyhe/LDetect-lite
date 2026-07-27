@@ -17,6 +17,7 @@ run.
 
 from __future__ import annotations
 
+import os
 import random
 from collections.abc import Iterable
 from pathlib import Path
@@ -49,7 +50,7 @@ def category_masks(
     }
 
 
-def _read_diagonal_index(
+def read_diagonal_index(
     name: str, store: CovarianceStore, partitions: list[tuple[int, int]]
 ) -> tuple[np.ndarray, np.ndarray]:
     pos_chunks: list[np.ndarray] = []
@@ -74,7 +75,7 @@ def _read_diagonal_index(
     return unique_pos, val[unique_idx]
 
 
-def _r2_for_pairs(
+def r2_for_pairs(
     lo: np.ndarray,
     hi: np.ndarray,
     shrink_ld: np.ndarray,
@@ -105,7 +106,7 @@ def _r2_for_pairs(
     return np.asarray(values[np.isfinite(values)], dtype=np.float64)
 
 
-def _owned_bounds(
+def owned_bounds(
     partitions: list[tuple[int, int]],
     p_index: int,
     snp_first: int,
@@ -119,7 +120,7 @@ def _owned_bounds(
     return lower_min, lower_max, p_index == 0
 
 
-def _reservoir_extend(
+def reservoir_extend(
     sample: list[float],
     values: Iterable[float],
     *,
@@ -160,7 +161,7 @@ def chromosome_separation_samples(
         return samples
 
     partitions = read_partitions(name, store)
-    diag_pos, diag_val = _read_diagonal_index(name, store, partitions)
+    diag_pos, diag_val = read_diagonal_index(name, store, partitions)
     if diag_pos.size == 0:
         raise RuntimeError(f"No diagonal rows found for {name} in {store.root}")
 
@@ -174,7 +175,7 @@ def chromosome_separation_samples(
         for p_index, (start, end) in enumerate(partitions):
             if end < left or start > right:
                 continue
-            lower_min, lower_max, include_lower_min = _owned_bounds(
+            lower_min, lower_max, include_lower_min = owned_bounds(
                 partitions, p_index, left, right
             )
             if lower_min > right or lower_max < left:
@@ -193,7 +194,7 @@ def chromosome_separation_samples(
                     for category, mask in masks.items():
                         if not np.any(mask):
                             continue
-                        values = _r2_for_pairs(
+                        values = r2_for_pairs(
                             chunk.lo[mask],
                             chunk.hi[mask],
                             chunk.shrink_ld[mask],
@@ -201,7 +202,7 @@ def chromosome_separation_samples(
                             diag_val,
                         )
                         if values.size:
-                            seen[category] = _reservoir_extend(
+                            seen[category] = reservoir_extend(
                                 samples[category],
                                 values.tolist(),
                                 seen=seen[category],
@@ -209,6 +210,19 @@ def chromosome_separation_samples(
                                 rng=rng,
                             )
     return samples
+
+
+def _configure_matplotlib_cache(path: Path) -> None:
+    """Point matplotlib's font/config cache at a directory next to *path*.
+
+    Avoids matplotlib trying to write its cache to a shared or read-only
+    home directory, which can fail or warn noisily on cluster filesystems
+    (e.g. under Slurm-managed shared-node scheduling).
+    """
+    cache_root = path.parent / ".matplotlib"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(cache_root))
+    os.environ.setdefault("XDG_CACHE_HOME", str(cache_root))
 
 
 def write_separation_boxplot(
@@ -223,6 +237,7 @@ def write_separation_boxplot(
     should show lower "across" LD than "left"/"right" neighborhood LD. Lazily
     imports matplotlib so invocations that don't request this plot stay fast.
     """
+    _configure_matplotlib_cache(path)
     import matplotlib
 
     matplotlib.use("Agg")
