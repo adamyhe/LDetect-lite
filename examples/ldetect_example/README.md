@@ -56,7 +56,7 @@ To benchmark individual functions after the workflow has prepared `ref/` and
 `work/vcf/`, run:
 
 ```bash
-uv run --extra heatmap python scripts/benchmark_functions.py --warmups 1 --repeats 5
+uv run python scripts/benchmark_functions.py --warmups 1 --repeats 5
 ```
 
 The benchmark calls the Python APIs directly to avoid command-launch overhead
@@ -69,7 +69,7 @@ To benchmark average downstream-stage CLI runtimes against the vendored
 original LDetect scripts, run:
 
 ```bash
-uv run --extra heatmap python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
+uv run python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
 ```
 
 This writes `results/legacy_pipeline_benchmark/timings.tsv`, `summary.tsv`,
@@ -80,7 +80,7 @@ To benchmark covariance generation as a command-level comparison against the
 original LDetect script, run:
 
 ```bash
-uv run --extra heatmap python scripts/benchmark_legacy_covariance.py --warmups 1 --repeats 2
+uv run python scripts/benchmark_legacy_covariance.py --warmups 1 --repeats 2
 ```
 
 This streams the prepared VCF into the vendored original

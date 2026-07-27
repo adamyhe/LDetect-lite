@@ -24,8 +24,6 @@ This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, a
 
 The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the VCF/BCFs must be indexed before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
-**Optional** (`--generate-heatmap`): install matplotlib with `pip install "ldetect-lite[heatmap]"`/`uv tool install ldetect-lite[heatmap]`. Generating covariance heatmaps requires a matplotlib install.
-
 ### Development
 
 Install from source
@@ -75,6 +73,8 @@ Options:
 - `--high-precision` — use 50-digit Decimal arithmetic for local search instead of the default float path (slower; mainly useful for exact reference comparisons)
 - `--filter-window {scipy-periodic,symmetric}` — Hanning window mode for breakpoint filtering (default: `scipy-periodic`). `scipy-periodic` matches modern SciPy's periodic Hann window (`scipy.signal.get_window(..., fftbins=True)`) and is correct for new analyses. `symmetric` uses `np.hanning` — not a legacy fallback, but the setting needed to reproduce published reference blocks generated under scipy <1.1 (e.g. Berisa & Pickrell's original 2015 analysis), where a scipy defect made periodic odd-length windows bit-identical to symmetric ones until it was fixed in scipy 1.1.0 (2018). See `notes/findings/ldetect-original-reproduction.md` for the full root-cause writeup.
 - `--filter-workers N` — minimum Numba threads for adaptive single-filter convolutions during the Step 4 filter-width search (default: 1)
+- `--generate-ld-neighborhood-plot` — write a left/across/right LD-separation box plot alongside the BED output: r² distributions sampled from the covariance cache around every computed breakpoint, comparing LD within each neighboring window against pairs that cross it. A useful set of breakpoints should show lower "across" LD than "left"/"right" neighborhood LD. Self-contained sanity check — needs no reference BED. Written to `{output-dir}/{chromosome}-ld-neighborhood.svg`.
+- `--ld-neighborhood-window-bp BP` — window size on each side of a breakpoint sampled for `--generate-ld-neighborhood-plot` (default: 500000)
 
 `ldetect` manages native BLAS/OpenMP/NumExpr/Numba thread caps at CLI startup, before importing numpy/scipy/numba-backed pipeline modules, so `--workers` controls process-level parallelism without multiplying into hidden native thread pools. The default process-parallel stages pin BLAS/OpenMP-style pools to one thread. Step 4's adaptive filter-width search gets its own within-call threading via `--filter-workers`, implemented as a row-chunked `ThreadPoolExecutor` rather than Numba `prange` (see `docs/optimizations.md` #15 for why).
 

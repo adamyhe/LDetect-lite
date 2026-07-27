@@ -878,22 +878,16 @@ dependencies = [
     { name = "cyvcf2" },
     { name = "h5py" },
     { name = "hdf5plugin" },
+    { name = "matplotlib" },
     { name = "numba" },
     { name = "numpy" },
     { name = "scipy" },
 ]
 
-[package.optional-dependencies]
-heatmap = [
-    { name = "matplotlib" },
-]
-profiling = [
-    { name = "psutil" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pyyaml" },
@@ -907,17 +901,16 @@ requires-dist = [
     { name = "cyvcf2", specifier = ">=0.31" },
     { name = "h5py", specifier = ">=3.10" },
     { name = "hdf5plugin", specifier = ">=4.4" },
-    { name = "matplotlib", marker = "extra == 'heatmap'", specifier = ">=3.7" },
+    { name = "matplotlib", specifier = ">=3.7" },
     { name = "numba", specifier = ">=0.57" },
     { name = "numpy", specifier = ">=1.24" },
-    { name = "psutil", marker = "extra == 'profiling'", specifier = ">=5.9" },
     { name = "scipy", specifier = ">=1.10" },
 ]
-provides-extras = ["heatmap", "profiling"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy" },
+    { name = "psutil", specifier = ">=5.9" },
     { name = "pytest", specifier = ">=7.0" },
     { name = "pytest-cov" },
     { name = "pyyaml", specifier = ">=6.0" },

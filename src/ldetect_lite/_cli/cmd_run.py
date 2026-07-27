@@ -249,6 +249,28 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "covariance backends or cache parameters."
         ),
     )
+    p.add_argument(
+        "--generate-ld-neighborhood-plot",
+        action="store_true",
+        help=(
+            "Write a left/across/right LD-separation box plot alongside the "
+            "BED output: r^2 distributions sampled around every computed "
+            "breakpoint, comparing LD within each neighboring window against "
+            "pairs that cross it. A useful set of breakpoints should show "
+            "lower 'across' LD than 'left'/'right' neighborhood LD. "
+            "Self-contained sanity check -- needs no reference BED."
+        ),
+    )
+    p.add_argument(
+        "--ld-neighborhood-window-bp",
+        type=int,
+        default=500_000,
+        metavar="BP",
+        help=(
+            "Window size (bp) on each side of a breakpoint sampled for "
+            "--generate-ld-neighborhood-plot (default: 500000)."
+        ),
+    )
     p.set_defaults(func=_run)
 
 
@@ -502,6 +524,27 @@ def _run(args: argparse.Namespace) -> int:
         snp_last=snp_last,
         output=bed_path,
     )
+
+    if args.generate_ld_neighborhood_plot:
+        from ldetect_lite.ld_neighborhood import (
+            chromosome_separation_samples,
+            write_separation_boxplot,
+        )
+
+        log_msg("Generating LD-neighborhood separation plot")
+        neighborhood_path = output_dir / f"{chrom}-ld-neighborhood.svg"
+        samples = chromosome_separation_samples(
+            boundaries=loci,
+            store=store,
+            name=chrom,
+            window_bp=args.ld_neighborhood_window_bp,
+        )
+        write_separation_boxplot(
+            neighborhood_path,
+            samples,
+            title=f"{chrom}: LD neighborhood separation",
+        )
+        log_msg(f"LD-neighborhood plot: {neighborhood_path}")
 
     if args.delete_covariance_cache:
         log_msg(f"Deleting covariance cache: {cov_dir}")

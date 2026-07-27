@@ -226,7 +226,7 @@ Finally summarize the full-chromosome benchmark and write the manuscript timing
 plot:
 
 ```bash
-uv run --extra heatmap python scripts/runtime_benchmark.py \
+uv run python scripts/runtime_benchmark.py \
   --population EUR \
   --chromosome 21 \
   --lite-time-log results/logs/EUR/21.timing.log \
@@ -247,7 +247,7 @@ If you already have a trusted legacy elapsed time from another runner, you can
 skip the manual `/usr/bin/time` command and pass seconds directly instead:
 
 ```bash
-uv run --extra heatmap python scripts/runtime_benchmark.py \
+uv run python scripts/runtime_benchmark.py \
   --population EUR \
   --chromosome 21 \
   --lite-time-log results/logs/EUR/21.timing.log \
@@ -505,7 +505,7 @@ uv run python scripts/plot_profile_timeline.py \
   --output results/profiling/EUR-chr21-timeline
 ```
 
-`profile_run.py` requires the `profiling` extra (`uv sync --extra profiling`,
+`profile_run.py` requires the `dev` dependency group (`uv sync --group dev`,
 for `psutil`) and polls the wrapped command's whole process tree -- covering
 every `ProcessPoolExecutor` worker and `tabix` subprocess it spawns, not just
 the top-level process -- so the trace reflects real peak usage across

@@ -289,7 +289,7 @@ rule compare_vector:
         mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
         export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
         export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
-        uv run --extra heatmap python scripts/compare_vector.py \
+        uv run python scripts/compare_vector.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output.tsv} \
@@ -311,7 +311,7 @@ rule compare_covariance:
         mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
         export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
         export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
-        uv run --extra heatmap python scripts/compare_covariance.py \
+        uv run python scripts/compare_covariance.py \
             --ours {input.ours} \
             --ref {input.ref} \
             --output {output.tsv} \
@@ -333,7 +333,7 @@ rule compare_bpoints:
         mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
         export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
         export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
-        uv run --extra heatmap python scripts/compare_bpoints.py \
+        uv run python scripts/compare_bpoints.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output.tsv} \
@@ -354,7 +354,7 @@ rule compare_bed:
         mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
         export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
         export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
-        uv run --extra heatmap python scripts/compare_bed.py \
+        uv run python scripts/compare_bed.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output.tsv} \
@@ -391,7 +391,7 @@ rule compare_generated_partitions:
         mkdir -p {RES_DIR} {PLOTS_DIR} {MPLCONFIG_DIR} {XDG_CACHE_DIR}
         export MPLCONFIGDIR="$PWD/{MPLCONFIG_DIR}"
         export XDG_CACHE_HOME="$PWD/{XDG_CACHE_DIR}"
-        uv run --extra heatmap python scripts/compare_partitions.py \
+        uv run python scripts/compare_partitions.py \
             --ours {input.ours} \
             --ref  {input.ref} \
             --output {output.tsv} \

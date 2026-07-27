@@ -1,7 +1,7 @@
 """Generate the compact pipeline overview schematic.
 
 Usage:
-    uv run --extra heatmap python schematics/plot_figure1_panels.py
+    uv run python schematics/plot_figure1_panels.py
 """
 
 from __future__ import annotations

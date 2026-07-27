@@ -5,7 +5,7 @@ five pipeline stages. They are intentionally data-free: the goal is to show
 what each command transforms, not to reproduce a particular chromosome run.
 
 Usage:
-    uv run --extra heatmap python schematics/plot_pipeline_schematics.py
+    uv run python schematics/plot_pipeline_schematics.py
 """
 
 from __future__ import annotations
