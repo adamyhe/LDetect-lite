@@ -93,7 +93,24 @@ def _shrink_ld_values(
     f2 = nx1 / n_total
     d_naive = f11 - f1 * f2
     df = gpos_j - gpos_i
-    ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+    exponent = -4.0 * ne * df / (2.0 * n_ind)
+    if exponent > 700.0:
+        # Only reachable via a corrupted, non-monotonic map (e.g. MacDonald
+        # et al.'s pyrho R interpolation bug -- see
+        # notes/findings/macdonald2022-reproduction.md) with a large enough
+        # backward jump. Below this threshold -- including the more common,
+        # milder non-monotonic-map cases where df is negative but the
+        # exponent stays finite -- math.exp() computes the same (equally
+        # distorted, but real) value legacy's own equivalent computation
+        # would, so it's used normally: legacy has no special case for
+        # "negative df", only for the point past which its own math.exp()
+        # call would raise OverflowError and crash outright, which is
+        # exactly the boundary checked here. Past it, there's no legacy
+        # value to match, so this is treated as no reliable decay
+        # information rather than letting math.exp() silently overflow to
+        # +inf and poison every downstream sum that includes this pair.
+        return d_naive, 0.0
+    ee = math.exp(exponent)
     ds2 = shrink_scale * d_naive * ee
     return d_naive, ds2
 
@@ -846,6 +863,17 @@ def partition_chromosome(
         while test < n_snp:
             test_gpos = pos2gpos[positions[test]]
             df = test_gpos - end_gpos
+            if df < 0.0:
+                # A negative genetic distance is only reachable with a
+                # corrupted, non-monotonic map -- see the matching guard
+                # and comment in _shrink_ld_values. math.exp() here is
+                # plain Python, not numba, so this would raise
+                # OverflowError and crash outright (matching legacy's own
+                # failure mode) rather than silently produce inf. Treat as
+                # inconclusive and keep extending rather than crash or
+                # guess.
+                test += 1
+                continue
             rho = math.exp(-4.0 * ne * df / (2.0 * n_individuals))
             if rho < cutoff:
                 break

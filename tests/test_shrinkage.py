@@ -953,6 +953,56 @@ def test_shrink_ld_values_matches_naive_per_pair_formula_bit_exactly() -> None:
     assert mismatches == 0
 
 
+def test_shrink_ld_values_negative_df_returns_zero_not_inf() -> None:
+    """A negative genetic distance is only reachable with a corrupted,
+    non-monotonic map (e.g. MacDonald et al.'s pyrho R interpolation bug).
+    The decay exponent can then exceed ~709 and overflow ``math.exp()`` to
+    ``+inf``, silently poisoning this pair and every downstream sum that
+    includes it. Guards against reintroducing that: ``ds2`` must be exactly
+    0.0 (matching "below cutoff, excluded" semantics), not inf or nan.
+    """
+    ne = 17469.0
+    n_ind = 513.0
+    n_total = 1026.0
+    shrink_scale = 1.0
+    # Same magnitude as the worst real backward jump measured on GWD chr9.
+    gpos_i = 58.14
+    gpos_j = 45.19
+
+    d_naive, ds2 = _shrink_ld_values(
+        400.0, 500.0, 500.0, gpos_i, gpos_j, n_total, shrink_scale, ne, n_ind
+    )
+    assert ds2 == 0.0
+    assert not math.isnan(d_naive)
+
+
+def test_shrink_ld_values_mild_negative_df_matches_legacy_not_zeroed() -> None:
+    """A negative ``df`` small enough that ``math.exp()`` wouldn't overflow
+    must be computed normally (matching legacy's own equally-distorted but
+    real value), not zeroed out. Legacy has no special case for "negative
+    df" -- only for the point past which its own ``math.exp()`` call would
+    overflow and crash. Zeroing out every negative-``df`` pair regardless of
+    magnitude would discard real signal legacy would have used for the more
+    common, milder non-monotonic-map cases, matching only the rare extreme
+    ones.
+    """
+    ne = 17469.0
+    n_ind = 513.0
+    n_total = 1026.0
+    shrink_scale = 1.0
+    gpos_i = 58.14
+    gpos_j = 58.10  # mild -0.04 cM backward jump, well under the overflow threshold
+
+    d_naive, ds2 = _shrink_ld_values(
+        400.0, 500.0, 500.0, gpos_i, gpos_j, n_total, shrink_scale, ne, n_ind
+    )
+    df = gpos_j - gpos_i
+    expected_ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+    expected_ds2 = shrink_scale * d_naive * expected_ee
+    assert ds2 == expected_ds2
+    assert ds2 != 0.0
+
+
 def test_pack_haplotypes_word_boundaries() -> None:
     hap_mat = np.zeros((3, 129), dtype=np.uint8)
     hap_mat[0, [0, 2, 3]] = 1
@@ -1113,3 +1163,37 @@ def test_partition_chromosome_clamps_uncut_window_to_last_snp(
         "100 700",
         "400 700",
     ]
+
+
+def test_partition_chromosome_survives_backward_jump_past_chunk_boundary(
+    tmp_path: Path,
+) -> None:
+    """A negative genetic distance inside the extension search must not
+    reach ``math.exp()`` -- large enough to overflow it (this is plain
+    Python, so it would raise ``OverflowError`` and crash, unlike the
+    numba-compiled covariance kernel which would silently return ``inf``).
+    Mirrors a real ~13 cM backward jump measured on MacDonald et al.'s
+    published GWD chr9 pyrho map -- see
+    notes/findings/macdonald2022-reproduction.md.
+    """
+    map_path = tmp_path / "nonmonotonic_map.gz"
+    positions = list(range(100, 100 + 20 * 100, 100))
+    gpos_map = {positions[i]: i * 3.0 for i in range(5)}
+    gpos_map[positions[4]] = 15.0
+    for i in range(5, len(positions)):
+        gpos_map[positions[i]] = 2.0 + (i - 5) * 0.01
+
+    with gzip.open(map_path, "wt") as f:
+        for pos in positions:
+            f.write(f"rs{pos} {pos} {gpos_map[pos]}\n")
+
+    output_path = tmp_path / "partitions.txt"
+    partition_chromosome(
+        genetic_map_path=map_path,
+        n_individuals=513,
+        output_path=output_path,
+        window_size=5,
+        ne=17469.0,
+        cutoff=1.5e-8,
+    )
+    assert output_path.exists()

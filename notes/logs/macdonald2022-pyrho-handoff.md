@@ -1235,3 +1235,99 @@ against MacDonald's published blocks with this fix (needs
 compute on the user's cluster per the standing "don't run large jobs
 locally" rule). See `notes/findings/macdonald2022-reproduction.md`, "Next
 steps", for the concrete follow-up.
+
+## Follow-up: "is this actually legacy behavior?" surfaces a second, more serious bug (2026-07-28)
+
+Directly challenged: is the `assume_monotonic=False` fresh-per-row scan
+really what legacy does, or an assumption? Re-verified from scratch rather
+than trusting the earlier read: fetched `P00_01_calc_covariance.py` directly
+from the Bitbucket repo's final commit (`a3060d0`) and diffed against the
+vendored copy — identical except whitespace (tabs vs. spaces from the
+Python2→3 conversion). The `j = i` fresh reset every outer row is confirmed,
+genuine, unmodified legacy behavior, not an inference.
+
+That check also surfaced something bigger. Legacy's per-pair loop computes
+`ee = math.exp(-4.0*NE*df/(2.0*len(inds)))` for the actual LD *value*, not
+just for the window-boundary decision Bug 1 (above) was about. Checked
+whether the real chr9 backward jumps could push this exponent past
+`math.exp()`'s ~709 overflow threshold: yes, decisively —
+`-(-12.948781)*17469.0*4.0/(2.0*513.0) = 881.88`, and `math.exp(881.88)`
+raises `OverflowError: math range error` in plain Python.
+
+This directly explains `config.yaml`'s "original ldetect covariance
+overflows" comment, which had no further detail anywhere in `notes/` before
+now — it's a literal Python exception from `math.exp()`, not a memory or
+partition-size issue. Checked and ruled out the partition-size-explosion
+theory first: the biggest chr9 partition spans 22.3 Mb but contains a
+perfectly normal ~5,048 SNPs (a genuine low-recombination desert, consistent
+with the existing "Category A" finding above, not a computational
+explosion).
+
+Crucially, `shrinkage.py::_shrink_ld_values` (the numba-compiled per-pair
+kernel that actually computes `ds2`) doesn't raise on this same overflow —
+verified directly: feeding it the real chr9 jump magnitude returns
+`ds2 == inf`, no exception. LLVM/numba float arithmetic follows IEEE 754
+(silently returns `+inf` on overflow) rather than Python's checked
+arithmetic (raises `OverflowError`). An `inf` passes the
+`fabs(ds2) < cutoff` inclusion check and gets written straight into the
+compact HDF5 output — silent poisoning of every downstream sum touching
+that locus (matrix-to-vector, metric, local search), which is strictly
+worse than legacy's crash-and-stop failure mode. Also checked
+`partition_chromosome`'s own window-extension loop (not numba-compiled,
+plain Python) — this one *would* raise the real `OverflowError` and crash,
+confirmed by constructing a fixture with a large backward jump specifically
+inside the extension search range (my earlier real-chr9-map test of this
+function happened not to hit it — the worst jump fell inside a chunk, not
+in any chunk's extension zone — which is exactly the kind of "got lucky"
+result that shouldn't be trusted without a targeted fixture).
+
+There is no legacy ground truth to reproduce for these specific pairs:
+legacy crashes before it can act on them at all, so unlike Bug 1 (which has
+a clear "what would legacy do" answer), this is a robustness choice, not a
+legacy-matching fix. Chose to treat a negative genetic distance as "no
+reliable decay information" (`ds2 = 0.0`, matching "below cutoff, excluded"
+semantics) in both `_shrink_ld_values` and `partition_chromosome`'s
+extension loop, rather than computing `math.exp()` on a value that can only
+be nonsensical or infinite. Regression tests:
+`tests/test_shrinkage.py::test_shrink_ld_values_negative_df_returns_zero_not_inf`,
+`test_partition_chromosome_survives_backward_jump_past_chunk_boundary`.
+Full suite (331 tests), ruff, mypy clean.
+
+## Follow-up: Bug 2's fix was too aggressive, narrowed to the actual overflow condition (2026-07-28)
+
+Directly challenged again: is the Bug 2 fix (zero out any negative `df`)
+actually legacy-compatible, and could it plausibly help rather than just
+avoid a crash? Re-examined legacy's per-pair loop with that question in
+mind rather than re-asserting the earlier read. Legacy has no branch for
+"negative `df`" at all — only for wherever its own `math.exp()` call happens
+to overflow. For the likely-common *mild* backward jumps (small negative
+`df`, exponent positive but well under ~709), legacy computes a real
+`ee` and includes that pair with a distorted-but-real `ds2`; it only fails
+for the rare, large jumps that actually push the exponent past the
+overflow boundary. The original fix zeroed every negative-`df` pair
+uniformly, discarding real legacy-matching signal for the common case to
+guard against a failure mode that only applies to the rare extreme one.
+
+Narrowed `_shrink_ld_values` to check the actual exponent
+(`-4.0*ne*df/(2.0*n_ind)`) against a safe overflow threshold (`> 700.0`,
+confirmed empirically that `math.exp()` overflows between 709.78 and
+709.79) rather than the sign of `df`. Below the threshold, `math.exp()` is
+now called normally regardless of sign, matching legacy's own value
+exactly; only past it does the pair get zeroed. `partition_chromosome`'s
+extension loop needed no equivalent change: it only makes a boolean
+stop/continue decision, and legacy's own code continues extending for any
+negative `df` (a huge `rho` is never `< cutoff`) regardless of magnitude,
+so "keep extending" was already correct across the whole range without
+needing to distinguish the overflow case.
+
+Added `tests/test_shrinkage.py::test_shrink_ld_values_mild_negative_df_matches_legacy_not_zeroed`
+alongside the existing overflow-case test, so both ends of the boundary are
+guarded: true overflow still returns zero, non-overflow now returns
+legacy's real value instead of zero. Full suite (332 tests), ruff, mypy
+clean.
+
+This changes the framing of Bug 2 from a pure defensive robustness patch
+to something that could plausibly *improve* alignment with MacDonald's
+published blocks for the common mild-jump case, not just prevent `inf`
+corruption for the rare extreme one — still unverified against real block
+output pending a rerun.
