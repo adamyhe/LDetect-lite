@@ -30,7 +30,7 @@ The main outputs are:
 - `results/{POP}_LD_blocks.bed`
 - `results/compare/{POP}_block_comparison.tsv`
 
-`--cores N` lets Snakemake schedule multiple chromosome/population jobs concurrently (each claiming `workers`-many cores). `run_ldetect` exports `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` to match `workers` so BLAS/numba don't oversubscribe the shared node when several jobs land on it at once (see `docs/optimizations.md` #13) — no action needed unless you're invoking `ldetect run` directly outside this Snakefile.
+`--cores N` lets Snakemake schedule multiple chromosome/population jobs concurrently (each claiming `workers`-many cores). `ldetect` manages native BLAS/numba thread caps at CLI startup, so `workers` remains the controlling knob for the process-pooled stages (see `docs/optimizations.md` #13).
 
 ### "Corrected" blocks (`scipy-periodic` filtering)
 

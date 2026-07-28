@@ -167,11 +167,6 @@ rule calc_covariance:
     shell:
         """
         mkdir -p $(dirname {output})
-        export OMP_NUM_THREADS=1
-        export OPENBLAS_NUM_THREADS=1
-        export MKL_NUM_THREADS=1
-        export NUMEXPR_NUM_THREADS=1
-        export NUMBA_NUM_THREADS=1
         uv run ldetect calc-covariance \
             --reference-panel {input.vcf} \
             --region {VCF_CHROM}:{START}-{END} \
@@ -209,11 +204,6 @@ rule matrix_to_vector:
         str(WORK_VECTOR),
     shell:
         """
-        export OMP_NUM_THREADS=1
-        export OPENBLAS_NUM_THREADS=1
-        export MKL_NUM_THREADS=1
-        export NUMEXPR_NUM_THREADS=1
-        export NUMBA_NUM_THREADS=1
         uv run ldetect matrix-to-vector \
             --dataset-path {WORK_DIR} \
             --name {CHROM} \
@@ -233,11 +223,6 @@ rule find_minima:
         str(WORK_BPTS),
     shell:
         """
-        export OMP_NUM_THREADS=1
-        export OPENBLAS_NUM_THREADS=1
-        export MKL_NUM_THREADS=1
-        export NUMEXPR_NUM_THREADS=1
-        export NUMBA_NUM_THREADS=1
         uv run ldetect find-minima \
             --input {input.vector} \
             --chr-name {CHROM} \

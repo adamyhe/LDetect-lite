@@ -11,6 +11,7 @@ from ldetect_lite._cli.cmd_run import (
     _breakpoint_subsets_for_run,
     _delete_covariance_cache,
     _is_valid_covariance_partition,
+    _missing_thread_cap_env_vars,
     _resolve_workers,
     register,
 )
@@ -121,6 +122,30 @@ def test_stage_worker_override_takes_precedence_over_shared_workers() -> None:
     args = _parse_run_args(["--workers", "4", "--local-search-workers", "1"])
     assert _resolve_workers(args.matrix_workers, args.workers) == 4
     assert _resolve_workers(args.local_search_workers, args.workers) == 1
+
+
+def test_missing_thread_cap_env_vars_requires_all_caps(monkeypatch) -> None:
+    for name in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+
+    assert _missing_thread_cap_env_vars() == [
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "NUMBA_NUM_THREADS",
+    ]
 
 
 def test_matrix_backend_defaults_to_array_and_accepts_legacy() -> None:

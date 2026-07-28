@@ -1203,7 +1203,7 @@ class LocalSearch:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Precompute local-search arrays from canonical partition slices."""
         active_partitions: list[LocalSearchPartition] = []
-        active_min_lo = -2**63
+        active_min_lo = -(2**63)
         active_loci = np.array([], dtype=np.int64)
         precomputed_loci: list[int] = []
         planned_segments: list[_LocalSearchSegment] = []
@@ -1221,9 +1221,7 @@ class LocalSearch:
                 )
                 self.precompute_stats.active_rows_peak = max(
                     self.precompute_stats.active_rows_peak,
-                    _active_row_count_from_partitions(
-                        active_partitions, active_min_lo
-                    ),
+                    _active_row_count_from_partitions(active_partitions, active_min_lo),
                 )
                 last_p_num = p_num_init
             else:
@@ -1238,9 +1236,7 @@ class LocalSearch:
         for p_num in range(last_p_num + 1, len(local_partitions)):
             append_start = time.perf_counter()
             active_partitions.append(local_partitions[p_num])
-            active_loci = _active_loci_from_partitions(
-                active_partitions, active_min_lo
-            )
+            active_loci = _active_loci_from_partitions(active_partitions, active_min_lo)
             self.precompute_stats.append_seconds += time.perf_counter() - append_start
             self.precompute_stats.active_rows_peak = max(
                 self.precompute_stats.active_rows_peak,
@@ -1288,9 +1284,7 @@ class LocalSearch:
                     end_locus_index = 0
                     end_locus = int(active_loci[0])
 
-            segment_end_idx = int(
-                np.searchsorted(active_loci, end_locus, side="right")
-            )
+            segment_end_idx = int(np.searchsorted(active_loci, end_locus, side="right"))
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 loci_start = len(precomputed_loci)
@@ -1317,9 +1311,7 @@ class LocalSearch:
                 for partition in active_partitions
                 if partition.end >= active_min_lo
             ]
-            active_loci = _active_loci_from_partitions(
-                active_partitions, active_min_lo
-            )
+            active_loci = _active_loci_from_partitions(active_partitions, active_min_lo)
 
         loci = np.asarray(precomputed_loci, dtype=np.int64)
         accumulator = DenseLocalSearchAccumulator(loci, self.precompute_stats)
@@ -1389,7 +1381,7 @@ class LocalSearch:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Precompute local-search arrays from HDF5 partition row chunks."""
         active_partitions: list[LocalSearchHDF5Partition] = []
-        active_min_lo = -2**63
+        active_min_lo = -(2**63)
         active_loci = np.array([], dtype=np.int64)
         precomputed_loci: list[int] = []
         planned_segments: list[_LocalSearchSegment] = []
@@ -1476,9 +1468,7 @@ class LocalSearch:
                     end_locus_index = 0
                     end_locus = int(active_loci[0])
 
-            segment_end_idx = int(
-                np.searchsorted(active_loci, end_locus, side="right")
-            )
+            segment_end_idx = int(np.searchsorted(active_loci, end_locus, side="right"))
             if curr_locus_index < segment_end_idx:
                 segment_loci = active_loci[curr_locus_index:segment_end_idx]
                 loci_start = len(precomputed_loci)
@@ -1552,9 +1542,7 @@ class LocalSearch:
         self.end_locus_index = end_locus_index
         return loci, accumulator.sum_vert, accumulator.sum_horiz
 
-    def _add_val(
-        self, val: decimal.Decimal | float, curr_locus: int, key: int
-    ) -> None:
+    def _add_val(self, val: decimal.Decimal | float, curr_locus: int, key: int) -> None:
         zero = decimal.Decimal(0) if self.use_decimal else 0.0
         for loc in (curr_locus, key):
             if loc not in self.precomputed["data"]:

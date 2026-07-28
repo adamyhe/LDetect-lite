@@ -22,7 +22,12 @@ from ldetect_lite._util.covariance_array import (
 )
 from ldetect_lite._util.logging import log_msg
 from ldetect_lite._util.memory import log_memory_checkpoint, max_rss_mib
-from ldetect_lite.filters import apply_filter, apply_filter_get_minima, get_minima_loc
+from ldetect_lite.filters import (
+    apply_filter_get_minima_serial,
+    apply_filter_get_minima_threaded,
+    apply_filter_threaded,
+    get_minima_loc,
+)
 from ldetect_lite.find_minima import custom_binary_search_with_trackback
 from ldetect_lite.io.covariance import MetricDict
 from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
@@ -42,19 +47,17 @@ class _LocalSearchGroupResult(TypedDict):
     loci: list[int]
     metrics: list[_LocalSearchDetails | None]
 
+
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
 
-def _filter_width_search_workers(workers: int, filter_workers: int) -> int:
-    """Choose one parallel layer for filter-width search.
-
-    Candidate-width trackback can run multiple convolutions concurrently, while
-    ``filter_workers`` runs a single convolution over multiple Numba threads.
-    Use only one of those layers at a time to avoid oversubscription.
-    """
+def _adaptive_filter_workers(workers: int, filter_workers: int) -> int:
+    """Choose threads for single-candidate filter evaluations."""
+    if workers < 1:
+        raise ValueError("workers must be >= 1")
     if filter_workers < 1:
         raise ValueError("filter_workers must be >= 1")
-    return workers if filter_workers == 1 else 1
+    return max(workers, filter_workers)
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +109,9 @@ def find_breakpoints(
         trackback_delta: Coarse trackback search range.
         trackback_step: Coarse trackback step size.
         init_search_location: Starting width for exponential search.
-        workers: Number of parallel workers for local search, and threads for
-            the filter-width search's exponential-search and trackback-
-            refinement passes (default: 1).
+        workers: Number of parallel workers for local search, metric
+            computation, filter-width trackback candidates, and adaptive
+            single-filter threading (default: 1).
         metric_workers: Number of parallel workers for streaming metric row
             passes when not using Decimal arithmetic or an in-memory covariance
             cache (default: 1).
@@ -127,11 +130,13 @@ def find_breakpoints(
             whose published reference blocks were generated under scipy
             <1.1, where periodic odd-length windows were bit-identical to
             symmetric ones (see ``notes/findings/ldetect-original-reproduction.md``).
-        filter_workers: Numba threads for each individual filter convolution.
-            When greater than 1, candidate-width trackback threading is disabled
-            to avoid nested parallelism.
+        filter_workers: Minimum threads for adaptive single-filter
+            convolutions. Trackback candidate sweeps always force each
+            concurrent candidate filter to one thread to avoid nested
+            parallelism.
     """
-    search_workers = _filter_width_search_workers(workers, filter_workers)
+    search_workers = workers
+    adaptive_filter_workers = _adaptive_filter_workers(workers, filter_workers)
     requested_subsets, explicit_subsets = _normalise_subsets(subsets)
     needs_fourier_metric = bool(requested_subsets & {"fourier", "fourier_ls"})
     needs_uniform = bool(requested_subsets & {"uniform", "uniform_ls"})
@@ -161,21 +166,28 @@ def find_breakpoints(
     log_memory_checkpoint("filter_width_search_start")
     log_msg(
         "Searching for filter width "
-        f"(candidate_workers={search_workers}, filter_workers={filter_workers})"
+        f"(candidate_workers={search_workers}, "
+        f"adaptive_filter_workers={adaptive_filter_workers}, "
+        "trackback_filter_workers=1)"
     )
     found_width = custom_binary_search_with_trackback(
         np_array,
-        lambda arr, width: apply_filter_get_minima(
+        lambda arr, width: apply_filter_get_minima_threaded(
             arr,
             width,
             filter_window,
-            filter_workers,
+            workers=adaptive_filter_workers,
         ),
         n_bpoints,
         trackback_delta=trackback_delta,
         trackback_step=trackback_step,
         init_search_location=init_search_location,
         search_workers=search_workers,
+        trackback_f=lambda arr, width: apply_filter_get_minima_serial(
+            arr,
+            width,
+            filter_window,
+        ),
     )
     log_msg(f"Found width: {found_width}")
     log_memory_checkpoint("filter_width_search_end")
@@ -183,7 +195,12 @@ def find_breakpoints(
     # 4. Extract minima positions
     log_memory_checkpoint("minima_extraction_start")
     log_msg("Applying filter and extracting minima")
-    g = apply_filter(np_array, found_width, filter_window, filter_workers)
+    g = apply_filter_threaded(
+        np_array,
+        found_width,
+        filter_window,
+        workers=adaptive_filter_workers,
+    )
     fourier_loci = get_minima_loc(g, np_array_x)
     log_memory_checkpoint("minima_extraction_end")
 
@@ -416,11 +433,7 @@ def _log_metric(metric_out: MetricDict) -> None:
         # sum/N_zero are always both-Decimal or both-float/int at runtime
         # (see MetricDict/Metric.use_decimal); mypy can't see that invariant.
         metric = metric_out["sum"] / n_zero  # type: ignore[operator]
-        log_msg(
-            f"  sum={metric_out['sum']:.6f}  "
-            f"N_zero={n_zero}  "
-            f"metric={metric:.6e}"
-        )
+        log_msg(f"  sum={metric_out['sum']:.6f}  N_zero={n_zero}  metric={metric:.6e}")
 
 
 def _midpoint(a: int, b: int) -> int:

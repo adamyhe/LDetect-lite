@@ -23,6 +23,8 @@ _THREAD_CAP_ENV_VARS = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "BLIS_NUM_THREADS",
     "NUMBA_NUM_THREADS",
 )
 
@@ -222,9 +224,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         default=1,
         metavar="N",
         help=(
-            "Numba threads for each individual Step 4 filter convolution. "
-            "When N > 1, candidate-width threading during trackback is disabled "
-            "to avoid nested parallelism (default: 1)."
+            "Minimum threads for Step 4 adaptive single-filter "
+            "convolutions. Trackback keeps candidate-width threading and "
+            "forces each candidate filter to one thread to avoid nested "
+            "parallelism (default: 1)."
         ),
     )
     p.add_argument(
@@ -291,6 +294,11 @@ def _resolve_workers(explicit: int | None, default: int) -> int:
     return default if explicit is None else explicit
 
 
+def _missing_thread_cap_env_vars() -> list[str]:
+    """Return native thread-pool caps that are absent from the environment."""
+    return [name for name in _THREAD_CAP_ENV_VARS if not os.environ.get(name)]
+
+
 def _run(args: argparse.Namespace) -> int:
     import json
 
@@ -318,14 +326,17 @@ def _run(args: argparse.Namespace) -> int:
     )
     log_memory_checkpoint("run_start")
 
-    if args.workers > 1 and not any(os.environ.get(v) for v in _THREAD_CAP_ENV_VARS):
+    missing_thread_caps = _missing_thread_cap_env_vars()
+    if args.workers > 1 and missing_thread_caps:
         log_msg(
-            f"Warning: --workers {args.workers} is set but none of "
-            f"{', '.join(_THREAD_CAP_ENV_VARS)} are set in the environment. "
-            "Numpy/BLAS/numba may each size their own thread pools to the "
-            "whole machine instead of --workers, oversubscribing CPUs if "
-            "other jobs are running concurrently on the same node (e.g. "
-            "under Slurm). Consider exporting these to match --workers."
+            f"Warning: --workers {args.workers} is set but these native "
+            "thread-pool caps are missing from the environment: "
+            f"{', '.join(missing_thread_caps)}. Numpy/BLAS/numba may size "
+            "uncapped pools to the whole machine, causing nested CPU "
+            "oversubscription. For the default process-parallel pipeline, "
+            "export the BLAS/OpenMP/NumExpr/Numba thread caps to 1 unless "
+            "you are deliberately using an intra-operation threading option "
+            "such as --filter-workers."
         )
 
     # ------------------------------------------------------------------ #

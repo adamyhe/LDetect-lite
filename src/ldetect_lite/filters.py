@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, TypedDict, TypeVar
 
 import numpy as np
@@ -15,13 +16,10 @@ from ldetect_lite._util.logging import log_msg
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 try:
-    from numba import get_num_threads, njit, prange, set_num_threads
+    from numba import njit
 
     _HAVE_NUMBA = True
     _numba_nogil_decorator = njit(nogil=True, fastmath=True, cache=True)
-    _numba_parallel_decorator = njit(
-        nogil=True, parallel=True, fastmath=True, cache=True
-    )
 
     def _njit_nogil(fn: _F) -> _F:
         """JIT-compile with the GIL released.
@@ -29,7 +27,9 @@ try:
         ``nogil=True`` is required, not just a perf nicety: `find_minima.py`'s
         `_find_end`/`_trackback` run this convolution concurrently from
         multiple Python threads (`ThreadPoolExecutor`), which only overlaps
-        real work if the GIL is actually released during the call.
+        real work if the GIL is actually released during the call. The same
+        requirement applies to `_convolve1d_reflect_threaded`'s row-chunked
+        threading below.
 
         ``fastmath=True`` is also required for a *speed win at all*: without
         it, LLVM does not auto-vectorize `_convolve1d_reflect`'s reduction
@@ -43,39 +43,11 @@ try:
         convolution that was tried and reverted (docs/optimizations.md #11).
         """
         return _numba_nogil_decorator(fn)  # type: ignore[no-any-return]
-
-    def _njit_parallel(fn: _F) -> _F:
-        return _numba_parallel_decorator(fn)  # type: ignore[no-any-return]
 except ImportError:
     _HAVE_NUMBA = False
-    prange = range
 
     def _njit_nogil(fn: _F) -> _F:
         return fn
-
-    def _njit_parallel(fn: _F) -> _F:
-        return fn
-
-    def get_num_threads() -> int:
-        return 1
-
-    def set_num_threads(_n: int) -> None:
-        return None
-
-
-@contextmanager
-def _numba_thread_limit(workers: int) -> Iterator[None]:
-    if workers < 1:
-        raise ValueError("filter_workers must be >= 1")
-    if not _HAVE_NUMBA or workers == 1:
-        yield
-        return
-    old_workers = get_num_threads()
-    set_num_threads(workers)
-    try:
-        yield
-    finally:
-        set_num_threads(old_workers)
 
 
 @_njit_nogil
@@ -133,13 +105,89 @@ def _convolve1d_reflect(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return out
 
 
-@_njit_parallel
-def _convolve1d_reflect_parallel(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    """Parallel version of :func:`_convolve1d_reflect`.
+@_njit_nogil
+def _convolve1d_reflect_range(
+    padded_slice: np.ndarray, conv_kernel: np.ndarray, out_slice: np.ndarray
+) -> None:
+    """Fill ``out_slice`` with the same per-row reduction as
+    :func:`_convolve1d_reflect`, given an already-padded, already-sliced
+    input and already-reversed kernel. Used to compute disjoint row ranges
+    from separate Python threads (see `_convolve1d_reflect_threaded`).
 
-    Parallelism is over output rows. The reduction order within each row stays
-    fixed, preserving the flat-region behavior needed by strict minima
-    detection while allowing one filter evaluation to use multiple threads.
+    Deliberately takes zero-based array *slices* rather than a shared array
+    plus ``lo``/``hi`` bounds. Numba's LLVM auto-vectorization of this
+    reduction loop only fires for a literal ``range(n)`` loop starting at a
+    compile-time-known zero: measured, a `range(lo, hi)` version of this same
+    loop body was ~3.4x slower even with a single thread (scalar codegen, not
+    vectorized) -- the same underlying limitation that made the earlier
+    `prange`-based attempt (`docs/optimizations.md` history) not scale either.
+    Slicing the arrays before the call keeps the loop zero-based and
+    vectorized, repositioning the pointer instead of the loop bound.
+    """
+    n = out_slice.shape[0]
+    klen = conv_kernel.shape[0]
+    for i in range(n):
+        s = 0.0
+        for k in range(klen):
+            s += padded_slice[i + k] * conv_kernel[k]
+        out_slice[i] = s
+
+
+def _chunk_bounds(n: int, workers: int) -> list[tuple[int, int]]:
+    """Split ``range(n)`` into up to ``workers`` contiguous, roughly equal chunks."""
+    workers = max(1, min(workers, n)) if n > 0 else 1
+    base, extra = divmod(n, workers)
+    bounds = []
+    lo = 0
+    for i in range(workers):
+        hi = lo + base + (1 if i < extra else 0)
+        bounds.append((lo, hi))
+        lo = hi
+    return bounds
+
+
+_executor: ThreadPoolExecutor | None = None
+_executor_workers = 0
+_executor_lock = threading.Lock()
+
+
+def _get_executor(workers: int) -> ThreadPoolExecutor:
+    """Return a cached thread pool with at least ``workers`` threads.
+
+    Cached and grow-only rather than created fresh per call: a filter-width
+    search makes ~15-20 of these calls in a row, and per-call
+    `ThreadPoolExecutor` construction/teardown is unnecessary overhead when
+    the same pool can be reused across calls.
+    """
+    global _executor, _executor_workers
+    with _executor_lock:
+        if _executor is None or workers > _executor_workers:
+            if _executor is not None:
+                _executor.shutdown(wait=False)
+            _executor = ThreadPoolExecutor(max_workers=workers)
+            _executor_workers = workers
+        return _executor
+
+
+def _convolve1d_reflect_threaded(
+    arr: np.ndarray, kernel: np.ndarray, workers: int
+) -> np.ndarray:
+    """Row-chunked threaded version of :func:`_convolve1d_reflect`.
+
+    Splits the output row range into ``workers`` contiguous chunks and
+    computes each chunk concurrently via Python threads calling the plain
+    nogil kernel (`_convolve1d_reflect_range`) on zero-based *slices* of the
+    padded input and output arrays, which gets the same LLVM
+    auto-vectorization as `_convolve1d_reflect`. This intentionally avoids
+    Numba's `parallel=True`/`prange`: on real chr21-scale data, that kernel's
+    per-thread compute throughput measured ~3.4x worse than the plain
+    `fastmath`-only kernel doing the same work, so 4 `prange` threads only
+    recovered ~1.2x over serial regardless of thread count or threading
+    layer. See `notes/logs/multicore-utilization-filter-width-search.md`.
+
+    Reduction order within each row is unchanged from `_convolve1d_reflect`
+    (each row is computed independently either way), preserving the
+    flat-region bit-exactness the minima detector relies on.
     """
     n = arr.shape[0]
     klen = kernel.shape[0]
@@ -149,11 +197,25 @@ def _convolve1d_reflect_parallel(arr: np.ndarray, kernel: np.ndarray) -> np.ndar
         conv_kernel[k] = kernel[klen - 1 - k]
     padded = _pad_reflect(arr, width)
     out = np.empty(n, dtype=np.float64)
-    for i in prange(n):
-        s = 0.0
-        for k in range(klen):
-            s += padded[i + k] * conv_kernel[k]
-        out[i] = s
+    bounds = _chunk_bounds(n, workers)
+    if len(bounds) <= 1:
+        lo, hi = bounds[0] if bounds else (0, 0)
+        _convolve1d_reflect_range(
+            padded[lo : hi + klen - 1], conv_kernel, out[lo:hi]
+        )
+        return out
+    executor = _get_executor(len(bounds))
+    futures = [
+        executor.submit(
+            _convolve1d_reflect_range,
+            padded[lo : hi + klen - 1],
+            conv_kernel,
+            out[lo:hi],
+        )
+        for lo, hi in bounds
+    ]
+    for future in futures:
+        future.result()
     return out
 
 
@@ -176,6 +238,67 @@ def _filter_window(width: int, mode: str = "scipy-periodic") -> np.ndarray:
     raise ValueError(f"Unknown filter window mode: {mode}")
 
 
+def _filter_result(
+    width: int,
+    window: np.ndarray,
+    smoothed: np.ndarray,
+) -> FilterResult:
+    minima_ind = sig.argrelextrema(smoothed, np.less)[0]
+    minima_vals = [smoothed[i] for i in minima_ind]
+
+    log_msg(f"Filter width={2 * width + 1}, minima count={len(minima_ind)}")
+
+    return {
+        "width": width,
+        "window": window,
+        "filtered": smoothed,
+        "filtered_minima_ind": minima_ind,
+        "filtered_minima_vals": minima_vals,
+    }
+
+
+def apply_filter_serial(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+) -> FilterResult:
+    """Apply the serial direct-convolution filter implementation."""
+    window = _filter_window(width, window_mode)
+    kernel = window / window.sum()
+    if _HAVE_NUMBA:
+        arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
+        smoothed = _convolve1d_reflect(arr, kernel)
+    else:
+        # Numba is a hard dependency (pyproject.toml), so this path should be
+        # unreachable in a correctly-installed environment. But falling back
+        # to an un-jitted `_convolve1d_reflect` here would be catastrophic
+        # (a pure-Python O(N*width) triple-nested loop, ~10^8 iterations at
+        # production widths) rather than just slower -- fall back to the
+        # original scipy implementation instead, which is merely non-optimal.
+        smoothed = ndimage.convolve1d(np_init_array, kernel)
+    return _filter_result(width, window, smoothed)
+
+
+def apply_filter_threaded(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+    workers: int = 1,
+) -> FilterResult:
+    """Apply the row-chunked threaded filter implementation with a scoped
+    worker count."""
+    if workers < 1:
+        raise ValueError("filter_workers must be >= 1")
+    if workers == 1 or not _HAVE_NUMBA:
+        return apply_filter_serial(np_init_array, width, window_mode)
+
+    window = _filter_window(width, window_mode)
+    kernel = window / window.sum()
+    arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
+    smoothed = _convolve1d_reflect_threaded(arr, kernel, workers)
+    return _filter_result(width, window, smoothed)
+
+
 def apply_filter(
     np_init_array: np.ndarray,
     width: int,
@@ -194,36 +317,11 @@ def apply_filter(
     """
     if filter_workers < 1:
         raise ValueError("filter_workers must be >= 1")
-    window = _filter_window(width, window_mode)
-    kernel = window / window.sum()
-    if _HAVE_NUMBA:
-        arr = np.ascontiguousarray(np_init_array, dtype=np.float64)
-        if filter_workers > 1:
-            with _numba_thread_limit(filter_workers):
-                smoothed = _convolve1d_reflect_parallel(arr, kernel)
-        else:
-            smoothed = _convolve1d_reflect(arr, kernel)
-    else:
-        # Numba is a hard dependency (pyproject.toml), so this path should be
-        # unreachable in a correctly-installed environment. But falling back
-        # to an un-jitted `_convolve1d_reflect` here would be catastrophic
-        # (a pure-Python O(N*width) triple-nested loop, ~10^8 iterations at
-        # production widths) rather than just slower -- fall back to the
-        # original scipy implementation instead, which is merely non-optimal.
-        smoothed = ndimage.convolve1d(np_init_array, kernel)
-
-    minima_ind = sig.argrelextrema(smoothed, np.less)[0]
-    minima_vals = [smoothed[i] for i in minima_ind]
-
-    log_msg(f"Filter width={2 * width + 1}, minima count={len(minima_ind)}")
-
-    return {
-        "width": width,
-        "window": window,
-        "filtered": smoothed,
-        "filtered_minima_ind": minima_ind,
-        "filtered_minima_vals": minima_vals,
-    }
+    if filter_workers > 1:
+        return apply_filter_threaded(
+            np_init_array, width, window_mode, workers=filter_workers
+        )
+    return apply_filter_serial(np_init_array, width, window_mode)
 
 
 def apply_filter_get_minima(
@@ -240,6 +338,31 @@ def apply_filter_get_minima(
     )
 
 
+def apply_filter_get_minima_serial(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+) -> int:
+    """Return the local-minima count using the serial filter implementation."""
+    return len(
+        apply_filter_serial(np_init_array, width, window_mode)["filtered_minima_ind"]
+    )
+
+
+def apply_filter_get_minima_threaded(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+    workers: int = 1,
+) -> int:
+    """Return the local-minima count using the threaded filter implementation."""
+    return len(
+        apply_filter_threaded(np_init_array, width, window_mode, workers=workers)[
+            "filtered_minima_ind"
+        ]
+    )
+
+
 def apply_filter_get_minima_ind(
     np_init_array: np.ndarray,
     width: int,
@@ -250,6 +373,18 @@ def apply_filter_get_minima_ind(
     return apply_filter(np_init_array, width, window_mode, filter_workers)[
         "filtered_minima_ind"
     ]
+
+
+def apply_filter_get_minima_ind_threaded(
+    np_init_array: np.ndarray,
+    width: int,
+    window_mode: str = "scipy-periodic",
+    workers: int = 1,
+) -> np.ndarray:
+    """Return local-minima indices using the threaded filter implementation."""
+    return apply_filter_threaded(
+        np_init_array, width, window_mode, workers=workers
+    )["filtered_minima_ind"]
 
 
 def get_minima_loc(g: FilterResult, np_init_array_x: np.ndarray) -> list[int]:

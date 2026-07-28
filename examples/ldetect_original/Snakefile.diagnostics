@@ -291,11 +291,6 @@ rule diagnostic_run_ldetect:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        export OMP_NUM_THREADS={params.workers}
-        export OPENBLAS_NUM_THREADS={params.workers}
-        export MKL_NUM_THREADS={params.workers}
-        export NUMEXPR_NUM_THREADS={params.workers}
-        export NUMBA_NUM_THREADS={params.workers}
         uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \
@@ -398,11 +393,6 @@ rule diagnostic_run_ldetect_omni:
         """
         mkdir -p {params.log_dir}
         /usr/bin/time -v -o {log.timing} \
-        export OMP_NUM_THREADS={params.workers}
-        export OPENBLAS_NUM_THREADS={params.workers}
-        export MKL_NUM_THREADS={params.workers}
-        export NUMEXPR_NUM_THREADS={params.workers}
-        export NUMBA_NUM_THREADS={params.workers}
         uv run ldetect run \
             --genetic-map {input.genetic_map} \
             --reference-panel {input.vcf} \

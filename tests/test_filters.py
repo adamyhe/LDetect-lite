@@ -11,13 +11,18 @@ import scipy.ndimage as ndimage
 import scipy.signal as sig
 
 from ldetect_lite.filters import (
+    _chunk_bounds,
     _convolve1d_reflect,
-    _convolve1d_reflect_parallel,
+    _convolve1d_reflect_threaded,
     _filter_window,
     _pad_reflect,
     apply_filter,
     apply_filter_get_minima,
     apply_filter_get_minima_ind,
+    apply_filter_get_minima_ind_threaded,
+    apply_filter_get_minima_serial,
+    apply_filter_serial,
+    apply_filter_threaded,
     apply_filters,
     get_minima_loc,
 )
@@ -191,15 +196,29 @@ def test_convolve1d_reflect_matches_scipy_for_asymmetric_kernel():
     np.testing.assert_allclose(mine, ref, atol=1e-12, rtol=1e-12)
 
 
-def test_parallel_convolve1d_reflect_matches_serial_for_asymmetric_kernel():
+@pytest.mark.parametrize("workers", [1, 2, 3, 4, 8])
+def test_threaded_convolve1d_reflect_matches_serial_for_asymmetric_kernel(workers):
     arr = np.random.default_rng(4).normal(size=500).cumsum()
     kernel = np.array([0.0, 0.2, 0.6, 0.4, 0.1])
     serial = _convolve1d_reflect(np.ascontiguousarray(arr, dtype=np.float64), kernel)
-    parallel = _convolve1d_reflect_parallel(
+    threaded = _convolve1d_reflect_threaded(
         np.ascontiguousarray(arr, dtype=np.float64),
         kernel,
+        workers,
     )
-    np.testing.assert_allclose(parallel, serial, atol=1e-12, rtol=1e-12)
+    np.testing.assert_allclose(threaded, serial, atol=1e-12, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "n,workers", [(0, 1), (1, 4), (3, 8), (10, 3), (100, 7), (7, 100)]
+)
+def test_chunk_bounds_partitions_range_exactly(n, workers):
+    bounds = _chunk_bounds(n, workers)
+    covered: list[int] = []
+    for lo, hi in bounds:
+        assert lo <= hi
+        covered.extend(range(lo, hi))
+    assert covered == list(range(n))
 
 
 def test_apply_filter_parallel_workers_match_serial_minima():
@@ -217,6 +236,41 @@ def test_apply_filter_parallel_workers_match_serial_minima():
         filter_workers=2,
     )
     np.testing.assert_array_equal(parallel, serial)
+
+
+def test_explicit_parallel_filter_matches_explicit_serial_filter():
+    arr = np.random.default_rng(6).normal(size=2000).cumsum()
+
+    serial = apply_filter_serial(arr, width=50, window_mode="scipy-periodic")
+    parallel = apply_filter_threaded(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+        workers=2,
+    )
+
+    np.testing.assert_array_equal(
+        parallel["filtered_minima_ind"],
+        serial["filtered_minima_ind"],
+    )
+
+
+def test_explicit_minima_helpers_match():
+    arr = np.random.default_rng(7).normal(size=2000).cumsum()
+
+    serial_count = apply_filter_get_minima_serial(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+    )
+    parallel_ind = apply_filter_get_minima_ind_threaded(
+        arr,
+        width=50,
+        window_mode="scipy-periodic",
+        workers=2,
+    )
+
+    assert parallel_ind.size == serial_count
 
 
 def test_apply_filter_rejects_nonpositive_filter_workers():

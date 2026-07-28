@@ -2,7 +2,7 @@
 
 `ldetect run` (see `README.md`) chains all five stages below end-to-end and is the recommended way to run the pipeline. This doc covers running each stage individually — useful for debugging, restarting a partial run, or inspecting intermediate outputs.
 
-Several of these stages accept their own `--workers`/`--metric-workers`. The same BLAS/OMP oversubscription risk described in `README.md` applies here too — but the automatic startup warning is only wired up in `ldetect run`, not these standalone commands, so export `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` yourself to match your worker count if you're driving these directly (e.g. from your own Snakefile rules) on a shared node.
+Several of these stages accept their own `--workers`/`--metric-workers`. The CLI manages native BLAS/OpenMP/NumExpr/Numba thread caps before importing numpy/scipy/numba-backed modules, so those worker flags remain the user-facing controls for parallelism. Process-parallel stages pin BLAS/OpenMP-style pools to one thread; `find-minima`'s adaptive filter-width search uses `--filter-workers` for its own within-call threading (a row-chunked `ThreadPoolExecutor`, not Numba `prange` — see `docs/optimizations.md` #15).
 
 The pipeline has five stages that can be run individually:
 
@@ -119,7 +119,7 @@ Arguments:
 - `--workers N` — parallel workers for the local search phase
 - `--metric-workers N` — parallel workers for streaming metric row passes (default: inherit `--workers`)
 - `--filter-window {scipy-periodic,symmetric}` — Hanning window mode for breakpoint filtering. `scipy-periodic` is the default and matches modern SciPy's periodic Hann window (`scipy.signal.get_window(..., fftbins=True)`). `symmetric` uses `np.hanning`; it's required, not just historical, to reproduce populations whose published reference blocks were generated under scipy <1.1, where periodic odd-length windows were bit-identical to symmetric ones. See `notes/findings/ldetect-original-reproduction.md`.
-- `--filter-workers N` — Numba threads inside each filter convolution (default: 1). When this is greater than 1, ldetect-lite disables candidate-width threading during trackback to avoid nested parallelism.
+- `--filter-workers N` — minimum Numba threads for adaptive single-filter convolutions (default: 1). Trackback keeps candidate-width threading and forces each candidate filter to one Numba thread to avoid nested parallelism.
 - `--high-precision` — use 50-digit Decimal arithmetic for local search and metric comparisons instead of the default float path (slower)
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — breakpoint subset to compute; repeat to compute multiple subsets. If omitted, all subsets are computed.
 
