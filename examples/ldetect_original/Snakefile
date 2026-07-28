@@ -63,6 +63,19 @@ rule all:
             population=POPS,
         ),
         expand(
+            str(RESULTS / "corrected" / "{population}_LD_blocks.bed"),
+            population=POPS,
+        ),
+        expand(
+            str(
+                RESULTS
+                / "corrected"
+                / "compare"
+                / "{population}_block_comparison.tsv"
+            ),
+            population=POPS,
+        ),
+        expand(
             str(
                 RESULTS
                 / "compare"
@@ -306,6 +319,139 @@ rule run_ldetect:
             --workers {params.workers} \
             --filter-window {params.filter_window} \
             >{log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 3b: "Corrected" run using scipy-periodic filtering
+#
+# Berisa & Pickrell's actual 2015 analysis, run on their era's scipy (0.16.0),
+# computed the *symmetric* Hann window despite requesting periodic, because
+# scipy's periodic-window construction was a no-op for odd-length windows
+# until it was fixed in scipy 1.1.0 (2018) -- see
+# notes/findings/ldetect-original-reproduction.md. `run_ldetect` above uses
+# `symmetric` to reproduce that actual historical behavior. This "corrected"
+# variant instead uses `scipy-periodic` -- the window the original code
+# intended and would produce on any modern, bug-fixed scipy -- to show what
+# the analysis would look like with that defect fixed. Recomputes covariance
+# independently rather than sharing `run_ldetect`'s cache, since filter_window
+# only affects Step 4 and keeping the two output trees fully separate is
+# simpler and more robust than trying to share the covariance partitions.
+# ---------------------------------------------------------------------------
+
+
+rule run_ldetect_corrected:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        bed=str(
+            RESULTS
+            / "corrected"
+            / "{population}"
+            / "{chrom}"
+            / "{chrom}-ld-blocks.bed"
+        ),
+        partitions=str(
+            RESULTS
+            / "corrected"
+            / "{population}"
+            / "{chrom}"
+            / "{chrom}_partitions.txt"
+        ),
+    log:
+        run=str(
+            RESULTS / "logs" / "corrected" / "{population}" / "{chrom}.ldetect.log"
+        ),
+        timing=str(
+            RESULTS / "logs" / "corrected" / "{population}" / "{chrom}.timing.log"
+        ),
+    benchmark:
+        str(RESULTS / "logs" / "corrected" / "{population}" / "{chrom}.benchmark.tsv")
+    wildcard_constraints:
+        population=POP_PATTERN,
+    threads: config.get("ldetect_job_threads", config["workers"])
+    params:
+        output_dir=str(RESULTS / "corrected" / "{population}" / "{chrom}"),
+        log_dir=str(RESULTS / "logs" / "corrected" / "{population}"),
+        ne=lambda wc: pop_ne(wc.population),
+        cutoff=config["cov_cutoff"],
+        workers=config["workers"],
+        covariance_cache=config.get("covariance_cache", "compact"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config["subset"],
+        ld_kernel=config.get("ld_kernel", "bitpacked"),
+        force_covariance_flag=(
+            "--force-covariance" if config.get("force_covariance", False) else ""
+        ),
+    shell:
+        """
+        mkdir -p {params.log_dir}
+        /usr/bin/time -v -o {log.timing} \
+            uv run ldetect run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --ld-kernel {params.ld_kernel} \
+            {params.force_covariance_flag} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {params.workers} \
+            --filter-window scipy-periodic \
+            >{log.run} 2>&1
+        """
+
+
+rule combine_beds_corrected:
+    input:
+        expand(
+            str(
+                RESULTS
+                / "corrected"
+                / "{{population}}"
+                / "{chrom}"
+                / "{chrom}-ld-blocks.bed"
+            ),
+            chrom=CHROMS,
+        ),
+    output:
+        str(RESULTS / "corrected" / "{population}_LD_blocks.bed"),
+    wildcard_constraints:
+        population=POP_PATTERN,
+    shell:
+        """
+        echo -e "#chr\tstart\tstop" >{output}
+        for f in {input}; do
+            tail -n +2 "$f" | sed 's/^/chr/' >>{output}
+        done
+        """
+
+
+rule compare_blocks_corrected:
+    input:
+        ours=str(RESULTS / "corrected" / "{population}_LD_blocks.bed"),
+        ref=str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    output:
+        str(RESULTS / "corrected" / "compare" / "{population}_block_comparison.tsv"),
+    wildcard_constraints:
+        population=POP_PATTERN,
+    params:
+        tolerance=100_000,
+    shell:
+        """
+        mkdir -p {RESULTS}/corrected/compare
+        uv run python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
         """
 
 
