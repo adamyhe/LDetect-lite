@@ -369,6 +369,16 @@ rule all:
             ),
             block_set=ACTIVE_BLOCK_SETS,
         ),
+        expand(
+            str(
+                RESULTS
+                / "{block_set}"
+                / "chr{chrom}"
+                / "chr{chrom}-ld-neighborhood.svg"
+            ),
+            block_set=ACTIVE_BLOCK_SETS,
+            chrom=CHROMS,
+        ),
         str(RESULTS / "compare" / "map_summary.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison.tsv"),
         str(RESULTS / "compare" / "map_ref_comparison_point_mode.tsv"),
@@ -809,6 +819,9 @@ rule run_ldetect:
         partitions=str(
             RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}_partitions.txt"
         ),
+        ld_neighborhood_plot=str(
+            RESULTS / "{block_set}" / "chr{chrom}" / "chr{chrom}-ld-neighborhood.svg"
+        ),
     log:
         run=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{block_set}" / "chr{chrom}.timing.log"),
@@ -829,6 +842,7 @@ rule run_ldetect:
         ld_kernel=config.get("ld_kernel", "bitpacked"),
         filter_window=config.get("filter_window", "scipy-periodic"),
         filter_workers=config.get("filter_workers", 1),
+        ld_neighborhood_window_bp=config.get("ld_neighborhood_window_bp", 500_000),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -850,6 +864,8 @@ rule run_ldetect:
             --filter-workers {params.filter_workers} \
             --force-covariance \
             --workers {params.workers} \
+            --generate-ld-neighborhood-plot \
+            --ld-neighborhood-window-bp {params.ld_neighborhood_window_bp} \
             > {log.run} 2>&1
         """
 

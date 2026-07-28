@@ -15,8 +15,8 @@ the same VCF-start example interval. Reproduce the figures with:
 ```bash
 cd examples/ldetect_example
 uv run snakemake --cores 1
-uv run --extra heatmap python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
-uv run --extra heatmap python scripts/benchmark_legacy_covariance.py --warmups 0 --repeats 1
+uv run python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
+uv run python scripts/benchmark_legacy_covariance.py --warmups 0 --repeats 1
 ```
 
 Timing plots are tracked under `examples/ldetect_example/plots/`:

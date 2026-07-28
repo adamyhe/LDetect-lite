@@ -119,6 +119,16 @@ rule all:
             ),
             population=POPS,
         ),
+        expand(
+            str(
+                RESULTS
+                / "{population}"
+                / "{chrom}"
+                / "{chrom}-ld-neighborhood.svg"
+            ),
+            population=POPS,
+            chrom=CHROMS,
+        ),
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +282,9 @@ rule run_ldetect:
         partitions=str(
             RESULTS / "{population}" / "{chrom}" / "{chrom}_partitions.txt"
         ),
+        ld_neighborhood_plot=str(
+            RESULTS / "{population}" / "{chrom}" / "{chrom}-ld-neighborhood.svg"
+        ),
     log:
         run=str(RESULTS / "logs" / "{population}" / "{chrom}.ldetect.log"),
         timing=str(RESULTS / "logs" / "{population}" / "{chrom}.timing.log"),
@@ -294,6 +307,7 @@ rule run_ldetect:
         force_covariance_flag=(
             "--force-covariance" if config.get("force_covariance", False) else ""
         ),
+        ld_neighborhood_window_bp=config.get("ld_neighborhood_window_bp", 500_000),
     shell:
         """
         mkdir -p {params.log_dir}
@@ -313,6 +327,8 @@ rule run_ldetect:
             --subset {params.subset} \
             --workers {params.workers} \
             --filter-window {params.filter_window} \
+            --generate-ld-neighborhood-plot \
+            --ld-neighborhood-window-bp {params.ld_neighborhood_window_bp} \
             >{log.run} 2>&1
         """
 

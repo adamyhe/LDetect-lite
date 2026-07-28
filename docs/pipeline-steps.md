@@ -82,7 +82,7 @@ Arguments:
 - `--dataset-path PATH` — root directory containing the partition `.h5` files and the partition list
 - `--name TEXT` — chromosome name, used to locate files under `dataset-path`
 - `--snp-first / --snp-last INT` — restrict the vector to a sub-range of positions (auto-detected from partition boundaries if omitted)
-- `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output (requires `ldetect-lite[heatmap]`)
+- `--generate-heatmap` — also write a PNG heatmap of the assembled covariance matrix alongside the output
 - `--workers N` — parallel workers for partition-level vector computation (default: 1)
 
 `--generate-heatmap` requires full-schema covariance partitions. If your cache was created by the default `ldetect run` mode, rerun with `ldetect run --covariance-cache full --ld-kernel uint8` or create full partitions with standalone `ldetect calc-covariance --ld-kernel uint8`.

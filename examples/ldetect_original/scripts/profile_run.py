@@ -11,7 +11,7 @@ be paired with `plot_profile_timeline.py` and the wrapped command's own
 `[HH:MM:SS] Memory checkpoint <label>` log lines to show memory/CPU over time
 broken down by pipeline step.
 
-Requires the `profiling` extra: `uv sync --extra profiling`.
+Requires the `dev` dependency group: `uv sync --group dev`.
 
 Usage:
     uv run python scripts/profile_run.py \
@@ -35,7 +35,7 @@ try:
 except ImportError as e:
     raise SystemExit(
         "psutil is required for profile_run.py. Install it with "
-        "`uv sync --extra profiling` (or `pip install ldetect-lite[profiling]`)."
+        "`uv sync --group dev` (or `pip install psutil`)."
     ) from e
 
 

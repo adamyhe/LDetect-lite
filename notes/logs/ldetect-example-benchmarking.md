@@ -59,7 +59,7 @@ Downstream command-level benchmark:
 ```bash
 cd examples/ldetect_example
 UV_CACHE_DIR=/Users/adamhe/github/ldetect-lite/.uv-cache \
-  uv run --extra heatmap python scripts/benchmark_legacy_pipeline.py \
+  uv run python scripts/benchmark_legacy_pipeline.py \
   --warmups 1 --repeats 5 --plot-format svg
 ```
 
@@ -77,7 +77,7 @@ Covariance command-level benchmark:
 ```bash
 cd examples/ldetect_example
 UV_CACHE_DIR=/Users/adamhe/github/ldetect-lite/.uv-cache \
-  uv run --extra heatmap python scripts/benchmark_legacy_covariance.py \
+  uv run python scripts/benchmark_legacy_covariance.py \
   --warmups 0 --repeats 1 --plot-format svg
 ```
 
