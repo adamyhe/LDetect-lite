@@ -26,7 +26,11 @@ populations:
 # uses MacDonald's published already-interpolated deCODE maps directly. pyrho
 # targets remain available as opt-in diagnostics, but are not part of the
 # default run because MacDonald's published pyrho maps contain nonmonotone cM
-# coordinates that original ldetect cannot process cleanly.
+# coordinates that original ldetect cannot process cleanly. ldetect-lite's own
+# covariance step now handles this correctly (see
+# notes/findings/macdonald2022-reproduction.md, "Non-monotonic genetic map
+# bug" -- fixed 2026-07-28), so pyrho_{AFR,EAS,EUR,SAS} below are safe to run
+# and their results should be regenerated with --force-covariance.
 block_sets:
   EUR:
     population: EUR
@@ -89,6 +93,42 @@ block_sets:
     map_source: pyrho
     map_pop: GIH
     pyrho_interpolation: corrected
+    reference_bed: pyrho_SAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  # "macdonald_style": our own re-interpolation of the raw pyrho rate maps
+  # using interpolate_macdonald_pyrho(), which deliberately reproduces
+  # MacDonald's interpolate_pyhro.R dataframe/indexing bugs (previous-interval
+  # cM-endpoint off-by-one, final-row rate overwrite). Diagnostic target: lets
+  # us compare our own replica of their interpolation bug against their
+  # actual "published" pre-interpolated maps, to check whether the two agree
+  # (confirming we understand the bug correctly) independent of whatever
+  # else might differ between our raw pyrho source and their pipeline's.
+  pyrho_AFR_macdonald_style:
+    population: AFR
+    map_source: pyrho
+    map_pop: GWD
+    pyrho_interpolation: macdonald_style
+    reference_bed: pyrho_AFR_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_EAS_macdonald_style:
+    population: EAS
+    map_source: pyrho
+    map_pop: CHB
+    pyrho_interpolation: macdonald_style
+    reference_bed: pyrho_EAS_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_EUR_macdonald_style:
+    population: EUR
+    map_source: pyrho
+    map_pop: IBS
+    pyrho_interpolation: macdonald_style
+    reference_bed: pyrho_EUR_LD_blocks.bed
+    remove_centromere_blocks: true
+  pyrho_SAS_macdonald_style:
+    population: SAS
+    map_source: pyrho
+    map_pop: GIH
+    pyrho_interpolation: macdonald_style
     reference_bed: pyrho_SAS_LD_blocks.bed
     remove_centromere_blocks: true
   # Experimental: same as pyrho_EAS, but the VCF is filtered with true

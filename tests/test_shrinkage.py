@@ -837,7 +837,7 @@ def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
     n_ind = 2.0
     theta = 0.01
     cutoff = 1e-7
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, True)
     counts = _count_pairwise_ld_by_i_impl(
         hap_mat,
         gpos_arr,
@@ -865,6 +865,48 @@ def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
                 expected[i] += 1
 
     np.testing.assert_array_equal(counts, expected)
+
+
+def test_genetic_stop_bounds_non_monotonic_map_needs_assume_monotonic_false() -> None:
+    """Guards the fix for non-monotonic genetic maps (e.g. MacDonald et al.'s
+    pyrho R interpolation script, replicated via ``interpolate_macdonald_pyrho``).
+
+    ``assume_monotonic=True`` lets ``stop`` carry forward across outer
+    iterations (fast, but only valid for non-decreasing ``gpos_arr``).
+    Legacy's own loop (``P00_01_calc_covariance.py``) resets its scan to
+    ``j = i`` every row instead, so it has no persistent pointer to
+    invalidate. ``assume_monotonic=False`` must reproduce that fresh-per-row
+    scan exactly; ``assume_monotonic=True`` on the same non-monotonic input
+    is expected to silently diverge from it (that's the bug this guards
+    against reintroducing for the diagnostic non-monotonic-map path).
+    """
+    # A backward jump at index 4 (0.05 following 0.3) is the kind of local
+    # non-monotonicity the pyrho off-by-one interpolation bug produces.
+    gpos_arr = np.array(
+        [0.0, 0.1, 0.2, 0.3, 0.05, 0.4, 0.5, 0.6, 0.7, 0.8], dtype=np.float64
+    )
+    ne = 11418.0
+    n_ind = 500.0
+    cutoff = 1e-7
+
+    stops_safe = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, False)
+    stops_fast = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, True)
+
+    n = gpos_arr.shape[0]
+    log_cutoff = math.log(cutoff)
+    expected_fresh_scan = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        stop = i
+        while stop < n:
+            df = gpos_arr[stop] - gpos_arr[i]
+            exponent = -4.0 * ne * df / (2.0 * n_ind)
+            if exponent < log_cutoff:
+                break
+            stop += 1
+        expected_fresh_scan[i] = stop
+
+    np.testing.assert_array_equal(stops_safe, expected_fresh_scan)
+    assert not np.array_equal(stops_fast, stops_safe)
 
 
 def test_shrink_ld_values_matches_naive_per_pair_formula_bit_exactly() -> None:
@@ -997,7 +1039,7 @@ def test_bitpacked_compact_chunks_match_uint8_backend(
     ne = 11418.0
     n_ind = float(n_haps // 2)
     theta = 0.01
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, True)
     packed = _pack_haplotypes_impl(hap_mat)
 
     uint8_chunks = list(

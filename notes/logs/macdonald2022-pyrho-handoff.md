@@ -1137,3 +1137,101 @@ If using explicit Snakemake targets, put targets before
 uv run snakemake --cores 1 TARGET1 TARGET2 \
   --shared-fs-usage input-output persistence software-deployment sources
 ```
+
+## Non-monotonic genetic map silently corrupting covariance windows (2026-07-28)
+
+Prompted by a user question about whether the pyrho analysis can still be run
+on MacDonald's actual (bugged, non-monotonic) interpolated maps, and a
+recollection that early commits could run on those maps with results that
+"seemed within reach" of exactness once the `scipy-periodic` filter fix
+landed (see `notes/findings/ldetect-original-reproduction.md` for that
+unrelated-but-similarly-shaped fix).
+
+Checked `config.yaml`'s own existing comments first (per the standing rule to
+check `notes/`/config before re-deriving anything): both already note that
+MacDonald's published pyrho maps are non-monotonic and that this makes
+*legacy* ldetect overflow. Neither comment, nor anything in this log or
+`macdonald2022-boundary-diagnostics.md`, had ever checked whether
+**ldetect-lite's own** covariance step handles this correctly — it doesn't
+crash, so nobody had reason to suspect it was silently wrong.
+
+### The bug
+
+`shrinkage.py::_genetic_stop_bounds_impl` computes each SNP's right-hand
+covariance pair window (`j_stop_by_i`) using a persistent "two-pointer" scan:
+`stop` only ever moves forward across outer iterations (`if stop < i: stop =
+i`, never resets backward). This is a valid O(n) amortized optimization only
+if `gpos_arr` is non-decreasing. Legacy's own equivalent loop
+(`examples/ldetect_original/scripts/legacy_ldetect/ldetect/examples/P00_01_calc_covariance.py`,
+`while j < len(allpos) and toofar == False`) resets `j = i` fresh for every
+outer row instead — it has no persistent pointer to invalidate, so it stays
+"locally correct" per row regardless of monotonicity.
+`shrinkage.py::partition_chromosome`'s own window-extension loop was checked
+too (also confirmed against the real
+`P00_00_partition_chromosome.py`, fetched from Bitbucket since it isn't
+vendored in this repo's `legacy_ldetect` copy) — it already resets its scan
+fresh per chunk boundary, so it needed no fix.
+
+### Quantified on real data
+
+Downloaded MacDonald's actual published `GWD/chr9.tab.gz` pyrho map
+(`https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps/GWD/chr9.tab.gz`)
+directly and checked monotonicity: 527,983 rows, **18,130 backward jumps
+(3.43%)**, worst single jump **-12.9 cM** against a **120.7 cM** total
+chromosome span. This is the map already used by the *active*
+`pyrho_AFR` block set (`pyrho_interpolation: published`) — not a hypothetical
+edge case, and chr9 is already documented above as the single worst
+`pyrho_AFR` chromosome (`recall=0.600`).
+
+Ran both `_genetic_stop_bounds_impl` variants directly against this real
+`gpos_arr` (ne=17469, matching AFR's config): **51,443 of 527,983 SNPs
+(9.74%) get a different `j_stop_by_i`**, with window-size errors up to
+**1,047 SNPs**, always the broken (`assume_monotonic=True`) version
+over-including relative to the correct per-row scan, never under. This is a
+real, substantial divergence from legacy behavior — not ULP noise, not a
+tiny numerical artifact — and it has been present in every pyrho
+reproduction run to date, since this two-pointer structure predates this
+session's investigation entirely.
+
+### Fix
+
+Added an `assume_monotonic: bool` parameter to `_genetic_stop_bounds_impl`;
+`False` resets `stop = i` fresh every row (matching legacy exactly).
+`_build_covariance_inputs` now checks `np.all(np.diff(gpos_arr) >= 0.0)`
+once per partition and picks automatically — no new CLI flag, monotonic maps
+(the common case, including all of `ldetect_original` and MacDonald's
+deCODE map) keep the fast path unchanged. `calc_covariance` emits a stderr
+warning when the slow path triggers. Verified end-to-end (not just the
+isolated function) against a synthetic VCF + a genuinely non-monotonic
+synthetic map: `calc_covariance` completes normally and emits the warning.
+Regression test added:
+`tests/test_shrinkage.py::test_genetic_stop_bounds_non_monotonic_map_needs_assume_monotonic_false`,
+using a hand-constructed backward-jump fixture verified to actually diverge
+between the two modes (an earlier attempt at this fixture didn't — the
+cutoff/scale needs to be tight enough that the window boundary actually
+falls near the backward jump, not so loose that everything's included
+either way).
+
+### Also wired up: `macdonald_style` block sets
+
+`src/ldetect_lite/interpolate_maps.py::interpolate_macdonald_pyrho()` already
+existed (added in `793928e`, alongside the `scipy-periodic` default change)
+but had no block-set config wired to actually run it — `git log -p` on
+`config.yaml` confirms `macdonald_style` never appeared there. Added
+`pyrho_{AFR,EAS,EUR,SAS}_macdonald_style` entries mirroring the existing
+`_corrected` naming pattern. This mode re-interpolates the *raw* pyrho rate
+maps with MacDonald's own R-script bugs deliberately reproduced, rather than
+using their already-interpolated published output directly — a genuinely
+different question from the fix above (which affects the `published`-mode
+maps too) than the user first suspected: the bug in this session's fix
+applies regardless of which pyrho interpolation mode is used, since it's a
+property of ldetect-lite's own covariance code, not of any specific map.
+
+### Status: fix verified in isolation, not yet re-run against real block output
+
+Have not re-run `pyrho_AFR`/`pyrho_EAS`/`pyrho_EUR`/`pyrho_SAS` end-to-end
+against MacDonald's published blocks with this fix (needs
+`--force-covariance` to bypass the stale cached `.h5` partitions, and real
+compute on the user's cluster per the standing "don't run large jobs
+locally" rule). See `notes/findings/macdonald2022-reproduction.md`, "Next
+steps", for the concrete follow-up.

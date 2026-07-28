@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import math
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ class _CovarianceInputs:
     j_stop_by_i: np.ndarray
     pos_arr: np.ndarray
     assume_sorted_unique_rows: bool
+    assume_monotonic_gpos: bool
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +369,7 @@ def _genetic_stop_bounds_impl(
     ne: float,
     n_ind: float,
     cutoff: float,
+    assume_monotonic: bool,
 ) -> np.ndarray:
     """Find the exclusive right bound for each SNP after genetic-distance pruning.
 
@@ -383,6 +386,23 @@ def _genetic_stop_bounds_impl(
     (`log`, computed once) with no division to amplify its error, and
     computes the exponent argument with the exact same expression/operator
     order as the original `exp()` call, matching its rounding exactly.
+
+    ``assume_monotonic`` lets ``stop`` carry forward across outer iterations
+    (an O(n) amortized two-pointer scan) instead of resetting to ``i`` every
+    row (O(n) per row). That carry-forward is only valid when ``gpos_arr``
+    is non-decreasing: legacy's own equivalent loop
+    (``P00_01_calc_covariance.py``) resets its scan to ``j = i`` for every
+    row, so it has no notion of a persistent pointer to invalidate. Genetic
+    maps that are locally non-monotonic (e.g. MacDonald et al.'s pyrho R
+    interpolation script, replicated via ``interpolate_macdonald_pyrho`` for
+    replication diagnostics) silently break the carry-forward assumption --
+    a backward jump can leave ``stop`` short of where a fresh scan from a
+    later ``i`` would need to start, permanently excluding pairs that should
+    be included. Set ``assume_monotonic=False`` to match legacy's per-row
+    fresh scan exactly on such maps; this is the same asymptotic cost as the
+    pairwise LD kernel that consumes ``stop``'s output, so it isn't a
+    meaningful slowdown even though it's worse than the amortized two-pointer
+    path.
     """
     n_snps = gpos_arr.shape[0]
     stops = np.empty(n_snps, dtype=np.int32)
@@ -392,7 +412,10 @@ def _genetic_stop_bounds_impl(
     log_cutoff = math.log(cutoff)
     stop = 0
     for i in range(n_snps):
-        if stop < i:
+        if assume_monotonic:
+            if stop < i:
+                stop = i
+        else:
             stop = i
         gpos1 = gpos_arr[i]
         while stop < n_snps:
@@ -743,7 +766,12 @@ def _build_covariance_inputs(
         [pos2gpos[p] for p in panel.positions], dtype=np.float64
     )  # (n_snps,)
     hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, float(n_ind), cutoff)
+    assume_monotonic_gpos = bool(
+        gpos_arr.size <= 1 or np.all(np.diff(gpos_arr) >= 0.0)
+    )
+    j_stop_by_i = _genetic_stop_bounds_impl(
+        gpos_arr, ne, float(n_ind), cutoff, assume_monotonic_gpos
+    )
     pos_arr = np.array(panel.positions, dtype=np.int32)
     assume_sorted_unique_rows = bool(
         pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
@@ -755,6 +783,7 @@ def _build_covariance_inputs(
         j_stop_by_i=j_stop_by_i,
         pos_arr=pos_arr,
         assume_sorted_unique_rows=assume_sorted_unique_rows,
+        assume_monotonic_gpos=assume_monotonic_gpos,
     )
 
 
@@ -931,6 +960,14 @@ def calc_covariance(
         f"n_snps={inputs.hap_mat.shape[0]} n_haps={inputs.hap_mat.shape[1]} "
         f"seconds={time.perf_counter() - array_start:.3f}"
     )
+    if not inputs.assume_monotonic_gpos:
+        print(
+            "Warning: genetic map is not monotonically non-decreasing; "
+            "using the slower per-row genetic-distance scan that matches "
+            "legacy's behavior on such maps instead of the fast two-pointer "
+            "path, which silently assumes monotonicity",
+            file=sys.stderr,
+        )
     if profile is not None:
         profile["array_seconds"] = time.perf_counter() - array_start
     log_memory_checkpoint("calc_covariance_arrays_built", debug=True)
