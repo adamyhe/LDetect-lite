@@ -1331,3 +1331,59 @@ to something that could plausibly *improve* alignment with MacDonald's
 published blocks for the common mild-jump case, not just prevent `inf`
 corruption for the rare extreme one — still unverified against real block
 output pending a rerun.
+
+## Bug 2 rerun results, real block output (2026-07-28)
+
+Committed Bug 2 (`23204d4`) and pushed. User re-ran `pyrho_EUR`/`pyrho_AFR`/
+`pyrho_EAS` with `--force-covariance` on the real cluster and pasted the
+comparison output. `pyrho_SAS` was not included in this rerun (still
+gated on its own open `Ne` question, see below and `notes/findings/`).
+
+Genome-wide, vs. the post-Bug-1-only numbers:
+
+- `pyrho_AFR`: 1581→1582 blocks (ref 1580), recall 0.972→0.979, Jaccard
+  0.955→0.963.
+- `pyrho_EAS`: 1117→1115 blocks (ref 1121), recall 0.912→0.926, Jaccard
+  0.866→0.876.
+- `pyrho_EUR`: 1335→1334 blocks (ref 1336), recall 0.951→0.947, Jaccard
+  0.920→0.913 — a small regression, not an improvement.
+
+Per-chromosome, chr9 is the standout: it was the single worst chromosome
+in all three populations before Bug 2 (AFR 0.600, EAS 0.333, EUR 0.820
+Jaccard) and is no longer the worst in any of them after (AFR 0.944, EAS
+0.889, EUR 0.906). This is exactly the chromosome where each map has its
+largest backward jump (the -12.9/-20.5/-21.9 cM jumps documented above),
+so this is a clean mechanistic confirmation that Bug 2's guard is doing
+real, correct work, not just a defensive no-op.
+
+But it's not a uniform win. New/promoted worst chromosomes: AFR chr13
+(Jaccard 0.630, was 0.766-ish-fine before — not previously flagged), EAS
+chr4 (0.336, already bad before, essentially unchanged), EAS chr1 (0.431,
+*not* previously flagged as a problem chromosome at all), EAS chr19
+(0.618), EUR chr17 (0.415, was already a known problem at 0.415 pre-Bug-2
+too — recorded as "chr17 (0.656)" in the pre-Bug-1 table, so this one
+has been bad across all three code states), EUR chr19 (0.477, similar to
+before). EUR's aggregate got slightly worse even though chr9 improved,
+meaning Bug 2 changed covariance values on some non-chr9 EUR pairs too
+(any segment of a non-monotonic map gets touched, not just the single
+worst jump) and those changes weren't uniformly favorable for EUR
+specifically.
+
+Updated `notes/findings/macdonald2022-reproduction.md`'s comparison table,
+chr9 discussion, "Bottom line", and "Next steps" to reflect this. Did not
+re-run the `pyrho_stage_diagnostics` target list (`config.yaml`) against
+the new worst chromosomes — it's still pointed at the pre-Bug-2 targets
+(chr9/chr4/chr17 for EAS, chr9/chr12/chr19 for EUR, chr9 for AFR). Worth
+updating before investigating the new floor chromosomes (AFR chr13, EAS
+chr1, EUR chr17/chr19 persist, EUR chr12 no longer obviously a problem).
+
+User then pasted the `pyrho_SAS` Bug-2 rerun too: 1266 blocks (ref 1267),
+recall 0.429 (was 0.429), Jaccard 0.276 (was 0.275), mean bp-Jaccard 0.967
+(was 0.973). All within run-to-run noise — no real change. This is the
+expected null result: `pyrho_SAS`'s failure is the `Ne=11418` fallback
+(a systemic genome-wide bias), and Bug 2 only changes behavior for the
+`Ne`-and-jump-size-dependent minority of pairs that would otherwise
+overflow `math.exp()`. Confirms Bug 2 isn't accidentally masking or
+interacting with the `Ne` problem in either direction. Updated the
+findings doc's table/notes to fold this in as the final "all four
+populations" post-Bug-2 verification.
