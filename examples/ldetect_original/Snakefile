@@ -276,7 +276,7 @@ rule run_ldetect:
         covariance_cache=config.get("covariance_cache", "compact"),
         n_snps=config["n_snps_bw_bpoints"],
         subset=config["subset"],
-        filter_window=config.get("filter_window", "scipy-periodic"),
+        filter_window=config.get("filter_window", "symmetric"),
         ld_kernel=config.get("ld_kernel", "bitpacked"),
         force_covariance_flag=(
             "--force-covariance" if config.get("force_covariance", False) else ""

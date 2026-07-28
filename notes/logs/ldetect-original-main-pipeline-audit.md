@@ -1272,3 +1272,169 @@ decision is based on, and the "If this is picked up again" section there for
 the concrete next steps (AFR chr22 precision/legacy-downstream confirmation,
 then the still-open Tier 1 hidden-assumption items) if new evidence or
 motivation arises later.
+
+## Regression reopened: ASN "massive regression" reported, bisected to two commits (2026-07-13 to 2026-07-28)
+
+Date: 2026-07-28
+
+Despite the 2026-07-03 "parked" decision above, the user reported a large ASN
+reproduction regression (recall dropping from the documented genome-wide exact
+match to ~73-97% on tested chromosomes). Bisected via `git worktree` testing
+of real EUR/ASN chr19/22 data: `a3c8df2` (parent) reproduces exactly;
+`2fa1705` ("Make bitpacked covariance default and add benchmark figures #10")
+is the first broken commit. Ruled out before finding the real cause: the
+bitpacked-vs-uint8 kernel choice (both give the identical broken result via
+`--ld-kernel uint8`), Hann window mode toggling alone (tested before
+`--filter-window` was actually wired through the Snakefile, so this negative
+result was later found to be inconclusive — see below), threading/`prange`
+(unrelated, already-fixed issue from earlier in this session), the
+reference-panel-loading refactor (`_util/reference_panel.py`, compared
+line-by-line to the inlined pre-refactor code, functionally identical), and
+the `_genetic_stop_bounds_impl` log/division reordering (fixed anyway for
+precision-amplification safety, but quantitatively confirmed via 40,000
+synthetic SNP positions to produce zero mismatches — not the cause).
+
+### Bug 1: ULP-level rounding drift in the shrinkage kernel (found and fixed)
+
+A raw pair-level HDF5 diff (`examples/ldetect_original/scripts/compare_covariance_values.py`,
+rewritten from a Python-loop prototype to a vectorized `np.intersect1d`/
+`np.setdiff1d` implementation to handle whole-chromosome scale — see commit
+`beda537`) between `a3c8df2` and `2fa1705`-lineage covariance output for real
+ASN chr19 data found: **zero structural differences** (249,186,065/249,186,065
+pairs present in both), but **108,074,824/249,186,065 pairs (43%) differ by
+1.665e-16 to 1.943e-16** — float64 machine epsilon, not a formula bug.
+
+Root cause, isolated in `git diff a3c8df2 2fa1705 -- src/ldetect_lite/shrinkage.py`:
+the new shared `_shrink_ld_values` helper hoisted `1.0/n_total` and
+`(4.0*ne)/(2.0*n_ind)` as loop-invariant constants, replacing per-pair
+`n11 / n_total` with `n11 * inv_n_total` (division vs. multiply-by-precomputed-
+reciprocal) and `math.exp(-4.0*ne*df/(2.0*n_ind))` with
+`math.exp(-decay_scale * df)` (multiply-multiply-divide vs. divide-then-
+multiply). Both rewrites are algebraically equivalent but not bit-identical
+since `n11`/`df` vary per pair — confirmed with a 2,000,000-sample synthetic
+test reproducing per-pair mismatches in the same 1e-16-3e-16 range as the real
+data (`f11` mismatches: 1,377,878/2,000,000; `ee` mismatches: 544,251/2,000,000).
+This is the same code path a prior pass in this investigation had already
+flagged and "quantitatively disproven" by checking whether the *aggregate
+signed sum* of differences over 200k pairs canceled to zero — the wrong test
+for this failure mode, since per-pair ULP noise is roughly symmetric and can
+average to zero while still perturbing every individual pair.
+
+Fixed in commit `a943e28`: reverted `_shrink_ld_values` (and its six call
+sites) to divide by `n_total` and compute the exponent inline in the original
+`-4.0*ne*df/(2.0*n_ind)` order, matching pre-regression rounding exactly.
+Kept `shrink_scale`/`diag_adjust` hoisted, since those are theta-only
+constants — provably safe to hoist because they're evaluated identically
+either way, unlike the two reverted rewrites which interact with per-pair-
+varying operands. Verified bit-exact against 500,000 synthetic pairs (zero
+mismatches) and added `tests/test_shrinkage.py::
+test_shrink_ld_values_matches_naive_per_pair_formula_bit_exactly` as a
+permanent regression guard. Full test suite (328 tests), ruff, mypy clean.
+
+This fix alone was insufficient: re-running the ASN chr19/21/22 comparison
+after `a943e28` (with `.h5` partition mtimes confirmed fresh, ruling out
+Snakemake/`ldetect run` staleness) still showed recall 0.735/0.952/0.905 —
+block counts matched exactly (33/33, 20/20, 20/20) but boundary positions did
+not. This pointed to a second, independent bug.
+
+### Bug 2: `ldetect_original`'s Snakefile silently inherited the wrong default filter window (found and fixed)
+
+`793928e` ("MacDonald2022 reproduction diagnostics and parity fixes #11"),
+chronologically after `2fa1705` but touching none of the same files, changed
+`apply_filter`'s default `window_mode` from an unparameterized, always-`np.hanning`
+call to a new `scipy-periodic`-by-default parameter — needed for MacDonald2022's
+own reproduction. `examples/ldetect_original/Snakefile`'s `run_ldetect` rule
+read this parameter via `config.get("filter_window", "scipy-periodic")`,
+inheriting the new package default instead of pinning its own — silently
+changing which window `ldetect_original` used, with no code change to
+`ldetect_original` itself.
+
+Forcing `--config filter_window=symmetric` on top of the `a943e28` fix
+restored **exact** reproduction on ASN chr19/21/22 (recall/precision/jaccard
+all 1.0, `our_median_offset_kb`/`our_p90_offset_kb` = 0.0 on chr21/chr22, 0.0
+median on chr19). Fixed by pinning
+`filter_window=config.get("filter_window", "symmetric")` in
+`examples/ldetect_original/Snakefile` (MacDonald2022's own Snakefile already
+pins `scipy-periodic` independently, so it's unaffected).
+
+#### Why `symmetric` and not `scipy-periodic`, despite the legacy code literally requesting periodic
+
+This looked like a real contradiction worth resolving properly rather than
+accepting the empirical fix blind (user pushback: "this still makes no sense
+and needs to be reconciled" / "the scipy function is used in the LDetect code
+base"). Full resolution, all steps verified directly rather than assumed —
+see `notes/findings/ldetect-original-reproduction.md` for the condensed
+writeup:
+
+- `examples/ldetect_original/scripts/legacy_ldetect/ldetect/baselib/filters.py::apply_filter`
+  calls `scipy.signal.get_window('hanning', 2*width+1)` (always odd length) +
+  `scipy.ndimage.filters.convolve1d` (default `mode='reflect'`, no explicit
+  `origin`). Reimplementing this literally in Python3 (`get_window('hanning', ...)`
+  was removed from modern scipy; used the identical `'hann'` alias) and
+  diffing against `ldetect-lite`'s two modes: `scipy-periodic` matches to
+  2.4e-13 (float noise) — a faithful, bug-free port; `symmetric` differs by
+  0.05 — a real, substantial difference. So `ldetect-lite`'s `scipy-periodic`
+  mode is *not* the bug; it's a correct port of what the archived code
+  actually says.
+- Confirmed via the Bitbucket API that this file (`filters.py`) has never
+  been modified since the very first commit of the entire `nygcresearch/ldetect`
+  repo (`e221cc93`, 2015-03-24, "Initial commit after refactoring and renaming
+  project") across all 30 commits through the repo's last-ever commit
+  (`a3060d0`, 2015-09-18). Diffed our vendored
+  `examples/ldetect_original/scripts/legacy_ldetect/ldetect/pipeline_elements/E05_find_minima.py`
+  directly against `a3060d0` (the final commit) via the Bitbucket source API —
+  byte-identical, confirming our vendored copy is the complete, final state,
+  not a stale intermediate snapshot. `apply_filter`/`baselib.filters` is the
+  only filtering implementation ever called by the pipeline scripts
+  (`P02_minima_pipeline.py`, `E05_find_minima.py`) — no alternate path exists.
+- Checked scipy's own history directly (fetched raw source from GitHub tags,
+  not changelogs): `get_window`'s `fftbins=True`-periodic default, and its
+  `'hanning'`-to-`hann` dict mapping, are unchanged from scipy 0.12.0 (March
+  2013) through today. `convolve1d`'s `mode='reflect'` default and its
+  weight-reversal relative to `correlate1d` (true convolution vs.
+  correlation) are likewise unchanged since 0.12.0. Both plausible
+  "scipy API changed" explanations are directly falsified, not just assumed
+  false.
+- **Found the actual mechanism**: scipy 0.16.0 (July 2015 — the latest scipy
+  release available throughout the entire `nygcresearch/ldetect` repo's
+  development window, 2015-03-24 to 2015-09-18)'s `hann(M, sym)` has a
+  confirmed defect —
+  ```python
+  odd = M % 2
+  if not sym and not odd:   # only adjusts for EVEN M
+      M = M + 1
+  n = np.arange(0, M)
+  w = 0.5 - 0.5 * np.cos(2.0 * np.pi * n / (M - 1))
+  if not sym and not odd:
+      w = w[:-1]
+  ```
+  For odd `M` (which `2*width+1` always is), the periodic-length adjustment
+  never fires, so `sym=True` and `sym=False` compute bit-identical output.
+  This was fixed in scipy 1.1.0 (2018) via a rewrite (`_extend`/`_truncate`
+  in `scipy/signal/windows/_windows.py`) that unconditionally
+  extends-then-truncates regardless of parity — verified by fetching that
+  version's literal source directly.
+- **Conclusion**: Berisa & Pickrell's actual 2015 run, on their era-contemporary
+  scipy, computed the *symmetric* Hann window despite their code asking for
+  periodic — an undetectable-at-the-time library defect, not an intentional
+  choice or a provenance gap. `ldetect-lite`'s `symmetric` mode is the
+  historically-accurate reproduction of what actually ran; `scipy-periodic`
+  is correct for reproductions of modern-scipy-era published output
+  (MacDonald2022). No contradiction remains — both modes are correct for
+  their respective eras' actual (not intended) scipy behavior.
+
+### Status after both fixes
+
+`symmetric` restored (was mislabeled "deprecated"; see `pipeline.py`,
+`cmd_run.py`, `cmd_find_minima.py`, `AGENTS.md`, `docs/optimizations.md`,
+`docs/pipeline-steps.md` — all updated to describe it as required-for-
+reproduction rather than a legacy diagnostic fallback).
+`examples/ldetect_original/Snakefile` now pins `filter_window=symmetric` by
+default; `examples/MacDonald2022/Snakefile` independently pins
+`scipy-periodic` and is unaffected. ASN chr19/21/22 reproduce exactly with
+both fixes applied. Full genome-wide EUR/AFR/ASN reverification against the
+2026-07-03 baseline is the recommended next step (see
+`notes/findings/ldetect-original-reproduction.md`, "If this is picked up
+again", item 0) — not expected to change the pre-existing, unrelated EUR
+chr8-12/AFR chr22 residuals documented above, since those predate
+`scipy-periodic` existing as an option at all.
