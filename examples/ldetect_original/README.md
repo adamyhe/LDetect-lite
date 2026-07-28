@@ -32,6 +32,29 @@ The main outputs are:
 
 `--cores N` lets Snakemake schedule multiple chromosome/population jobs concurrently (each claiming `workers`-many cores). `run_ldetect` exports `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_NUM_THREADS`/`NUMBA_NUM_THREADS` to match `workers` so BLAS/numba don't oversubscribe the shared node when several jobs land on it at once (see `docs/optimizations.md` #13) — no action needed unless you're invoking `ldetect run` directly outside this Snakefile.
 
+### "Corrected" blocks (`scipy-periodic` filtering)
+
+The main pipeline above uses `--filter-window symmetric`, which reproduces
+Berisa & Pickrell's actual 2015 output: their code requested a periodic Hann
+window, but scipy's periodic-window construction was a no-op for odd-length
+windows until scipy 1.1.0 (2018), so their era's scipy silently computed the
+symmetric window instead. See
+`notes/findings/ldetect-original-reproduction.md` for the full writeup.
+
+A parallel "corrected" run uses `--filter-window scipy-periodic` — the window
+the original code intended and would produce on any modern, bug-fixed scipy —
+to show what the analysis looks like with that historical defect fixed:
+
+- `results/corrected/{POP}/{chrom}/{chrom}-ld-blocks.bed`
+- `results/corrected/{POP}_LD_blocks.bed`
+- `results/corrected/compare/{POP}_block_comparison.tsv`
+
+This recomputes covariance independently from the main run (filter window
+only affects Step 4, but the two output trees are kept fully separate rather
+than sharing the covariance cache, for simplicity/robustness) — expect
+roughly double the compute cost of the main pipeline if you build `rule all`
+in full.
+
 ## Important Reproduction Detail: SNP Filtering
 
 The published paper and original ldetect command examples use

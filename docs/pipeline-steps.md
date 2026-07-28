@@ -118,7 +118,7 @@ Arguments:
 - `--init-search-loc` — initial filter width for the binary search (default: 1000)
 - `--workers N` — parallel workers for the local search phase
 - `--metric-workers N` — parallel workers for streaming metric row passes (default: inherit `--workers`)
-- `--filter-window {scipy-periodic,symmetric}` — Hanning window mode for breakpoint filtering. `scipy-periodic` is the default and the correct path going forward because it matches original ldetect's SciPy periodic Hann window. `symmetric` uses `np.hanning`; it is deprecated and retained only for old diagnostic comparisons.
+- `--filter-window {scipy-periodic,symmetric}` — Hanning window mode for breakpoint filtering. `scipy-periodic` is the default and matches modern SciPy's periodic Hann window (`scipy.signal.get_window(..., fftbins=True)`). `symmetric` uses `np.hanning`; it's required, not just historical, to reproduce populations whose published reference blocks were generated under scipy <1.1, where periodic odd-length windows were bit-identical to symmetric ones. See `notes/findings/ldetect-original-reproduction.md`.
 - `--filter-workers N` — Numba threads inside each filter convolution (default: 1). When this is greater than 1, ldetect-lite disables candidate-width threading during trackback to avoid nested parallelism.
 - `--high-precision` — use 50-digit Decimal arithmetic for local search and metric comparisons instead of the default float path (slower)
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — breakpoint subset to compute; repeat to compute multiple subsets. If omitted, all subsets are computed.

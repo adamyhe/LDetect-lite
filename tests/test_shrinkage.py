@@ -22,6 +22,7 @@ from ldetect_lite.shrinkage import (
     _genetic_stop_bounds_impl,
     _pack_haplotypes_impl,
     _popcount64,
+    _shrink_ld_values,
     calc_covariance,
     partition_chromosome,
 )
@@ -836,7 +837,7 @@ def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
     n_ind = 2.0
     theta = 0.01
     cutoff = 1e-7
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, True)
     counts = _count_pairwise_ld_by_i_impl(
         hap_mat,
         gpos_arr,
@@ -864,6 +865,142 @@ def test_genetic_stop_bounds_preserve_pair_count_cutoff() -> None:
                 expected[i] += 1
 
     np.testing.assert_array_equal(counts, expected)
+
+
+def test_genetic_stop_bounds_non_monotonic_map_needs_assume_monotonic_false() -> None:
+    """Guards the fix for non-monotonic genetic maps (e.g. MacDonald et al.'s
+    pyrho R interpolation script, replicated via ``interpolate_macdonald_pyrho``).
+
+    ``assume_monotonic=True`` lets ``stop`` carry forward across outer
+    iterations (fast, but only valid for non-decreasing ``gpos_arr``).
+    Legacy's own loop (``P00_01_calc_covariance.py``) resets its scan to
+    ``j = i`` every row instead, so it has no persistent pointer to
+    invalidate. ``assume_monotonic=False`` must reproduce that fresh-per-row
+    scan exactly; ``assume_monotonic=True`` on the same non-monotonic input
+    is expected to silently diverge from it (that's the bug this guards
+    against reintroducing for the diagnostic non-monotonic-map path).
+    """
+    # A backward jump at index 4 (0.05 following 0.3) is the kind of local
+    # non-monotonicity the pyrho off-by-one interpolation bug produces.
+    gpos_arr = np.array(
+        [0.0, 0.1, 0.2, 0.3, 0.05, 0.4, 0.5, 0.6, 0.7, 0.8], dtype=np.float64
+    )
+    ne = 11418.0
+    n_ind = 500.0
+    cutoff = 1e-7
+
+    stops_safe = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, False)
+    stops_fast = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, True)
+
+    n = gpos_arr.shape[0]
+    log_cutoff = math.log(cutoff)
+    expected_fresh_scan = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        stop = i
+        while stop < n:
+            df = gpos_arr[stop] - gpos_arr[i]
+            exponent = -4.0 * ne * df / (2.0 * n_ind)
+            if exponent < log_cutoff:
+                break
+            stop += 1
+        expected_fresh_scan[i] = stop
+
+    np.testing.assert_array_equal(stops_safe, expected_fresh_scan)
+    assert not np.array_equal(stops_fast, stops_safe)
+
+
+def test_shrink_ld_values_matches_naive_per_pair_formula_bit_exactly() -> None:
+    """Guards against reintroducing precomputed-reciprocal/decay-scale hoisting.
+
+    Precomputing ``1.0 / n_total`` (multiplying by the reciprocal instead of
+    dividing) or ``(4.0 * ne) / (2.0 * n_ind)`` (dividing before multiplying
+    by ``df`` instead of after) is algebraically equivalent but not
+    bit-identical. 2fa1705 made exactly this change and it silently
+    perturbed ~40-65% of covariance pairs by 1-3 ULP -- enough to flip
+    discrete minima downstream and regress LDetect block reproduction. This
+    checks the kernel against the original division/inline-exponent
+    expression order across realistic haplotype counts and genetic
+    distances.
+    """
+    ne = 11418.0
+    n_ind = 1006.0
+    n_total = 2.0 * n_ind
+    theta = 0.001
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+
+    rng = np.random.default_rng(0)
+    mismatches = 0
+    for _ in range(20_000):
+        n11 = float(rng.integers(0, int(n_total) + 1))
+        n1x = float(rng.integers(0, int(n_total) + 1))
+        nx1 = float(rng.integers(0, int(n_total) + 1))
+        df = float(rng.uniform(0.0, 0.05))
+        gpos_i, gpos_j = 0.0, df
+
+        f11 = n11 / n_total
+        f1 = n1x / n_total
+        f2 = nx1 / n_total
+        d_naive_expected = f11 - f1 * f2
+        ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+        ds2_expected = (1.0 - theta) ** 2 * d_naive_expected * ee
+
+        d_naive, ds2 = _shrink_ld_values(
+            n11, n1x, nx1, gpos_i, gpos_j, n_total, shrink_scale, ne, n_ind
+        )
+        if d_naive != d_naive_expected or ds2 != ds2_expected:
+            mismatches += 1
+
+    assert mismatches == 0
+
+
+def test_shrink_ld_values_negative_df_returns_zero_not_inf() -> None:
+    """A negative genetic distance is only reachable with a corrupted,
+    non-monotonic map (e.g. MacDonald et al.'s pyrho R interpolation bug).
+    The decay exponent can then exceed ~709 and overflow ``math.exp()`` to
+    ``+inf``, silently poisoning this pair and every downstream sum that
+    includes it. Guards against reintroducing that: ``ds2`` must be exactly
+    0.0 (matching "below cutoff, excluded" semantics), not inf or nan.
+    """
+    ne = 17469.0
+    n_ind = 513.0
+    n_total = 1026.0
+    shrink_scale = 1.0
+    # Same magnitude as the worst real backward jump measured on GWD chr9.
+    gpos_i = 58.14
+    gpos_j = 45.19
+
+    d_naive, ds2 = _shrink_ld_values(
+        400.0, 500.0, 500.0, gpos_i, gpos_j, n_total, shrink_scale, ne, n_ind
+    )
+    assert ds2 == 0.0
+    assert not math.isnan(d_naive)
+
+
+def test_shrink_ld_values_mild_negative_df_matches_legacy_not_zeroed() -> None:
+    """A negative ``df`` small enough that ``math.exp()`` wouldn't overflow
+    must be computed normally (matching legacy's own equally-distorted but
+    real value), not zeroed out. Legacy has no special case for "negative
+    df" -- only for the point past which its own ``math.exp()`` call would
+    overflow and crash. Zeroing out every negative-``df`` pair regardless of
+    magnitude would discard real signal legacy would have used for the more
+    common, milder non-monotonic-map cases, matching only the rare extreme
+    ones.
+    """
+    ne = 17469.0
+    n_ind = 513.0
+    n_total = 1026.0
+    shrink_scale = 1.0
+    gpos_i = 58.14
+    gpos_j = 58.10  # mild -0.04 cM backward jump, well under the overflow threshold
+
+    d_naive, ds2 = _shrink_ld_values(
+        400.0, 500.0, 500.0, gpos_i, gpos_j, n_total, shrink_scale, ne, n_ind
+    )
+    df = gpos_j - gpos_i
+    expected_ee = math.exp(-4.0 * ne * df / (2.0 * n_ind))
+    expected_ds2 = shrink_scale * d_naive * expected_ee
+    assert ds2 == expected_ds2
+    assert ds2 != 0.0
 
 
 def test_pack_haplotypes_word_boundaries() -> None:
@@ -952,7 +1089,7 @@ def test_bitpacked_compact_chunks_match_uint8_backend(
     ne = 11418.0
     n_ind = float(n_haps // 2)
     theta = 0.01
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff)
+    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, n_ind, cutoff, True)
     packed = _pack_haplotypes_impl(hap_mat)
 
     uint8_chunks = list(
@@ -1026,3 +1163,37 @@ def test_partition_chromosome_clamps_uncut_window_to_last_snp(
         "100 700",
         "400 700",
     ]
+
+
+def test_partition_chromosome_survives_backward_jump_past_chunk_boundary(
+    tmp_path: Path,
+) -> None:
+    """A negative genetic distance inside the extension search must not
+    reach ``math.exp()`` -- large enough to overflow it (this is plain
+    Python, so it would raise ``OverflowError`` and crash, unlike the
+    numba-compiled covariance kernel which would silently return ``inf``).
+    Mirrors a real ~13 cM backward jump measured on MacDonald et al.'s
+    published GWD chr9 pyrho map -- see
+    notes/findings/macdonald2022-reproduction.md.
+    """
+    map_path = tmp_path / "nonmonotonic_map.gz"
+    positions = list(range(100, 100 + 20 * 100, 100))
+    gpos_map = {positions[i]: i * 3.0 for i in range(5)}
+    gpos_map[positions[4]] = 15.0
+    for i in range(5, len(positions)):
+        gpos_map[positions[i]] = 2.0 + (i - 5) * 0.01
+
+    with gzip.open(map_path, "wt") as f:
+        for pos in positions:
+            f.write(f"rs{pos} {pos} {gpos_map[pos]}\n")
+
+    output_path = tmp_path / "partitions.txt"
+    partition_chromosome(
+        genetic_map_path=map_path,
+        n_individuals=513,
+        output_path=output_path,
+        window_size=5,
+        ne=17469.0,
+        cutoff=1.5e-8,
+    )
+    assert output_path.exists()

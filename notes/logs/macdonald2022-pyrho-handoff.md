@@ -1137,3 +1137,253 @@ If using explicit Snakemake targets, put targets before
 uv run snakemake --cores 1 TARGET1 TARGET2 \
   --shared-fs-usage input-output persistence software-deployment sources
 ```
+
+## Non-monotonic genetic map silently corrupting covariance windows (2026-07-28)
+
+Prompted by a user question about whether the pyrho analysis can still be run
+on MacDonald's actual (bugged, non-monotonic) interpolated maps, and a
+recollection that early commits could run on those maps with results that
+"seemed within reach" of exactness once the `scipy-periodic` filter fix
+landed (see `notes/findings/ldetect-original-reproduction.md` for that
+unrelated-but-similarly-shaped fix).
+
+Checked `config.yaml`'s own existing comments first (per the standing rule to
+check `notes/`/config before re-deriving anything): both already note that
+MacDonald's published pyrho maps are non-monotonic and that this makes
+*legacy* ldetect overflow. Neither comment, nor anything in this log or
+`macdonald2022-boundary-diagnostics.md`, had ever checked whether
+**ldetect-lite's own** covariance step handles this correctly — it doesn't
+crash, so nobody had reason to suspect it was silently wrong.
+
+### The bug
+
+`shrinkage.py::_genetic_stop_bounds_impl` computes each SNP's right-hand
+covariance pair window (`j_stop_by_i`) using a persistent "two-pointer" scan:
+`stop` only ever moves forward across outer iterations (`if stop < i: stop =
+i`, never resets backward). This is a valid O(n) amortized optimization only
+if `gpos_arr` is non-decreasing. Legacy's own equivalent loop
+(`examples/ldetect_original/scripts/legacy_ldetect/ldetect/examples/P00_01_calc_covariance.py`,
+`while j < len(allpos) and toofar == False`) resets `j = i` fresh for every
+outer row instead — it has no persistent pointer to invalidate, so it stays
+"locally correct" per row regardless of monotonicity.
+`shrinkage.py::partition_chromosome`'s own window-extension loop was checked
+too (also confirmed against the real
+`P00_00_partition_chromosome.py`, fetched from Bitbucket since it isn't
+vendored in this repo's `legacy_ldetect` copy) — it already resets its scan
+fresh per chunk boundary, so it needed no fix.
+
+### Quantified on real data
+
+Downloaded MacDonald's actual published `GWD/chr9.tab.gz` pyrho map
+(`https://raw.githubusercontent.com/jmacdon/LDblocks_GRCh38/master/data/pyrho_interpolated_maps/GWD/chr9.tab.gz`)
+directly and checked monotonicity: 527,983 rows, **18,130 backward jumps
+(3.43%)**, worst single jump **-12.9 cM** against a **120.7 cM** total
+chromosome span. This is the map already used by the *active*
+`pyrho_AFR` block set (`pyrho_interpolation: published`) — not a hypothetical
+edge case, and chr9 is already documented above as the single worst
+`pyrho_AFR` chromosome (`recall=0.600`).
+
+Ran both `_genetic_stop_bounds_impl` variants directly against this real
+`gpos_arr` (ne=17469, matching AFR's config): **51,443 of 527,983 SNPs
+(9.74%) get a different `j_stop_by_i`**, with window-size errors up to
+**1,047 SNPs**, always the broken (`assume_monotonic=True`) version
+over-including relative to the correct per-row scan, never under. This is a
+real, substantial divergence from legacy behavior — not ULP noise, not a
+tiny numerical artifact — and it has been present in every pyrho
+reproduction run to date, since this two-pointer structure predates this
+session's investigation entirely.
+
+### Fix
+
+Added an `assume_monotonic: bool` parameter to `_genetic_stop_bounds_impl`;
+`False` resets `stop = i` fresh every row (matching legacy exactly).
+`_build_covariance_inputs` now checks `np.all(np.diff(gpos_arr) >= 0.0)`
+once per partition and picks automatically — no new CLI flag, monotonic maps
+(the common case, including all of `ldetect_original` and MacDonald's
+deCODE map) keep the fast path unchanged. `calc_covariance` emits a stderr
+warning when the slow path triggers. Verified end-to-end (not just the
+isolated function) against a synthetic VCF + a genuinely non-monotonic
+synthetic map: `calc_covariance` completes normally and emits the warning.
+Regression test added:
+`tests/test_shrinkage.py::test_genetic_stop_bounds_non_monotonic_map_needs_assume_monotonic_false`,
+using a hand-constructed backward-jump fixture verified to actually diverge
+between the two modes (an earlier attempt at this fixture didn't — the
+cutoff/scale needs to be tight enough that the window boundary actually
+falls near the backward jump, not so loose that everything's included
+either way).
+
+### Also wired up: `macdonald_style` block sets
+
+`src/ldetect_lite/interpolate_maps.py::interpolate_macdonald_pyrho()` already
+existed (added in `793928e`, alongside the `scipy-periodic` default change)
+but had no block-set config wired to actually run it — `git log -p` on
+`config.yaml` confirms `macdonald_style` never appeared there. Added
+`pyrho_{AFR,EAS,EUR,SAS}_macdonald_style` entries mirroring the existing
+`_corrected` naming pattern. This mode re-interpolates the *raw* pyrho rate
+maps with MacDonald's own R-script bugs deliberately reproduced, rather than
+using their already-interpolated published output directly — a genuinely
+different question from the fix above (which affects the `published`-mode
+maps too) than the user first suspected: the bug in this session's fix
+applies regardless of which pyrho interpolation mode is used, since it's a
+property of ldetect-lite's own covariance code, not of any specific map.
+
+### Status: fix verified in isolation, not yet re-run against real block output
+
+Have not re-run `pyrho_AFR`/`pyrho_EAS`/`pyrho_EUR`/`pyrho_SAS` end-to-end
+against MacDonald's published blocks with this fix (needs
+`--force-covariance` to bypass the stale cached `.h5` partitions, and real
+compute on the user's cluster per the standing "don't run large jobs
+locally" rule). See `notes/findings/macdonald2022-reproduction.md`, "Next
+steps", for the concrete follow-up.
+
+## Follow-up: "is this actually legacy behavior?" surfaces a second, more serious bug (2026-07-28)
+
+Directly challenged: is the `assume_monotonic=False` fresh-per-row scan
+really what legacy does, or an assumption? Re-verified from scratch rather
+than trusting the earlier read: fetched `P00_01_calc_covariance.py` directly
+from the Bitbucket repo's final commit (`a3060d0`) and diffed against the
+vendored copy — identical except whitespace (tabs vs. spaces from the
+Python2→3 conversion). The `j = i` fresh reset every outer row is confirmed,
+genuine, unmodified legacy behavior, not an inference.
+
+That check also surfaced something bigger. Legacy's per-pair loop computes
+`ee = math.exp(-4.0*NE*df/(2.0*len(inds)))` for the actual LD *value*, not
+just for the window-boundary decision Bug 1 (above) was about. Checked
+whether the real chr9 backward jumps could push this exponent past
+`math.exp()`'s ~709 overflow threshold: yes, decisively —
+`-(-12.948781)*17469.0*4.0/(2.0*513.0) = 881.88`, and `math.exp(881.88)`
+raises `OverflowError: math range error` in plain Python.
+
+This directly explains `config.yaml`'s "original ldetect covariance
+overflows" comment, which had no further detail anywhere in `notes/` before
+now — it's a literal Python exception from `math.exp()`, not a memory or
+partition-size issue. Checked and ruled out the partition-size-explosion
+theory first: the biggest chr9 partition spans 22.3 Mb but contains a
+perfectly normal ~5,048 SNPs (a genuine low-recombination desert, consistent
+with the existing "Category A" finding above, not a computational
+explosion).
+
+Crucially, `shrinkage.py::_shrink_ld_values` (the numba-compiled per-pair
+kernel that actually computes `ds2`) doesn't raise on this same overflow —
+verified directly: feeding it the real chr9 jump magnitude returns
+`ds2 == inf`, no exception. LLVM/numba float arithmetic follows IEEE 754
+(silently returns `+inf` on overflow) rather than Python's checked
+arithmetic (raises `OverflowError`). An `inf` passes the
+`fabs(ds2) < cutoff` inclusion check and gets written straight into the
+compact HDF5 output — silent poisoning of every downstream sum touching
+that locus (matrix-to-vector, metric, local search), which is strictly
+worse than legacy's crash-and-stop failure mode. Also checked
+`partition_chromosome`'s own window-extension loop (not numba-compiled,
+plain Python) — this one *would* raise the real `OverflowError` and crash,
+confirmed by constructing a fixture with a large backward jump specifically
+inside the extension search range (my earlier real-chr9-map test of this
+function happened not to hit it — the worst jump fell inside a chunk, not
+in any chunk's extension zone — which is exactly the kind of "got lucky"
+result that shouldn't be trusted without a targeted fixture).
+
+There is no legacy ground truth to reproduce for these specific pairs:
+legacy crashes before it can act on them at all, so unlike Bug 1 (which has
+a clear "what would legacy do" answer), this is a robustness choice, not a
+legacy-matching fix. Chose to treat a negative genetic distance as "no
+reliable decay information" (`ds2 = 0.0`, matching "below cutoff, excluded"
+semantics) in both `_shrink_ld_values` and `partition_chromosome`'s
+extension loop, rather than computing `math.exp()` on a value that can only
+be nonsensical or infinite. Regression tests:
+`tests/test_shrinkage.py::test_shrink_ld_values_negative_df_returns_zero_not_inf`,
+`test_partition_chromosome_survives_backward_jump_past_chunk_boundary`.
+Full suite (331 tests), ruff, mypy clean.
+
+## Follow-up: Bug 2's fix was too aggressive, narrowed to the actual overflow condition (2026-07-28)
+
+Directly challenged again: is the Bug 2 fix (zero out any negative `df`)
+actually legacy-compatible, and could it plausibly help rather than just
+avoid a crash? Re-examined legacy's per-pair loop with that question in
+mind rather than re-asserting the earlier read. Legacy has no branch for
+"negative `df`" at all — only for wherever its own `math.exp()` call happens
+to overflow. For the likely-common *mild* backward jumps (small negative
+`df`, exponent positive but well under ~709), legacy computes a real
+`ee` and includes that pair with a distorted-but-real `ds2`; it only fails
+for the rare, large jumps that actually push the exponent past the
+overflow boundary. The original fix zeroed every negative-`df` pair
+uniformly, discarding real legacy-matching signal for the common case to
+guard against a failure mode that only applies to the rare extreme one.
+
+Narrowed `_shrink_ld_values` to check the actual exponent
+(`-4.0*ne*df/(2.0*n_ind)`) against a safe overflow threshold (`> 700.0`,
+confirmed empirically that `math.exp()` overflows between 709.78 and
+709.79) rather than the sign of `df`. Below the threshold, `math.exp()` is
+now called normally regardless of sign, matching legacy's own value
+exactly; only past it does the pair get zeroed. `partition_chromosome`'s
+extension loop needed no equivalent change: it only makes a boolean
+stop/continue decision, and legacy's own code continues extending for any
+negative `df` (a huge `rho` is never `< cutoff`) regardless of magnitude,
+so "keep extending" was already correct across the whole range without
+needing to distinguish the overflow case.
+
+Added `tests/test_shrinkage.py::test_shrink_ld_values_mild_negative_df_matches_legacy_not_zeroed`
+alongside the existing overflow-case test, so both ends of the boundary are
+guarded: true overflow still returns zero, non-overflow now returns
+legacy's real value instead of zero. Full suite (332 tests), ruff, mypy
+clean.
+
+This changes the framing of Bug 2 from a pure defensive robustness patch
+to something that could plausibly *improve* alignment with MacDonald's
+published blocks for the common mild-jump case, not just prevent `inf`
+corruption for the rare extreme one — still unverified against real block
+output pending a rerun.
+
+## Bug 2 rerun results, real block output (2026-07-28)
+
+Committed Bug 2 (`23204d4`) and pushed. User re-ran `pyrho_EUR`/`pyrho_AFR`/
+`pyrho_EAS` with `--force-covariance` on the real cluster and pasted the
+comparison output. `pyrho_SAS` was not included in this rerun (still
+gated on its own open `Ne` question, see below and `notes/findings/`).
+
+Genome-wide, vs. the post-Bug-1-only numbers:
+
+- `pyrho_AFR`: 1581→1582 blocks (ref 1580), recall 0.972→0.979, Jaccard
+  0.955→0.963.
+- `pyrho_EAS`: 1117→1115 blocks (ref 1121), recall 0.912→0.926, Jaccard
+  0.866→0.876.
+- `pyrho_EUR`: 1335→1334 blocks (ref 1336), recall 0.951→0.947, Jaccard
+  0.920→0.913 — a small regression, not an improvement.
+
+Per-chromosome, chr9 is the standout: it was the single worst chromosome
+in all three populations before Bug 2 (AFR 0.600, EAS 0.333, EUR 0.820
+Jaccard) and is no longer the worst in any of them after (AFR 0.944, EAS
+0.889, EUR 0.906). This is exactly the chromosome where each map has its
+largest backward jump (the -12.9/-20.5/-21.9 cM jumps documented above),
+so this is a clean mechanistic confirmation that Bug 2's guard is doing
+real, correct work, not just a defensive no-op.
+
+But it's not a uniform win. New/promoted worst chromosomes: AFR chr13
+(Jaccard 0.630, was 0.766-ish-fine before — not previously flagged), EAS
+chr4 (0.336, already bad before, essentially unchanged), EAS chr1 (0.431,
+*not* previously flagged as a problem chromosome at all), EAS chr19
+(0.618), EUR chr17 (0.415, was already a known problem at 0.415 pre-Bug-2
+too — recorded as "chr17 (0.656)" in the pre-Bug-1 table, so this one
+has been bad across all three code states), EUR chr19 (0.477, similar to
+before). EUR's aggregate got slightly worse even though chr9 improved,
+meaning Bug 2 changed covariance values on some non-chr9 EUR pairs too
+(any segment of a non-monotonic map gets touched, not just the single
+worst jump) and those changes weren't uniformly favorable for EUR
+specifically.
+
+Updated `notes/findings/macdonald2022-reproduction.md`'s comparison table,
+chr9 discussion, "Bottom line", and "Next steps" to reflect this. Did not
+re-run the `pyrho_stage_diagnostics` target list (`config.yaml`) against
+the new worst chromosomes — it's still pointed at the pre-Bug-2 targets
+(chr9/chr4/chr17 for EAS, chr9/chr12/chr19 for EUR, chr9 for AFR). Worth
+updating before investigating the new floor chromosomes (AFR chr13, EAS
+chr1, EUR chr17/chr19 persist, EUR chr12 no longer obviously a problem).
+
+User then pasted the `pyrho_SAS` Bug-2 rerun too: 1266 blocks (ref 1267),
+recall 0.429 (was 0.429), Jaccard 0.276 (was 0.275), mean bp-Jaccard 0.967
+(was 0.973). All within run-to-run noise — no real change. This is the
+expected null result: `pyrho_SAS`'s failure is the `Ne=11418` fallback
+(a systemic genome-wide bias), and Bug 2 only changes behavior for the
+`Ne`-and-jump-size-dependent minority of pairs that would otherwise
+overflow `math.exp()`. Confirms Bug 2 isn't accidentally masking or
+interacting with the `Ne` problem in either direction. Updated the
+findings doc's table/notes to fold this in as the final "all four
+populations" post-Bug-2 verification.

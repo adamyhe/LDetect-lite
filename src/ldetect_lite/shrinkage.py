@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import math
+import sys
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ class _CovarianceInputs:
     j_stop_by_i: np.ndarray
     pos_arr: np.ndarray
     assume_sorted_unique_rows: bool
+    assume_monotonic_gpos: bool
 
 
 # ---------------------------------------------------------------------------
@@ -71,16 +73,45 @@ def _shrink_ld_values(
     nx1: float,
     gpos_i: float,
     gpos_j: float,
-    inv_n_total: float,
+    n_total: float,
     shrink_scale: float,
-    decay_scale: float,
+    ne: float,
+    n_ind: float,
 ) -> tuple[float, float]:
-    """Return naive and Wen/Stephens-shrunk covariance for one SNP pair."""
-    f11 = n11 * inv_n_total
-    f1 = n1x * inv_n_total
-    f2 = nx1 * inv_n_total
+    """Return naive and Wen/Stephens-shrunk covariance for one SNP pair.
+
+    Divides by ``n_total`` and computes the exponent argument as
+    ``-4.0 * ne * df / (2.0 * n_ind)`` (rather than hoisting a precomputed
+    reciprocal/decay-scale constant and multiplying) to match the original
+    per-pair rounding exactly -- multiplying by a precomputed reciprocal, or
+    dividing before multiplying by ``df``, is not bit-identical to this
+    expression order and was shown to perturb ~40-65% of pairs by ~1-3 ULP,
+    which is enough to occasionally flip a close-call minimum downstream.
+    """
+    f11 = n11 / n_total
+    f1 = n1x / n_total
+    f2 = nx1 / n_total
     d_naive = f11 - f1 * f2
-    ds2 = shrink_scale * d_naive * math.exp(-decay_scale * (gpos_j - gpos_i))
+    df = gpos_j - gpos_i
+    exponent = -4.0 * ne * df / (2.0 * n_ind)
+    if exponent > 700.0:
+        # Only reachable via a corrupted, non-monotonic map (e.g. MacDonald
+        # et al.'s pyrho R interpolation bug -- see
+        # notes/findings/macdonald2022-reproduction.md) with a large enough
+        # backward jump. Below this threshold -- including the more common,
+        # milder non-monotonic-map cases where df is negative but the
+        # exponent stays finite -- math.exp() computes the same (equally
+        # distorted, but real) value legacy's own equivalent computation
+        # would, so it's used normally: legacy has no special case for
+        # "negative df", only for the point past which its own math.exp()
+        # call would raise OverflowError and crash outright, which is
+        # exactly the boundary checked here. Past it, there's no legacy
+        # value to match, so this is treated as no reliable decay
+        # information rather than letting math.exp() silently overflow to
+        # +inf and poison every downstream sum that includes this pair.
+        return d_naive, 0.0
+    ee = math.exp(exponent)
+    ds2 = shrink_scale * d_naive * ee
     return d_naive, ds2
 
 
@@ -132,9 +163,8 @@ def _count_pairwise_ld_impl(
     """Count emitted uint8-backend pairs before materializing full output arrays."""
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
 
     cnt = 0
     for i in range(n_snps):
@@ -152,9 +182,10 @@ def _count_pairwise_ld_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -191,9 +222,8 @@ def _pairwise_ld_impl(
     """
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
     n_pairs = _count_pairwise_ld_impl(
         hap_mat, gpos_arr, hap_sums, j_stop_by_i, ne, n_ind, theta, cutoff
@@ -220,9 +250,10 @@ def _pairwise_ld_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -254,9 +285,8 @@ def _count_pairwise_ld_by_i_impl(
     """Count compact covariance rows owned by each left-hand SNP index."""
     n_snps = hap_mat.shape[0]
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     counts = np.zeros(n_snps, dtype=np.int64)
 
     for i in range(n_snps):
@@ -275,9 +305,10 @@ def _count_pairwise_ld_by_i_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -305,9 +336,8 @@ def _pairwise_ld_compact_range_impl(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Materialize compact uint8-backend pairs for a contiguous i-index range."""
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(n_pairs, dtype=np.int32)
@@ -330,9 +360,10 @@ def _pairwise_ld_compact_range_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -355,23 +386,59 @@ def _genetic_stop_bounds_impl(
     ne: float,
     n_ind: float,
     cutoff: float,
+    assume_monotonic: bool,
 ) -> np.ndarray:
-    """Find the exclusive right bound for each SNP after genetic-distance pruning."""
+    """Find the exclusive right bound for each SNP after genetic-distance pruning.
+
+    Compares in exponent units rather than converting the cutoff into a
+    genetic-distance threshold. ``exp(-4*ne*df/(2*n_ind)) < cutoff`` is
+    algebraically equivalent to ``-4*ne*df/(2*n_ind) < log(cutoff)``, but
+    converting to a distance threshold (``-log(cutoff) / decay_scale``)
+    divides the single rounding error in ``log(cutoff)`` by ``decay_scale``,
+    which can amplify it well past 1 ULP for realistic ``ne``/``n_ind``
+    values -- shifting the pair-inclusion decision for genuinely borderline
+    pairs relative to the original per-pair `exp()` comparison this
+    replaces. Comparing the exponent argument directly against
+    ``log(cutoff)`` needs only the one unavoidable transcendental call
+    (`log`, computed once) with no division to amplify its error, and
+    computes the exponent argument with the exact same expression/operator
+    order as the original `exp()` call, matching its rounding exactly.
+
+    ``assume_monotonic`` lets ``stop`` carry forward across outer iterations
+    (an O(n) amortized two-pointer scan) instead of resetting to ``i`` every
+    row (O(n) per row). That carry-forward is only valid when ``gpos_arr``
+    is non-decreasing: legacy's own equivalent loop
+    (``P00_01_calc_covariance.py``) resets its scan to ``j = i`` for every
+    row, so it has no notion of a persistent pointer to invalidate. Genetic
+    maps that are locally non-monotonic (e.g. MacDonald et al.'s pyrho R
+    interpolation script, replicated via ``interpolate_macdonald_pyrho`` for
+    replication diagnostics) silently break the carry-forward assumption --
+    a backward jump can leave ``stop`` short of where a fresh scan from a
+    later ``i`` would need to start, permanently excluding pairs that should
+    be included. Set ``assume_monotonic=False`` to match legacy's per-row
+    fresh scan exactly on such maps; this is the same asymptotic cost as the
+    pairwise LD kernel that consumes ``stop``'s output, so it isn't a
+    meaningful slowdown even though it's worse than the amortized two-pointer
+    path.
+    """
     n_snps = gpos_arr.shape[0]
     stops = np.empty(n_snps, dtype=np.int32)
     if cutoff <= 0.0:
         stops.fill(n_snps)
         return stops
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
-    max_gdist = -math.log(cutoff) / decay_scale
+    log_cutoff = math.log(cutoff)
     stop = 0
     for i in range(n_snps):
-        if stop < i:
+        if assume_monotonic:
+            if stop < i:
+                stop = i
+        else:
             stop = i
         gpos1 = gpos_arr[i]
         while stop < n_snps:
             df = gpos_arr[stop] - gpos1
-            if df > max_gdist:
+            exponent = -4.0 * ne * df / (2.0 * n_ind)
+            if exponent < log_cutoff:
                 break
             stop += 1
         stops[i] = stop
@@ -394,10 +461,9 @@ def _pairwise_ld_compact_chunk_impl(
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
     """Generate one bounded compact-output chunk with the uint8 backend."""
     n_haps = hap_mat.shape[1]
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     n_snps = hap_mat.shape[0]
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(capacity, dtype=np.int32)
@@ -421,9 +487,10 @@ def _pairwise_ld_compact_chunk_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -460,11 +527,10 @@ def _pairwise_ld_compact_chunk_bitpacked_impl(
     capacity: int,
 ) -> tuple[int, np.ndarray, np.ndarray, np.ndarray]:
     """Generate one bounded compact-output chunk with packed haplotypes."""
-    inv_n_total = 1.0 / float(n_haps)
+    n_total = float(n_haps)
     n_snps = packed_hap_mat.shape[0]
     n_words = packed_hap_mat.shape[1]
     shrink_scale = (1.0 - theta) * (1.0 - theta)
-    decay_scale = (4.0 * ne) / (2.0 * n_ind)
     diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
 
     ii = np.empty(capacity, dtype=np.int32)
@@ -494,9 +560,10 @@ def _pairwise_ld_compact_chunk_bitpacked_impl(
                 nx1,
                 gpos1,
                 gpos_arr[j],
-                inv_n_total,
+                n_total,
                 shrink_scale,
-                decay_scale,
+                ne,
+                n_ind,
             )
 
             if math.fabs(ds2) < cutoff:
@@ -716,7 +783,12 @@ def _build_covariance_inputs(
         [pos2gpos[p] for p in panel.positions], dtype=np.float64
     )  # (n_snps,)
     hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, ne, float(n_ind), cutoff)
+    assume_monotonic_gpos = bool(
+        gpos_arr.size <= 1 or np.all(np.diff(gpos_arr) >= 0.0)
+    )
+    j_stop_by_i = _genetic_stop_bounds_impl(
+        gpos_arr, ne, float(n_ind), cutoff, assume_monotonic_gpos
+    )
     pos_arr = np.array(panel.positions, dtype=np.int32)
     assume_sorted_unique_rows = bool(
         pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
@@ -728,6 +800,7 @@ def _build_covariance_inputs(
         j_stop_by_i=j_stop_by_i,
         pos_arr=pos_arr,
         assume_sorted_unique_rows=assume_sorted_unique_rows,
+        assume_monotonic_gpos=assume_monotonic_gpos,
     )
 
 
@@ -790,6 +863,17 @@ def partition_chromosome(
         while test < n_snp:
             test_gpos = pos2gpos[positions[test]]
             df = test_gpos - end_gpos
+            if df < 0.0:
+                # A negative genetic distance is only reachable with a
+                # corrupted, non-monotonic map -- see the matching guard
+                # and comment in _shrink_ld_values. math.exp() here is
+                # plain Python, not numba, so this would raise
+                # OverflowError and crash outright (matching legacy's own
+                # failure mode) rather than silently produce inf. Treat as
+                # inconclusive and keep extending rather than crash or
+                # guess.
+                test += 1
+                continue
             rho = math.exp(-4.0 * ne * df / (2.0 * n_individuals))
             if rho < cutoff:
                 break
@@ -904,6 +988,14 @@ def calc_covariance(
         f"n_snps={inputs.hap_mat.shape[0]} n_haps={inputs.hap_mat.shape[1]} "
         f"seconds={time.perf_counter() - array_start:.3f}"
     )
+    if not inputs.assume_monotonic_gpos:
+        print(
+            "Warning: genetic map is not monotonically non-decreasing; "
+            "using the slower per-row genetic-distance scan that matches "
+            "legacy's behavior on such maps instead of the fast two-pointer "
+            "path, which silently assumes monotonicity",
+            file=sys.stderr,
+        )
     if profile is not None:
         profile["array_seconds"] = time.perf_counter() - array_start
     log_memory_checkpoint("calc_covariance_arrays_built", debug=True)

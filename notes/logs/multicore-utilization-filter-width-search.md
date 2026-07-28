@@ -127,6 +127,20 @@ Keep `--filter-window symmetric` only as a deprecated compatibility/diagnostic k
 - update docs to describe the single Hann behavior as original-ldetect-compatible;
 - keep historical notes explaining why older outputs using `np.hanning` may differ.
 
+**Correction (2026-07-28): do not act on the removal plan above.** This entry's
+"original ldetect uses periodic Hann" conclusion was based only on the
+MacDonald2022 chr21 deCODE diagnostic and over-generalized to "original
+ldetect" broadly. A later investigation (see
+`notes/logs/ldetect-original-main-pipeline-audit.md`, "Regression reopened"
+section, and `notes/findings/ldetect-original-reproduction.md`) found that
+Berisa & Pickrell's *actual* 2015 analysis computed the *symmetric* window
+despite their code requesting periodic, because scipy 0.16.0 (their
+contemporary release) had a confirmed defect making periodic and symmetric
+windows bit-identical for odd-length windows — fixed in scipy 1.1.0 (2018).
+`symmetric` is required, not deprecated, for `ldetect_original`; `scipy-periodic`
+is correct for MacDonald2022. Both are permanent, equally-valid modes for
+their respective reproduction targets. Do not remove `symmetric`.
+
 ## Still open (current)
 
 - Real-cluster wall-clock re-validation of the numba kernel specifically (thread-parallelization was already re-validated on the cluster above; the numba speedup is only measured locally so far).

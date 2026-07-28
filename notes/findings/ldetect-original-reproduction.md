@@ -1,8 +1,40 @@
 # ldetect_original reproduction — findings
 
-**Findings summary (current as of 2026-07-03).** Distilled for human review — e.g. writing up the paper. Full investigation detail, diagnostic scripts, and dated process notes: `notes/logs/ldetect-original-main-pipeline-audit.md`.
+**Findings summary (last updated 2026-07-28).** Distilled for human review — e.g. writing up the paper. Full investigation detail, diagnostic scripts, and dated process notes: `notes/logs/ldetect-original-main-pipeline-audit.md`.
 
-## Status: parked, not actively being investigated
+## Status: regression (2026-07-13 to 2026-07-28) found and fixed; pre-existing EUR/AFR residuals still parked
+
+The 2026-07-03 baseline below (ASN exact genome-wide; AFR exact except chr22; EUR exact except chr8-12) held until two later commits introduced a real regression, since fixed:
+
+- `2fa1705` ("Make bitpacked covariance default and add benchmark figures") hoisted `1/n_total` and `(4·ne)/(2·n_ind)` as loop-invariant constants in the shrinkage kernel, replacing per-pair division and the original multiply-multiply-divide exponent order with multiply-by-reciprocal and divide-then-multiply — algebraically equivalent, not bit-identical, causing 1-3 ULP noise on ~40-65% of covariance pairs. Fixed in `a943e28` (reverted to the original per-pair expression order; see `tests/test_shrinkage.py::test_shrink_ld_values_matches_naive_per_pair_formula_bit_exactly`).
+- `793928e` ("MacDonald2022 reproduction diagnostics and parity fixes") changed `apply_filter`'s default window from the always-implicit `np.hanning` to `scipy-periodic` (`scipy.signal.get_window(..., fftbins=True)`), needed for MacDonald2022's reproduction. `examples/ldetect_original`'s Snakefile silently inherited this new default instead of pinning its own, which broke `ldetect_original` reproduction specifically — see "The `symmetric`-vs-`scipy-periodic` regression" below for why. Fixed by pinning `filter_window=symmetric` as `ldetect_original`'s own Snakefile default.
+
+Both fixes were needed together; either alone left ASN chr19/21/22 well below 1.0 recall against the published `fourier_ls` reference. With both applied, ASN chr19/21/22 reproduce exactly again (recall/precision/jaccard = 1.0). Full genome-wide ASN/EUR/AFR reverification against the 2026-07-03 baseline is still pending, but there is no reason to expect the pre-existing EUR chr8-12/AFR chr22 residuals (below) to have changed, since those were already present before `scipy-periodic` existed as an option at all.
+
+## The `symmetric`-vs-`scipy-periodic` regression: full root cause
+
+`examples/ldetect_original/scripts/legacy_ldetect/ldetect/baselib/filters.py::apply_filter` calls `scipy.signal.get_window('hanning', 2*width+1)` — always an odd length. This file is an untouched copy of the original `nygcresearch/ldetect` Bitbucket repo (verified byte-identical to that repo's final commit, `a3060d0`, 2015-09-18; `filters.py` itself was never modified after the repo's first commit, `e221cc93`, 2015-03-24 — the whole repo's lifetime is 2015-03-24 to 2015-09-18).
+
+Modern scipy (checked directly: 1.17.1) computes a genuinely asymmetric periodic window for `'hanning'`/`'hann'` at odd lengths — reversing the array changes 8338/8339 elements, max diff 3.8e-4. But **scipy 0.16.0** (July 2015, the latest release available throughout the entire window the original repo was developed) has a confirmed implementation defect in `hann(M, sym)`:
+
+```python
+odd = M % 2
+if not sym and not odd:      # <-- only adjusts for EVEN M
+    M = M + 1
+n = np.arange(0, M)
+w = 0.5 - 0.5 * np.cos(2.0 * np.pi * n / (M - 1))
+if not sym and not odd:
+    w = w[:-1]
+return w
+```
+
+For odd `M`, `not sym and not odd` is always `False`, so the periodic-length adjustment never fires — `sym=True` and `sym=False` compute **bit-identical** output. Since `2*width+1` is always odd, `get_window('hanning', 2*width+1, fftbins=True)` on scipy 0.16.0 silently returned the *symmetric* window despite requesting periodic. This was fixed in scipy 1.1.0 (2018), which rewrote the periodic-window construction to unconditionally extend-then-truncate regardless of parity (`_extend`/`_truncate` in `scipy/signal/windows/_windows.py`).
+
+Consequence: Berisa & Pickrell's actual 2015 analysis, run on contemporary scipy, computed the *symmetric* Hann window despite the code asking for periodic — a real, undetectable-at-the-time library defect, not an intentional choice. Running the same archived code today with modern (post-1.1.0, bug-fixed) scipy produces a genuinely different, correctly-periodic window, which no longer matches what actually generated the published blocks. `ldetect-lite`'s `symmetric` mode (`np.hanning`) is therefore not a deprecated legacy fallback — it's the historically-accurate reproduction of scipy 0.16.0's actual (buggy) output. `scipy-periodic` remains correct for reproductions run against modern-scipy-era published output (MacDonald2022): there is no contradiction, both modes are "correct" for the actual scipy behavior of their respective eras.
+
+Verification chain (all checked directly, not inferred): `sig.get_window('hanning', N)` maps to periodic `hann` since at least scipy 0.12.0 (2013) — ruling out a naming/alias explanation; `scipy.ndimage.convolve1d`'s `mode='reflect'` default and true-kernel-reversal semantics have also been stable since 2013 — ruling out a boundary-handling explanation; `apply_filter`/`baselib.filters` is the only filtering implementation ever called by the legacy pipeline scripts (`P02_minima_pipeline.py`, `E05_find_minima.py`) — ruling out an alternate-implementation explanation.
+
+## Status: parked, not actively being investigated (pre-existing, as of 2026-07-03)
 
 `examples/ldetect_original` reproduces Berisa & Pickrell (2016)'s published LD blocks:
 
@@ -40,6 +72,7 @@ Caveat: this precision/legacy-downstream check only covers EUR chr8-13, not AFR 
 
 Not currently planned, but in priority order:
 
+0. Re-run the full genome-wide EUR/AFR/ASN comparison now that both the `shrinkage.py` ULP fix (`a943e28`) and the `filter_window=symmetric` Snakefile pin are in place, to confirm the 2026-07-03 baseline below is fully restored (only ASN chr19/21/22 have been directly reverified so far, at 2026-07-28).
 1. Close the AFR chr22 gap in the precision/legacy-downstream evidence: run `--high-precision` for AFR chr22, and run `Snakefile.legacy_diagnostics` (already generalized to cover AFR chr21/chr22 alongside EUR) to check whether the same "implementations agree with each other, both disagree with the reference" pattern holds there too.
 2. The open question is upstream of covariance/local search: what input or preprocessing step produces a subtly different vector than whatever the original authors used, for exactly these chromosomes? Remaining concrete lead: EUR/AFR/ASN subpopulation-code provenance — EUR is proven byte-identical (379/379) against the original toy example's actual sample list, but no equivalent ground-truth AFR list exists to check the same way; AFR's provenance rests only on population counts matching across VCF releases (246 individuals), not a byte-for-byte proof.
 3. Absent new evidence (a new data source, an errata from the original authors), this is close to the practical limit of what's resolvable without the authors' internal processing logs.

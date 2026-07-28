@@ -121,10 +121,12 @@ def find_breakpoints(
         subsets: Optional breakpoint subsets to compute and write.  ``None``
             preserves the historical behavior and writes all four subsets.
         filter_window: Hanning window compatibility mode. ``"scipy-periodic"``
-            matches original ldetect's ``scipy.signal.get_window(...,
-            fftbins=True)`` behavior and is the supported default.
-            ``"symmetric"`` uses ``np.hanning`` and is deprecated, retained
-            only for historical diagnostic comparisons.
+            matches modern ``scipy.signal.get_window(..., fftbins=True)``
+            behavior and is the default. ``"symmetric"`` uses ``np.hanning``;
+            it is required (not just historical) for reproducing populations
+            whose published reference blocks were generated under scipy
+            <1.1, where periodic odd-length windows were bit-identical to
+            symmetric ones (see ``notes/findings/ldetect-original-reproduction.md``).
         filter_workers: Numba threads for each individual filter convolution.
             When greater than 1, candidate-width trackback threading is disabled
             to avoid nested parallelism.
