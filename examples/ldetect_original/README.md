@@ -53,7 +53,11 @@ This recomputes covariance independently from the main run (filter window
 only affects Step 4, but the two output trees are kept fully separate rather
 than sharing the covariance cache, for simplicity/robustness) — expect
 roughly double the compute cost of the main pipeline if you build `rule all`
-in full.
+in full. The corrected run also produces the same LD-neighborhood sanity-check
+plots as the main run (per-chromosome and genome-wide, both for its own
+boundaries and for the published reference boundaries), under
+`results/corrected/{population}/{chrom}/{chrom}-ld-neighborhood.svg` and
+`results/corrected/compare/ld_neighborhood/...`.
 
 ## Important Reproduction Detail: SNP Filtering
 
