@@ -53,11 +53,43 @@ This recomputes covariance independently from the main run (filter window
 only affects Step 4, but the two output trees are kept fully separate rather
 than sharing the covariance cache, for simplicity/robustness) — expect
 roughly double the compute cost of the main pipeline if you build `rule all`
-in full. The corrected run also produces the same LD-neighborhood sanity-check
-plots as the main run (per-chromosome and genome-wide, both for its own
-boundaries and for the published reference boundaries), under
-`results/corrected/{population}/{chrom}/{chrom}-ld-neighborhood.svg` and
-`results/corrected/compare/ld_neighborhood/...`.
+in full.
+
+## LD-Neighborhood Plots
+
+Both tracks generate LD-neighborhood sanity-check plots by default (`rule all`
+includes them, so a full `uv run snakemake --cores N` run produces all of the
+below without any extra targets). See the root `README.md`'s
+`--generate-ld-neighborhood-plot` entry for what the plot itself shows.
+
+Each population/chromosome gets a self-contained plot straight from
+`ldetect run` (no reference BED needed):
+
+- `results/{POP}/{chrom}/{chrom}-ld-neighborhood.svg`
+- `results/corrected/{POP}/{chrom}/{chrom}-ld-neighborhood.svg`
+
+Both tracks also get per-chromosome and genome-wide comparison plots, against
+their own boundaries and against the published reference boundaries:
+
+- `results/compare/ld_neighborhood/{POP}/chr{chrom}.svg` and `genomewide.svg`
+- `results/compare/ld_neighborhood/published/{POP}/chr{chrom}.svg` and `genomewide.svg`
+- `results/corrected/compare/ld_neighborhood/{POP}/chr{chrom}.svg` and `genomewide.svg`
+- `results/corrected/compare/ld_neighborhood/published/{POP}/chr{chrom}.svg` and `genomewide.svg`
+
+To build only these plots instead of the full pipeline, request them as
+explicit targets (Snakemake targets don't support wildcard expansion on the
+CLI, so substitute real population/chromosome values). The `genomewide.svg`
+targets pull in every per-chromosome comparison plot for that population as a
+dependency, so requesting just those is the fastest way to get full
+LD-neighborhood coverage for a population:
+
+```bash
+uv run snakemake --cores N \
+  results/compare/ld_neighborhood/EUR/genomewide.svg \
+  results/compare/ld_neighborhood/published/EUR/genomewide.svg \
+  results/corrected/compare/ld_neighborhood/EUR/genomewide.svg \
+  results/corrected/compare/ld_neighborhood/published/EUR/genomewide.svg
+```
 
 ## Important Reproduction Detail: SNP Filtering
 
