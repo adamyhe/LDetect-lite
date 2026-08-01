@@ -22,15 +22,28 @@ populations:
     # No HapMap II SAS-specific default is cited by SHAPEIT; keep CEU default.
     ne: 11418
 
-# Output block sets. EUR/deCODE is the current default reproduction target and
-# uses MacDonald's published already-interpolated deCODE maps directly. pyrho
-# targets remain available as opt-in diagnostics, but are not part of the
-# default run because MacDonald's published pyrho maps contain nonmonotone cM
-# coordinates that original ldetect cannot process cleanly. ldetect-lite's own
-# covariance step now handles this correctly (see
-# notes/findings/macdonald2022-reproduction.md, "Non-monotonic genetic map
-# bug" -- fixed 2026-07-28), so pyrho_{AFR,EAS,EUR,SAS} below are safe to run
-# and their results should be regenerated with --force-covariance.
+# Output block sets. EUR/deCODE uses MacDonald's published already-interpolated
+# deCODE maps directly. For pyrho, two tracks are produced side by side per
+# population (AFR/EAS/EUR; SAS excluded from the default run -- see below):
+#   pyrho_{POP}           -- MacDonald's own published, already-interpolated
+#                             pyrho maps, "as close to original, with bugs":
+#                             these maps are genuinely non-monotonic in
+#                             genetic position (MacDonald's interpolate_pyhro.R
+#                             bug), which original ldetect cannot process
+#                             cleanly. ldetect-lite's own covariance step
+#                             handles this correctly (see
+#                             notes/findings/macdonald2022-reproduction.md,
+#                             "Non-monotonic genetic map bug" -- fixed
+#                             2026-07-28), so these are safe to run
+#   pyrho_{POP}_corrected -- our own re-interpolation of the raw pyrho rate
+#                             maps (interpolate_hapmap(), --mode hapmap),
+#                             which doesn't reproduce MacDonald's R bug and so
+#                             produces a genuinely monotonic map -- the
+#                             "corrected" counterpart
+# pyrho_{POP}_macdonald_style (below) is a third, diagnostic-only track that
+# deliberately replicates MacDonald's R bug ourselves; not part of the
+# default run. If re-running after a covariance-affecting code change,
+# regenerate with --force-covariance.
 block_sets:
   EUR:
     population: EUR
@@ -152,9 +165,24 @@ block_sets:
     remove_centromere_blocks: true
     maf_filter: minor
 
-# Default targets for rule all. Focus on the documented, monotone deCODE/EUR
-# path. pyrho block sets above can still be requested explicitly.
-active_block_sets: [EUR]
+# Default targets for rule all: deCODE/EUR, plus both the "as published, with
+# bugs" and "corrected" pyrho tracks for AFR/EAS/EUR, each independently
+# compared against MacDonald's published blocks. pyrho_SAS{,_corrected} are
+# excluded here -- no settled Ne value exists for SAS yet (see
+# notes/findings/macdonald2022-reproduction.md, "pyrho_SAS's Ne fallback"),
+# so a run would just reproduce the already-documented, unrelated Ne-driven
+# failure regardless of interpolation mode. pyrho_{POP}_macdonald_style and
+# pyrho_EAS_minormaf remain opt-in diagnostics, requested explicitly.
+active_block_sets:
+  [
+    EUR,
+    pyrho_AFR,
+    pyrho_EAS,
+    pyrho_EUR,
+    pyrho_AFR_corrected,
+    pyrho_EAS_corrected,
+    pyrho_EUR_corrected,
+  ]
 
 # Opt-in legacy end-to-end diagnostic. This runs the vendored original ldetect
 # scripts from the exact filtered VCF/map/individual inputs used by the normal
