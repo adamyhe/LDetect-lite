@@ -24,18 +24,6 @@ This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, a
 
 The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the VCF/BCFs must be indexed before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
-### Development
-
-Install from source
-
-```bash
-git clone https://github.com/adamyhe/ldetect-lite.git
-cd ldetect-lite
-uv sync --group dev
-```
-
-From a development checkout, run CLI commands through `uv run` so they use the managed environment.
-
 ## Usage
 
 ### End-to-end pipeline
