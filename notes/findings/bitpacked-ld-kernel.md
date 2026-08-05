@@ -52,3 +52,8 @@ covariance stage.
 - Do not downgrade covariance values to `float32`; bitpacking changes pair-count
   representation only, not output precision.
 - The direct vector sidecar prototype is abandoned for this merge.
+- Follow-up on "VCF/BCF ingestion... still substantial": see
+  [`covariance-io-optimization.md`](covariance-io-optimization.md) for a
+  ranked review of ingestion-side fixes (two shipped: per-process genetic-map
+  caching, vectorized `cyvcf2` genotype decoding; most of the rest rejected
+  or deferred pending more evidence).

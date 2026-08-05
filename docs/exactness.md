@@ -52,3 +52,12 @@ The generated partition diagnostic compares a whole-chromosome partitioning run
 to the original toy example's single-window fixture. The staged partition file
 used by the end-to-end toy pipeline is the exactness target for downstream
 steps and matches exactly.
+
+The breakpoint and BED exactness above requires `find-minima --filter-window
+symmetric`. This toy fixture's reference breakpoints were generated under
+scipy <1.1, where a requested periodic Hann window was silently computed as
+symmetric (`notes/findings/ldetect-original-reproduction.md`); the CLI
+default is `scipy-periodic`, the modern, intended behavior, which does not
+reproduce this fixture. The Snakefile and the function-level/legacy-pipeline
+benchmark scripts under `examples/ldetect_example/scripts/` all pin
+`symmetric` for this reason.

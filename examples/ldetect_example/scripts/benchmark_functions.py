@@ -288,6 +288,12 @@ def run_pipeline(
             output_path=bpoints,
             workers=1,
             metric_workers=1,
+            # This toy fixture's reference breakpoints were generated under
+            # scipy <1.1, where a requested periodic Hann window was silently
+            # computed as symmetric; see
+            # notes/findings/ldetect-original-reproduction.md. The CLI
+            # default (scipy-periodic) diverges from this specific fixture.
+            filter_window="symmetric",
         ),
     )
     time_stage(

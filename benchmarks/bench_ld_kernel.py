@@ -42,7 +42,12 @@ def _make_inputs(
     gpos_arr = np.cumsum(rng.uniform(0.001, 0.01, size=n_snps))
     hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
     n_ind = float(n_haps // 2)
-    j_stop_by_i = _genetic_stop_bounds_impl(gpos_arr, NE, n_ind, CUTOFF)
+    assume_monotonic_gpos = bool(
+        gpos_arr.size <= 1 or np.all(np.diff(gpos_arr) >= 0.0)
+    )
+    j_stop_by_i = _genetic_stop_bounds_impl(
+        gpos_arr, NE, n_ind, CUTOFF, assume_monotonic_gpos
+    )
     return hap_mat, gpos_arr, hap_sums, j_stop_by_i, n_ind
 
 

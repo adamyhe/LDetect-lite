@@ -257,6 +257,13 @@ def run_lite(
             str(cfg.n_snps_bw_bpoints),
             "--output",
             str(breakpoints),
+            # This toy fixture's reference breakpoints were generated under
+            # scipy <1.1, where a requested periodic Hann window was silently
+            # computed as symmetric; see
+            # notes/findings/ldetect-original-reproduction.md. The CLI
+            # default (scipy-periodic) diverges from this specific fixture.
+            "--filter-window",
+            "symmetric",
         ],
         "extract_bpoints": [
             "extract-bpoints",

@@ -482,17 +482,18 @@ class MatrixAnalysis:
         size = self.end_locus_index - self.start_locus_index + 1
         plot_mtrx = [[0.0] * size for _ in range(size)]
         x_values = [0] * size
+        locus_index = {locus: i for i, locus in enumerate(self.locus_list)}
 
         for loc_i, row_data in self.matrix.items():
             if self.snp_first <= loc_i <= self.snp_last:
-                idx_i = self.locus_list.index(loc_i) - self.start_locus_index
+                idx_i = locus_index[loc_i] - self.start_locus_index
                 x_values[idx_i] = loc_i
                 for loc_j, cell in row_data["data"].items():
                     if (
                         self.snp_first <= loc_j <= self.snp_last
                         and "corr_coeff" in cell
                     ):
-                        idx_j = self.locus_list.index(loc_j) - self.start_locus_index
+                        idx_j = locus_index[loc_j] - self.start_locus_index
                         try:
                             plot_mtrx[idx_i][idx_j] = cell["corr_coeff"] ** 2
                         except IndexError:
