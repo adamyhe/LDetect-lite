@@ -21,7 +21,7 @@ The workflow writes comparison tables under
 | Artifact | Result |
 |---|---|
 | Covariance rows and keys | exact, 226,074 rows |
-| Covariance values | equivalent to roundoff; max shrinkage difference `5.55e-17` |
+| Covariance values | equivalent to roundoff; max shrinkage difference `2.78e-17` |
 | Matrix-to-vector output | all 671 loci equivalent; max absolute difference `7.46e-14` |
 | Breakpoint JSON | exact for `fourier`, `fourier_ls`, `uniform`, and `uniform_ls` |
 | BED blocks | exact; 13/13 blocks and 14/14 boundaries match |
@@ -45,7 +45,7 @@ The workflow writes comparison tables under
 The covariance comparison reports `all_exact=no` because the shrinkage values
 are not bit-identical after independent floating-point regeneration. The
 position keys, naive values, genetic positions, and SNP IDs are exact; the
-maximum shrinkage-value difference is `5.551115e-17`, so the comparison is
+maximum shrinkage-value difference is `2.775558e-17`, so the comparison is
 classified as equivalent.
 
 The generated partition diagnostic compares a whole-chromosome partitioning run

@@ -95,7 +95,6 @@ The package is under `src/ldetect_lite/`. Key modules:
   - `ldetect_original/` — full genome-wide reproduction of the published Berisa & Pickrell EUR/AFR/ASN LD blocks from public 1000 Genomes Phase 1 VCFs, plus diagnostic Snakefiles (`Snakefile.diagnostics`, `Snakefile.legacy_diagnostics`, `Snakefile.provenance_diagnostics`) used to isolate divergences from the reference.
   - `MacDonald2022/` — reproduction of MacDonald et al. (2022) GRCh38 LD blocks (deCODE map + pyrho superpopulation maps).
   - `r2_zarr_exactness/` — Zarr-based exactness checks.
-- `benchmarks/` — standalone perf benchmarks (e.g. `bench_ld_kernel.py` for the Numba LD kernel, referenced in `docs/optimizations.md`).
 
 ## Reproduction Status
 

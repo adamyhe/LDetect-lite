@@ -38,10 +38,15 @@ Current measured command-level timings on the example interval:
 
 | Stage              | Original LDetect mean seconds | `ldetect-lite` mean seconds | Speedup |
 | ------------------ | ----------------------------: | --------------------------: | ------: |
-| `calc-covariance`  |                        96.649 |                       3.276 |  29.50x |
-| `matrix-to-vector` |                         1.032 |                       0.229 |   4.51x |
-| `find-minima`      |                        10.845 |                       1.345 |   8.06x |
-| `extract-bpoints`  |                         0.676 |                       0.136 |   4.98x |
+| `calc-covariance`  |                        259.278 |                       4.651 |  55.75x |
+| `matrix-to-vector` |                          2.112 |                       0.365 |   5.79x |
+| `find-minima`      |                         23.844 |                       1.892 |  12.60x |
+| `extract-bpoints`  |                          1.082 |                       0.296 |   3.66x |
+
+Measured on the same Xeon E5-2620 v4 host as the full EUR chr21 benchmark
+below; this supersedes an earlier measurement (96.649s / 3.276s / 29.50x for
+`calc-covariance`, etc.) taken on a different, faster host — see the hardware
+note under the chr21 table.
 
 The full EUR chr21 timing benchmark is generated from the
 `examples/ldetect_original/` reproduction workflow. It compares the vendored
@@ -52,7 +57,13 @@ chromosome data; see that example's README for the exact commands.
 
 | Stage      | Original LDetect mean seconds | `ldetect-lite` mean seconds |   Speedup |
 | ---------- | ----------------------------: | --------------------------: | --------: |
-| `pipeline` |                   6605.000000 |                  210.790000 | 31.334504 |
+| `pipeline` |                  10177.000000 |                   168.860000 | 60.268862 |
+
+Measured on an Intel Xeon E5-2620 v4 @ 2.1GHz. This supersedes an
+earlier measurement (6605.0s / 210.79s / 31.33x) taken on a newer AMD EPYC
+9554 host — absolute times are not comparable across hosts, but legacy and
+`ldetect-lite` were timed together on the same host in both cases, so each
+speedup ratio is a valid same-environment comparison.
 
 The covariance benchmark is intentionally a command boundary comparison:
 legacy uses the vendored `P00_01_calc_covariance.py` script with the prepared
