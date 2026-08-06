@@ -229,7 +229,7 @@ class FilterResult(TypedDict):
     filtered_minima_vals: list[float]
 
 
-def _filter_window(width: int, mode: str = "scipy-periodic") -> np.ndarray:
+def _filter_window(width: int, mode: str = "symmetric") -> np.ndarray:
     n = 2 * width + 1
     if mode == "symmetric":
         return np.asarray(np.hanning(n), dtype=np.float64)
@@ -260,7 +260,7 @@ def _filter_result(
 def apply_filter_serial(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
 ) -> FilterResult:
     """Apply the serial direct-convolution filter implementation."""
     window = _filter_window(width, window_mode)
@@ -282,7 +282,7 @@ def apply_filter_serial(
 def apply_filter_threaded(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     workers: int = 1,
 ) -> FilterResult:
     """Apply the row-chunked threaded filter implementation with a scoped
@@ -302,7 +302,7 @@ def apply_filter_threaded(
 def apply_filter(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     filter_workers: int = 1,
 ) -> FilterResult:
     """Apply a Hanning-window low-pass filter and find local minima.
@@ -327,7 +327,7 @@ def apply_filter(
 def apply_filter_get_minima(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     filter_workers: int = 1,
 ) -> int:
     """Return the number of local minima for a given filter width."""
@@ -341,7 +341,7 @@ def apply_filter_get_minima(
 def apply_filter_get_minima_serial(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
 ) -> int:
     """Return the local-minima count using the serial filter implementation."""
     return len(
@@ -352,7 +352,7 @@ def apply_filter_get_minima_serial(
 def apply_filter_get_minima_threaded(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     workers: int = 1,
 ) -> int:
     """Return the local-minima count using the threaded filter implementation."""
@@ -366,7 +366,7 @@ def apply_filter_get_minima_threaded(
 def apply_filter_get_minima_ind(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     filter_workers: int = 1,
 ) -> np.ndarray:
     """Return the indices of local minima for a given filter width."""
@@ -378,7 +378,7 @@ def apply_filter_get_minima_ind(
 def apply_filter_get_minima_ind_threaded(
     np_init_array: np.ndarray,
     width: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     workers: int = 1,
 ) -> np.ndarray:
     """Return local-minima indices using the threaded filter implementation."""
@@ -405,7 +405,7 @@ def apply_filters(
     first: int,
     last: int,
     step: int,
-    window_mode: str = "scipy-periodic",
+    window_mode: str = "symmetric",
     filter_workers: int = 1,
 ) -> list[FilterResult]:
     """Apply filters at a range of widths and return all results."""

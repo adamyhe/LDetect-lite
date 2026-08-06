@@ -82,7 +82,7 @@ def find_breakpoints(
     n_bpoints: int | None = None,
     covariance_cache: ChromosomeCovariance | None = None,
     subsets: set[str] | None = None,
-    filter_window: str = "scipy-periodic",
+    filter_window: str = "symmetric",
     filter_workers: int = 1,
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
@@ -123,13 +123,20 @@ def find_breakpoints(
             for normal float metrics.
         subsets: Optional breakpoint subsets to compute and write.  ``None``
             preserves the historical behavior and writes all four subsets.
-        filter_window: Hanning window compatibility mode. ``"scipy-periodic"``
-            matches modern ``scipy.signal.get_window(..., fftbins=True)``
-            behavior and is the default. ``"symmetric"`` uses ``np.hanning``;
-            it is required (not just historical) for reproducing populations
-            whose published reference blocks were generated under scipy
-            <1.1, where periodic odd-length windows were bit-identical to
-            symmetric ones (see ``notes/findings/ldetect-original-reproduction.md``).
+        filter_window: Hanning window mode. ``"symmetric"`` uses ``np.hanning``
+            and is the default: it matches the window Berisa & Pickrell (2016)
+            actually specify in their supplement (``sin**2(pi*n/(N-1))``, the
+            denominator-``N-1`` formula that defines the symmetric, not
+            periodic, Hann window), it is the conventional choice for a
+            windowed-FIR/convolution filter kernel, and it is also what
+            reproduces published reference blocks generated under scipy <1.1
+            (where a library defect made periodic odd-length windows
+            bit-identical to symmetric ones anyway). ``"scipy-periodic"``
+            matches modern ``scipy.signal.get_window(..., fftbins=True)``;
+            it is required to reproduce modern-scipy-era published output
+            (e.g. MacDonald et al. 2022), which ran the original code after
+            that defect was fixed (see
+            ``notes/findings/ldetect-original-reproduction.md``).
         filter_workers: Minimum threads for adaptive single-filter
             convolutions. Trackback candidate sweeps always force each
             concurrent candidate filter to one thread to avoid nested

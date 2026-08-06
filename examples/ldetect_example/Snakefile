@@ -214,12 +214,15 @@ rule matrix_to_vector:
 # ---------------------------------------------------------------------------
 # Step 4: Find minima
 #
-# --filter-window symmetric reproduces the original ldetect toy fixture: its
-# reference breakpoints were generated under scipy <1.1, where a requested
-# periodic Hann window was silently computed as symmetric (see
-# notes/findings/ldetect-original-reproduction.md). The CLI default is
-# scipy-periodic (the modern, intended behavior); examples/ldetect_original's
-# Snakefile pins symmetric the same way for the same reason.
+# --filter-window symmetric (the CLI default) reproduces the original
+# ldetect toy fixture: its reference breakpoints were generated under scipy
+# <1.1, where a requested periodic Hann window was silently computed as
+# symmetric (see notes/findings/ldetect-original-reproduction.md) -- and
+# `symmetric` is also the formula Berisa & Pickrell's own supplement
+# specifies mathematically, which is why it's the default rather than a
+# reproduction-only fallback. Pinned explicitly here anyway so this fixture
+# stays reproducible even if the default changes again; examples/
+# ldetect_original's Snakefile pins it the same way for the same reason.
 # ---------------------------------------------------------------------------
 
 rule find_minima:

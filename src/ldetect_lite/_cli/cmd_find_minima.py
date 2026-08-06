@@ -104,15 +104,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
     p.add_argument(
         "--filter-window",
         choices=("symmetric", "scipy-periodic"),
-        default="scipy-periodic",
+        default="symmetric",
         help=(
-            "Hanning window mode for breakpoint filtering. 'scipy-periodic' "
-            "matches modern scipy.signal.get_window(..., fftbins=True) "
-            "behavior and is the default. 'symmetric' uses np.hanning; use "
-            "it to reproduce populations whose published reference blocks "
-            "were generated under scipy <1.1, where periodic odd-length "
-            "windows were bit-identical to symmetric ones (default: "
-            "scipy-periodic)."
+            "Hanning window mode for breakpoint filtering. 'symmetric' uses "
+            "np.hanning and is the default: it matches the window Berisa & "
+            "Pickrell (2016) specify in their supplement, is the "
+            "conventional choice for a windowed-FIR/convolution filter "
+            "kernel, and reproduces published reference blocks generated "
+            "under scipy <1.1. 'scipy-periodic' matches modern "
+            "scipy.signal.get_window(..., fftbins=True) behavior; use it to "
+            "reproduce modern-scipy-era published output (e.g. MacDonald et "
+            "al. 2022) (default: symmetric)."
         ),
     )
     p.add_argument(

@@ -260,8 +260,9 @@ def run_lite(
             # This toy fixture's reference breakpoints were generated under
             # scipy <1.1, where a requested periodic Hann window was silently
             # computed as symmetric; see
-            # notes/findings/ldetect-original-reproduction.md. The CLI
-            # default (scipy-periodic) diverges from this specific fixture.
+            # notes/findings/ldetect-original-reproduction.md. Pinned
+            # explicitly even though it matches the CLI default (symmetric),
+            # so this stays reproducible if the default changes again.
             "--filter-window",
             "symmetric",
         ],

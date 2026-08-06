@@ -1,6 +1,6 @@
 # ldetect_original reproduction — findings
 
-**Findings summary (last updated 2026-07-28).** Distilled for human review — e.g. writing up the paper. Full investigation detail, diagnostic scripts, and dated process notes: `notes/logs/ldetect-original-main-pipeline-audit.md`.
+**Findings summary (last updated 2026-08-05).** Distilled for human review — e.g. writing up the paper. Full investigation detail, diagnostic scripts, and dated process notes: `notes/logs/ldetect-original-main-pipeline-audit.md`.
 
 ## Status: regression (2026-07-13 to 2026-07-28) found and fixed; pre-existing EUR/AFR residuals still parked
 
@@ -33,6 +33,26 @@ For odd `M`, `not sym and not odd` is always `False`, so the periodic-length adj
 Consequence: Berisa & Pickrell's actual 2015 analysis, run on contemporary scipy, computed the *symmetric* Hann window despite the code asking for periodic — a real, undetectable-at-the-time library defect, not an intentional choice. Running the same archived code today with modern (post-1.1.0, bug-fixed) scipy produces a genuinely different, correctly-periodic window, which no longer matches what actually generated the published blocks. `ldetect-lite`'s `symmetric` mode (`np.hanning`) is therefore not a deprecated legacy fallback — it's the historically-accurate reproduction of scipy 0.16.0's actual (buggy) output. `scipy-periodic` remains correct for reproductions run against modern-scipy-era published output (MacDonald2022): there is no contradiction, both modes are "correct" for the actual scipy behavior of their respective eras.
 
 Verification chain (all checked directly, not inferred): `sig.get_window('hanning', N)` maps to periodic `hann` since at least scipy 0.12.0 (2013) — ruling out a naming/alias explanation; `scipy.ndimage.convolve1d`'s `mode='reflect'` default and true-kernel-reversal semantics have also been stable since 2013 — ruling out a boundary-handling explanation; `apply_filter`/`baselib.filters` is the only filtering implementation ever called by the legacy pipeline scripts (`P02_minima_pipeline.py`, `E05_find_minima.py`) — ruling out an alternate-implementation explanation.
+
+## The Berisa & Pickrell supplement's own Hann formula is symmetric, not periodic (2026-08-05)
+
+Read directly from the paper's supplementary methods document ("Approximately independent linkage disequilibrium blocks in human populations - Supplement", Berisa & Pickrell), Section 4 gives the window function as:
+
+```
+w[n] = sin²(πn / (N-1)), 0 ≤ n ≤ N-1
+```
+
+The denominator is `N-1`. That is definitionally the **symmetric** Hann window (`numpy.hanning`): both endpoints (`n=0`, `n=N-1`) are exactly zero. The periodic/DFT-even form that `scipy.signal.get_window(..., fftbins=True)` computes is `sin²(πn/N)` — denominator `N`, right endpoint never reaches zero — a different formula, not a rounding variant of the same one.
+
+This is a third, independent data point alongside the two established above:
+
+1. The 2015 source code's literal library call requests periodic (`get_window`'s `fftbins=True` default, never overridden).
+2. The actual 2015 output was symmetric, because of the scipy 0.16.0 defect (above).
+3. The paper's own written formula is symmetric — independent of both the code and the scipy defect.
+
+(2) and (3) agree with each other; (1) is the outlier, and it is the weakest evidence of the three: an unexamined library default is not the same as a deliberate mathematical statement the same authors wrote down in their own supplement. Combined with the fact that a symmetric window is also the conventional choice for a windowed-FIR/convolution filter *kernel* (the periodic/DFT-even form exists for windowing a signal before FFT spectral analysis, which is not what this Hann window is used for here — it's convolved directly as a smoothing kernel), this settles a question that was previously left open by the root-cause analysis above: `ldetect-lite`'s CLI default was `scipy-periodic`, on the reasoning that it "reflects what the original code intended... correct for new analyses." That reasoning rested only on (1), and is no longer well-supported once (2) and (3) are considered together.
+
+**Consequence: the CLI default was flipped from `scipy-periodic` to `symmetric`** (`filters.py`, `pipeline.py`, `cmd_run.py`, `cmd_find_minima.py`, and all docs/examples referencing the default — see git history around this finding's date). `scipy-periodic` remains available and is still the necessary, non-default mode for reproducing modern-scipy-era published output — MacDonald et al. (2022) ran the original code after the scipy defect was fixed, so their published blocks genuinely need the periodic window (see `notes/findings/macdonald2022-reproduction.md`). This does not contradict the root-cause analysis above; it's an additional, independent line of evidence pointing the same direction as the empirical 2015 output.
 
 ## Status: parked, not actively being investigated (pre-existing, as of 2026-07-03)
 

@@ -98,7 +98,6 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "deprecated: coverage for deprecated compatibility behavior",
     "integration: slow end-to-end tests against example data (deselect with -m 'not integration')",
 ]
 
