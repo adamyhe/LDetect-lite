@@ -23,8 +23,17 @@ populations:
     ne: 11418
 
 # Output block sets. EUR/deCODE uses MacDonald's published already-interpolated
-# deCODE maps directly. For pyrho, two tracks are produced side by side per
-# population (AFR/EAS/EUR; SAS excluded from the default run -- see below):
+# deCODE maps directly, and is paired with EUR_symmetric -- identical except
+# for filter_window -- to isolate the symmetric-vs-scipy-periodic Hann window
+# question on its own, independent of any map-interpolation differences. See
+# notes/findings/ldetect-original-reproduction.md for why `symmetric` is
+# ldetect-lite's own default (it matches Berisa & Pickrell's supplement
+# formula) while `scipy-periodic` is what MacDonald's actual published output
+# needs. This mirrors the comparison examples/ldetect_original used to run
+# internally before symmetric became the library default there too.
+#
+# For pyrho, two tracks are produced side by side per population (AFR/EAS/EUR;
+# SAS excluded from the default run -- see below):
 #   pyrho_{POP}           -- MacDonald's own published, already-interpolated
 #                             pyrho maps, "as close to original, with bugs":
 #                             these maps are genuinely non-monotonic in
@@ -63,6 +72,17 @@ block_sets:
     # independent of ldetect-lite's own CLI default (now `symmetric`) or of
     # this file's run-wide filter_window fallback below.
     filter_window: scipy-periodic
+  EUR_symmetric:
+    # Identical to EUR (same deCODE map, same Ne) except filter_window --
+    # isolates the window-choice question on its own. Expected to diverge
+    # from MacDonald's published blocks as a result; that's the point.
+    population: EUR
+    map_source: decode
+    decode_interpolation: published
+    reference_bed: deCODE_EUR_LD_blocks.bed
+    remove_centromere_blocks: false
+    min_snps_per_block: 0
+    filter_window: symmetric
   pyrho_AFR:
     population: AFR
     map_source: pyrho
@@ -184,10 +204,11 @@ block_sets:
     remove_centromere_blocks: true
     maf_filter: minor
 
-# Default targets for rule all: deCODE/EUR, plus both the "as published, with
-# bugs" and "corrected" pyrho tracks for AFR/EAS/EUR, each independently
-# compared against MacDonald's published blocks. pyrho_SAS{,_corrected} are
-# excluded here -- no settled Ne value exists for SAS yet (see
+# Default targets for rule all: deCODE/EUR (plus its symmetric-window
+# counterpart, EUR_symmetric), and both the "as published, with bugs" and
+# "corrected" pyrho tracks for AFR/EAS/EUR, each independently compared
+# against MacDonald's published blocks. pyrho_SAS{,_corrected} are excluded
+# here -- no settled Ne value exists for SAS yet (see
 # notes/findings/macdonald2022-reproduction.md, "pyrho_SAS's Ne fallback"),
 # so a run would just reproduce the already-documented, unrelated Ne-driven
 # failure regardless of interpolation mode. pyrho_{POP}_macdonald_style and
@@ -195,6 +216,7 @@ block_sets:
 active_block_sets:
   [
     EUR,
+    EUR_symmetric,
     pyrho_AFR,
     pyrho_EAS,
     pyrho_EUR,

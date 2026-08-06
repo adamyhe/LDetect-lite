@@ -46,8 +46,11 @@ once the supplement's own formula confirmed `symmetric` is correct rather
 than merely a historical-reproduction artifact, showing an alternate
 "corrected" window stopped being a meaningful demonstration for this
 from-scratch reproduction. The equivalent modern-scipy-era comparison lives
-in `examples/MacDonald2022` instead, whose deCODE/EUR block set genuinely
-needs `scipy-periodic` — see that example's `config.yaml`.)
+in `examples/MacDonald2022` instead: its `EUR` block set genuinely needs
+`scipy-periodic` to match MacDonald's published output, paired with an
+`EUR_symmetric` block set that is identical except for the window, isolating
+the same symmetric-vs-periodic question on that data — see that example's
+`config.yaml`.)
 
 ## LD-Neighborhood Plots
 
