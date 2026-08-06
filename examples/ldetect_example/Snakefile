@@ -213,6 +213,13 @@ rule matrix_to_vector:
 
 # ---------------------------------------------------------------------------
 # Step 4: Find minima
+#
+# --filter-window symmetric reproduces the original ldetect toy fixture: its
+# reference breakpoints were generated under scipy <1.1, where a requested
+# periodic Hann window was silently computed as symmetric (see
+# notes/findings/ldetect-original-reproduction.md). The CLI default is
+# scipy-periodic (the modern, intended behavior); examples/ldetect_original's
+# Snakefile pins symmetric the same way for the same reason.
 # ---------------------------------------------------------------------------
 
 rule find_minima:
@@ -228,7 +235,8 @@ rule find_minima:
             --chr-name {CHROM} \
             --dataset-path {WORK_DIR} \
             --n-snps-bw-bpoints {N_SNPS} \
-            --output {output}
+            --output {output} \
+            --filter-window symmetric
         """
 
 

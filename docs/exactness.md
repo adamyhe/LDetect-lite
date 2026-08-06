@@ -21,7 +21,7 @@ The workflow writes comparison tables under
 | Artifact | Result |
 |---|---|
 | Covariance rows and keys | exact, 226,074 rows |
-| Covariance values | equivalent to roundoff; max shrinkage difference `5.55e-17` |
+| Covariance values | equivalent to roundoff; max shrinkage difference `2.78e-17` |
 | Matrix-to-vector output | all 671 loci equivalent; max absolute difference `7.46e-14` |
 | Breakpoint JSON | exact for `fourier`, `fourier_ls`, `uniform`, and `uniform_ls` |
 | BED blocks | exact; 13/13 blocks and 14/14 boundaries match |
@@ -45,10 +45,19 @@ The workflow writes comparison tables under
 The covariance comparison reports `all_exact=no` because the shrinkage values
 are not bit-identical after independent floating-point regeneration. The
 position keys, naive values, genetic positions, and SNP IDs are exact; the
-maximum shrinkage-value difference is `5.551115e-17`, so the comparison is
+maximum shrinkage-value difference is `2.775558e-17`, so the comparison is
 classified as equivalent.
 
 The generated partition diagnostic compares a whole-chromosome partitioning run
 to the original toy example's single-window fixture. The staged partition file
 used by the end-to-end toy pipeline is the exactness target for downstream
 steps and matches exactly.
+
+The breakpoint and BED exactness above requires `find-minima --filter-window
+symmetric`. This toy fixture's reference breakpoints were generated under
+scipy <1.1, where a requested periodic Hann window was silently computed as
+symmetric (`notes/findings/ldetect-original-reproduction.md`); the CLI
+default is `scipy-periodic`, the modern, intended behavior, which does not
+reproduce this fixture. The Snakefile and the function-level/legacy-pipeline
+benchmark scripts under `examples/ldetect_example/scripts/` all pin
+`symmetric` for this reason.

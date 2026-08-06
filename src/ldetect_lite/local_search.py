@@ -499,38 +499,6 @@ def _active_diagonal(
     return active_lo[diag_mask], active_shrink[diag_mask]
 
 
-def _add_array_locus_values(
-    curr_locus: int,
-    active_lo: np.ndarray,
-    active_hi: np.ndarray,
-    active_shrink: np.ndarray,
-    diag_lookup: dict[int, float],
-    snp_top: int,
-    sum_vert_by_locus: dict[int, float],
-    sum_horiz_by_locus: dict[int, float],
-) -> None:
-    diag_curr = diag_lookup.get(curr_locus, 0.0)
-    if diag_curr <= 0.0:
-        sum_vert_by_locus.setdefault(curr_locus, 0.0)
-        sum_horiz_by_locus.setdefault(curr_locus, 0.0)
-        return
-
-    row_mask = (active_lo == curr_locus) & (active_hi <= snp_top)
-    row_hi = active_hi[row_mask]
-    row_shrink = active_shrink[row_mask]
-    sum_vert_by_locus.setdefault(curr_locus, 0.0)
-    sum_horiz_by_locus.setdefault(curr_locus, 0.0)
-    for key, shrink in zip(row_hi, row_shrink):
-        key = int(key)
-        diag_key = diag_lookup.get(key, 0.0)
-        if diag_key <= 0.0:
-            continue
-        r2 = float(shrink * shrink / (diag_curr * diag_key))
-        sum_vert_by_locus[curr_locus] += r2
-        sum_horiz_by_locus[key] = sum_horiz_by_locus.get(key, 0.0) + r2
-        sum_vert_by_locus.setdefault(key, 0.0)
-
-
 def _add_array_segment_values(
     segment_loci: np.ndarray,
     active_lo: np.ndarray,
@@ -548,10 +516,8 @@ def _add_array_segment_values(
 ) -> None:
     """Aggregate local-search vertical/horizontal r² sums for one locus segment.
 
-    This is the array-backed replacement for calling
-    :func:`_add_array_locus_values` once per locus.  It preserves the same
-    effective row eligibility rules, but scans the active covariance rows once
-    per segment and accumulates per-locus sums in bounded chunks.
+    Scans the active covariance rows once per segment and accumulates
+    per-locus sums in bounded chunks, rather than per locus.
     """
     if segment_loci.size == 0:
         return
@@ -832,16 +798,6 @@ def _add_row_chunk_values(
     accumulator.add_horizontal(row_hi, r2)
     if stats is not None:
         stats.horizontal_seconds += time.perf_counter() - horizontal_start
-
-
-def _diag_lookup(
-    lo: np.ndarray, hi: np.ndarray, shrink: np.ndarray
-) -> dict[int, float]:
-    diag_mask = lo == hi
-    return {
-        int(locus): float(value)
-        for locus, value in zip(lo[diag_mask], shrink[diag_mask])
-    }
 
 
 class LocalSearch:

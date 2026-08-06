@@ -6,10 +6,12 @@ import gzip
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any
 
 import cyvcf2
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -39,14 +41,21 @@ def read_individuals(individuals_path: Path) -> list[str]:
     return individuals
 
 
+@cache
 def read_genetic_map(genetic_map_path: Path) -> dict[int, float]:
-    """Return a physical-position to genetic-position lookup from a gzipped map."""
-    pos2gpos: dict[int, float] = {}
+    """Return a physical-position to genetic-position lookup from a gzipped map.
+
+    Memoized per process: ``calc_covariance`` calls this once per partition,
+    but a single ``ldetect run`` invocation always passes the same
+    chromosome-wide map path, so a worker that handles multiple partitions
+    would otherwise reparse the whole (potentially large) map once per
+    partition it processes. The returned dict is shared across calls with
+    the same path -- callers must treat it as read-only.
+    """
     with gzip.open(genetic_map_path, "rt") as gf:
-        for raw in gf:
-            parts = raw.strip().split()
-            pos2gpos[int(parts[1])] = float(parts[2])
-    return pos2gpos
+        cols = np.loadtxt(gf, usecols=(1, 2), dtype=np.float64, ndmin=2)
+    positions = cols[:, 0].astype(np.int64).tolist()
+    return dict(zip(positions, cols[:, 1].tolist()))
 
 
 def watterson_theta(n_haps: int) -> float:
@@ -60,7 +69,6 @@ def read_reference_panel(
     region: str | None,
     individuals: list[str],
     pos2gpos: dict[int, float],
-    n_haps: int,
 ) -> ReferencePanel:
     """Load phased haplotypes for mapped variants in a VCF/BCF region.
 
@@ -80,7 +88,7 @@ def read_reference_panel(
     # cyvcf2 subsets to the requested samples but does not guarantee it
     # preserves the caller's order.
     sample_index = {ind: idx for idx, ind in enumerate(vcf.samples)}
-    order = [sample_index[ind] for ind in individuals]
+    order = np.array([sample_index[ind] for ind in individuals])
 
     all_pos: list[int] = []
     all_rs: list[str] = []
@@ -93,26 +101,18 @@ def read_reference_panel(
         if pos not in pos2gpos:
             continue
 
-        genotypes = variant.genotypes
-        row_haps = [0] * n_haps
-        skip = False
-        hap_col = 0
-        for col in order:
-            allele1, allele2, phased = genotypes[col]
-            if not phased or allele1 < 0 or allele2 < 0:
-                skipped_unphased += 1
-                skip = True
-                break
-            row_haps[hap_col] = allele1
-            row_haps[hap_col + 1] = allele2
-            hap_col += 2
-
-        if skip:
+        # ``genotype.array()`` returns ``(n_samples, 3)``: allele1, allele2,
+        # phased (1/0), matching ``variant.genotypes`` but as a single
+        # vectorized array instead of a Python list of tuples -- avoids a
+        # per-individual Python loop over every variant.
+        gt = variant.genotype.array()[order]
+        if np.any(gt[:, 2] == 0) or np.any(gt[:, :2] < 0):
+            skipped_unphased += 1
             continue
 
         all_pos.append(pos)
         all_rs.append(variant.ID or ".")
-        haps.append(row_haps)
+        haps.append(gt[:, :2].reshape(-1).tolist())
 
     vcf.close()
 

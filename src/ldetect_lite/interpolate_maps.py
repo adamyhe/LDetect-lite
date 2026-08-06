@@ -6,7 +6,19 @@ Python 3 port of joepickrell/1000-genomes-genetic-maps/scripts/interpolate_maps.
 from __future__ import annotations
 
 import gzip
+import sys
 from pathlib import Path
+
+
+def _warn_non_monotonic_gpos(rs: str, pos: int, gp: float, prev_gp: float) -> None:
+    print(
+        f"Warning: interpolated genetic map is not monotonically "
+        f"non-decreasing at {rs} (position={pos}): genetic position {gp} "
+        f"< previous {prev_gp}; this can indicate a map-input or "
+        "interpolation bug and will force downstream calc_covariance onto "
+        "its slower per-row genetic-distance scan",
+        file=sys.stderr,
+    )
 
 
 def interpolate(
@@ -39,6 +51,8 @@ def interpolate(
     # Interpolate
     with gzip.open(output, "wt") as out:
         map_idx = 0
+        prev_gp: float | None = None
+        warned = False
         for snp_idx, (pos, rs) in enumerate(zip(snp_positions, snp_ids)):
             # Advance map pointer past positions < pos
             while map_idx < len(map_positions) - 1 and map_positions[map_idx] < pos:
@@ -62,6 +76,11 @@ def interpolate(
             else:
                 # pos > all map positions — clamp to last
                 gp = map_gpos[-1]
+
+            if not warned and prev_gp is not None and gp < prev_gp:
+                _warn_non_monotonic_gpos(rs, pos, gp, prev_gp)
+                warned = True
+            prev_gp = gp
 
             out.write(f"{rs} {pos} {gp}\n")
 
@@ -150,7 +169,9 @@ def interpolate_macdonald_pyrho(
     appears to accidentally overwrite the final row's rate column with
     ``last_snp + 1`` while trying to extend a non-existent end-position
     column. This mode intentionally reproduces those dataframe/indexing
-    choices for block-replication diagnostics only.
+    choices for block-replication diagnostics only, including whatever
+    non-monotonicity they produce -- so unlike the other interpolation
+    modes, this one does not warn about it.
     """
     snp_positions, snp_ids = _read_snp_bed(snp_file)
     positions, rates, cum_cm = _read_map_rows(genetic_map)
@@ -158,7 +179,15 @@ def interpolate_macdonald_pyrho(
         positions[0] = 0
     if snp_positions and rates and snp_positions[-1] > rates[-1]:
         rates[-1] = float(snp_positions[-1] + 1)
-    _interpolate_interval_rows(snp_positions, snp_ids, positions, rates, cum_cm, output)
+    _interpolate_interval_rows(
+        snp_positions,
+        snp_ids,
+        positions,
+        rates,
+        cum_cm,
+        output,
+        warn_non_monotonic=False,
+    )
 
 
 def _interpolate_interval_rows(
@@ -168,11 +197,14 @@ def _interpolate_interval_rows(
     rates: list[float],
     cum_cm: list[float],
     output: Path,
+    warn_non_monotonic: bool = True,
 ) -> None:
     n = len(begins)
 
     with gzip.open(output, "wt") as out:
         idx = 0
+        prev_gp: float | None = None
+        warned = False
         for pos, rs in zip(snp_positions, snp_ids):
             while idx < n - 1 and begins[idx + 1] <= pos:
                 idx += 1
@@ -182,6 +214,16 @@ def _interpolate_interval_rows(
             else:
                 startcm = 0.0 if idx == 0 else cum_cm[idx - 1]
                 gp = startcm + (pos - begins[idx]) * rates[idx] / 1e6
+
+            if (
+                warn_non_monotonic
+                and not warned
+                and prev_gp is not None
+                and gp < prev_gp
+            ):
+                _warn_non_monotonic_gpos(rs, pos, gp, prev_gp)
+                warned = True
+            prev_gp = gp
 
             out.write(f"{rs} {pos} {gp}\n")
 
@@ -227,6 +269,8 @@ def interpolate_hapmap(
 
     with gzip.open(output, "wt") as out:
         idx = 0
+        prev_gp: float | None = None
+        warned = False
         for pos, rs in zip(snp_positions, snp_ids):
             while idx < n - 1 and positions[idx + 1] <= pos:
                 idx += 1
@@ -235,6 +279,11 @@ def interpolate_hapmap(
                 gp = 0.0
             else:
                 gp = cum_cm[idx] + (pos - positions[idx]) * rates[idx] / 1e6
+
+            if not warned and prev_gp is not None and gp < prev_gp:
+                _warn_non_monotonic_gpos(rs, pos, gp, prev_gp)
+                warned = True
+            prev_gp = gp
 
             out.write(f"{rs} {pos} {gp}\n")
 

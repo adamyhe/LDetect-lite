@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 from numba import njit
@@ -29,6 +29,9 @@ from ldetect_lite.io.covariance_hdf5 import (
     write_compact_covariance_partition_hdf5_chunks,
     write_covariance_partition_hdf5,
 )
+
+if TYPE_CHECKING:
+    from ldetect_lite._util.covariance_sidecars import CovarianceSidecarAccumulator
 
 COVARIANCE_WRITE_CHUNK_ROWS = 1_000_000
 
@@ -113,6 +116,32 @@ def _shrink_ld_values(
     ee = math.exp(exponent)
     ds2 = shrink_scale * d_naive * ee
     return d_naive, ds2
+
+
+def _diag_values_impl(
+    hap_sums: np.ndarray,
+    n_total: float,
+    theta: float,
+    cutoff: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized closed form of the ``i == j`` branch of the pairwise kernel.
+
+    For ``i == j``, ``df == 0`` so ``ee == 1.0`` and ``n11 == n1x == nx1 ==
+    hap_sums[i]``, collapsing ``_shrink_ld_values`` to a pure function of
+    ``hap_sums`` alone. Operation order mirrors the pairwise kernels'
+    ``i == j`` branch exactly (same ``shrink_scale``/``diag_adjust``
+    expression forms, same cutoff-before-diag-adjust order), so this
+    reproduces the persisted diagonal bit-for-bit without a second
+    pairwise-kernel pass.
+    """
+    f1 = hap_sums / n_total
+    d_naive = f1 - f1 * f1
+    shrink_scale = (1.0 - theta) * (1.0 - theta)
+    ds2 = shrink_scale * d_naive
+    valid = np.fabs(ds2) >= cutoff
+    diag_adjust = (theta / 2.0) * (1.0 - theta / 2.0)
+    diag_val = ds2 + diag_adjust
+    return valid, diag_val
 
 
 @_njit_inline
@@ -833,16 +862,11 @@ def partition_chromosome(
         ne: Effective population size.
         cutoff: Minimum recombination fraction threshold for window extension.
     """
-    pos2gpos: dict[int, float] = {}
-    positions: list[int] = []
-
     with gzip.open(genetic_map_path, "rt") as f:
-        for raw in f:
-            parts = raw.strip().split()
-            pos = int(parts[1])
-            gpos = float(parts[2])
-            pos2gpos[pos] = gpos
-            positions.append(pos)
+        map_cols = np.loadtxt(f, usecols=(1, 2), dtype=np.float64, ndmin=2)
+
+    positions: list[int] = map_cols[:, 0].astype(np.int64).tolist()
+    pos2gpos: dict[int, float] = dict(zip(positions, map_cols[:, 1].tolist()))
 
     n_snp = len(positions)
     n_chunks = int(math.floor(n_snp / window_size))
@@ -903,6 +927,7 @@ def calc_covariance(
     compression: str | None = "zstd",
     ld_kernel: str = "bitpacked",
     profile: dict[str, float] | None = None,
+    sidecar: CovarianceSidecarAccumulator | None = None,
 ) -> None:
     """Calculate the Wen/Stephens shrinkage LD estimate from a VCF/BCF file.
 
@@ -940,6 +965,14 @@ def calc_covariance(
             array-sum backend available for reference and diagnostics.
         profile: Optional mutable timing dictionary populated with coarse
             stage timings for benchmark/profiling callers.
+        sidecar: Optional fused-vector accumulator
+            (``_util.covariance_sidecars.CovarianceSidecarAccumulator``). When
+            given, this partition's row-chunk stream is teed through it (the
+            persisted output is unchanged) and its diagonal is set from this
+            call's vectorized ``_diag_values_impl`` precompute. Only wired
+            into the single-pass compact-output path; on fallback to the
+            two-pass path, the sidecar is marked invalid rather than left
+            holding a partial, silently-wrong view of the partition.
 
     Raises:
         ValueError: If any individual in *individuals_path* is not present in
@@ -966,7 +999,7 @@ def calc_covariance(
         profile["prepare_seconds"] = time.perf_counter() - prep_start
 
     vcf_start = time.perf_counter()
-    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos, n_haps)
+    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos)
     if profile is not None:
         profile["vcf_seconds"] = time.perf_counter() - vcf_start
         profile["n_snps"] = float(len(panel.positions))
@@ -1010,6 +1043,14 @@ def calc_covariance(
     if compact_output and assume_sorted_unique_rows:
         write_start = time.perf_counter()
         try:
+            if sidecar is not None:
+                diag_valid, diag_val_all = _diag_values_impl(
+                    hap_sums, float(n_haps), theta, cutoff
+                )
+                sidecar.set_diagonals(
+                    pos_arr[diag_valid].astype(np.int64, copy=False),
+                    diag_val_all[diag_valid],
+                )
             if ld_kernel == "bitpacked":
                 pack_start = time.perf_counter()
                 packed_hap_mat = _pack_haplotypes_impl(hap_mat)
@@ -1049,6 +1090,8 @@ def calc_covariance(
                 if profile is not None:
                     profile["pack_seconds"] = 0.0
             row_chunks = _profile_next_chunks(row_chunks, profile)
+            if sidecar is not None:
+                row_chunks = sidecar.wrap(row_chunks)
             n_pairs = write_compact_covariance_partition_hdf5_append(
                 output_path,
                 positions=pos_arr,
@@ -1079,6 +1122,8 @@ def calc_covariance(
             return
         except Exception:
             output_path.unlink(missing_ok=True)
+            if sidecar is not None:
+                sidecar.mark_invalid()
             log_debug("calc_covariance compact_single_pass_failed using fallback")
 
         count_start = time.perf_counter()

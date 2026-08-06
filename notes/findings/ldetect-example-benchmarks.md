@@ -1,7 +1,9 @@
 # LDetect Example Benchmarks
 
-**Findings summary (current as of 2026-07-12).** Distilled for human review
-and manuscript drafting. Full process notes: `notes/logs/ldetect-example-benchmarking.md`.
+**Findings summary (current as of 2026-08-05).** Distilled for human review
+and manuscript drafting. Full process notes: `notes/logs/ldetect-example-benchmarking.md`
+(2026-07-12 methodology notes; timings below were re-measured on 2026-08-05 on
+a different host — see the hardware note below).
 
 ## Scope
 
@@ -27,23 +29,33 @@ useful for detailed profiling and backend experiments, especially bitpacking.
 
 ## Current command-level timings
 
-Measured on the toy interval after one Snakemake preparation run. Downstream
-stages used one warmup and five measured repeats; covariance used one measured
-repeat because the original script is slow.
+Measured on the toy interval after one Snakemake preparation run, on
+`cbsugpu01` (Intel Xeon E5-2620 v4 @ 2.1GHz). Downstream stages used one
+warmup and five measured repeats; covariance used one warmup and two measured
+repeats because the original script is slow.
 
 | Stage | Original LDetect mean seconds | LDetect-lite mean seconds | Speedup |
 |---|---:|---:|---:|
-| `calc-covariance` | 99.936 | 3.222 | 31.02x |
-| `matrix-to-vector` | 1.044 | 0.204 | 5.13x |
-| `find-minima` | 10.786 | 1.200 | 8.98x |
-| `extract-bpoints` | 0.607 | 0.138 | 4.42x |
+| `calc-covariance` | 259.278 | 4.651 | 55.75x |
+| `matrix-to-vector` | 2.112 | 0.365 | 5.79x |
+| `find-minima` | 23.844 | 1.892 | 12.60x |
+| `extract-bpoints` | 1.082 | 0.296 | 3.66x |
 
-Covariance peak RSS in the command-level run was 398.75 MiB for original
-LDetect and 524.98 MiB for LDetect-lite. Output sizes in this specific
-benchmark were 6.21 MB for original gzipped text and 18.21 MB for LDetect-lite
-full HDF5. This is **not** the compact-cache storage comparison: the
-`calc-covariance` CLI currently writes the full HDF5 schema for debugging and
-heatmap support, whereas production `ldetect run` defaults to compact caches.
+This supersedes an earlier measurement (99.936s / 3.222s / 31.02x for
+`calc-covariance`, etc.) taken on a different, faster host (an AMD EPYC
+9554) — absolute times are not comparable across hosts, but legacy and
+LDetect-lite were timed together on the same host in both cases, so each
+speedup ratio is a valid same-environment comparison.
+
+Covariance peak RSS in this command-level run was 445.87 MiB for original
+LDetect and 716.95 MiB for LDetect-lite. Output sizes were 6.21 MB for
+original gzipped text and 1.58 MB for LDetect-lite. This **is** now the
+compact-cache storage comparison: `calc-covariance` ties `compact_output` to
+`--ld-kernel` (bitpacked, the default, always writes compact output; `uint8`
+writes the full schema), so the default CLI invocation and production
+`ldetect run` write the same compact schema. This corrects an earlier version
+of this finding, which reported an 18.21 MB full-schema LDetect-lite output
+from before that coupling existed.
 
 ## Exactness status
 
@@ -51,7 +63,7 @@ The VCF-start example reproduces the original fixtures to exact or
 roundoff-equivalent precision:
 
 - covariance has exact row keys and 226,074 rows; shrinkage values differ by at
-  most `5.55e-17`;
+  most `2.78e-17`;
 - matrix-to-vector output has all 671 loci equivalent; max absolute difference
   is `7.46e-14`;
 - breakpoint JSON matches exactly for `fourier`, `fourier_ls`, `uniform`, and

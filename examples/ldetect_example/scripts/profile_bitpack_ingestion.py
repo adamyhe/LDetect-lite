@@ -116,9 +116,8 @@ def _current_panel(
     region: str,
     individuals: list[str],
     pos2gpos: dict[int, float],
-    n_haps: int,
 ) -> dict[str, int]:
-    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos, n_haps)
+    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos)
     return {
         "n_snps": len(panel.positions),
         "skipped_unphased": panel.skipped_unphased,
@@ -136,7 +135,7 @@ def _arrays_and_pack(
     ne: float,
 ) -> dict[str, int]:
     n_haps = 2 * n_ind
-    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos, n_haps)
+    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos)
     inputs = _build_covariance_inputs(panel, pos2gpos, ne, n_ind, cutoff)
     packed = _pack_haplotypes_impl(inputs.hap_mat)
     return {
@@ -324,7 +323,6 @@ def main() -> None:
             args.region,
             individuals,
             pos2gpos,
-            n_haps,
         ),
     )
     add_step(
