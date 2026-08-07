@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: If you use this software, please cite it as below.
 type: software
 title: LDetect-lite
-version: 0.5.1
-date-released: "2026-08-7"
+version: 0.5.2
+date-released: "2026-08-07"
 authors:
   - given-names: Adam
     family-names: He
