@@ -51,6 +51,36 @@ class _LocalSearchGroupResult(TypedDict):
 _VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
 
+def _count_unrefined(metrics: list[_LocalSearchDetails | None]) -> int:
+    """Count breakpoints that kept their raw, un-refined locus.
+
+    ``_local_search_worker`` returns ``metric=None`` whenever ``LocalSearch``
+    raises during init/search — most commonly because two adjacent candidate
+    breakpoints fall within ~1bp of each other, collapsing that breakpoint's
+    search window onto itself. This is the legacy LDetect/MacDonald2022
+    "step 4" bug that mostly affects ``uniform_ls`` (see
+    ``notes/logs/local-search-divergence-asn22.md``): uniform breakpoints are
+    spaced by raw SNP-index count with no minimum physical-distance guarantee,
+    unlike Fourier minima.
+    """
+    return sum(1 for m in metrics if m is None)
+
+
+def _warn_if_unrefined(subset_name: str, group_result: _LocalSearchGroupResult) -> int:
+    """Log a warning when some breakpoints in *group_result* were kept unrefined."""
+    unrefined = _count_unrefined(group_result["metrics"])
+    if unrefined:
+        log_msg(
+            f"{subset_name}: {unrefined}/{len(group_result['loci'])} breakpoints "
+            "could not be locally searched (adjacent candidates collapsed the "
+            "search window) and were kept at their raw, un-refined position. "
+            "This is a known legacy LDetect issue affecting uniform breakpoints "
+            "far more often than Fourier ones; fourier_ls is the recommended "
+            "output. See notes/logs/local-search-divergence-asn22.md."
+        )
+    return unrefined
+
+
 def _adaptive_filter_workers(workers: int, filter_workers: int) -> int:
     """Choose threads for single-candidate filter evaluations."""
     if workers < 1:
@@ -257,6 +287,7 @@ def find_breakpoints(
 
     # 6. Local search on Fourier
     fourier_ls = None
+    fourier_ls_unrefined_count = None
     if needs_fourier_ls:
         if fourier_metric is None:
             raise RuntimeError("Fourier local search requires the Fourier metric")
@@ -275,8 +306,10 @@ def find_breakpoints(
             subset_name="fourier_ls",
         )
         log_memory_checkpoint("fourier_local_search_end")
+        fourier_ls_unrefined_count = _warn_if_unrefined("fourier_ls", fourier_ls)
     # 7. Local search on uniform
     uniform_ls = None
+    uniform_ls_unrefined_count = None
     if needs_uniform_ls:
         if uniform_loci is None or uniform_metric is None:
             raise RuntimeError("Uniform local search requires uniform breakpoints")
@@ -295,6 +328,7 @@ def find_breakpoints(
             subset_name="uniform_ls",
         )
         log_memory_checkpoint("uniform_local_search_end")
+        uniform_ls_unrefined_count = _warn_if_unrefined("uniform_ls", uniform_ls)
     fourier_ls_metric = None
     if fourier_ls is not None:
         log_memory_checkpoint("fourier_ls_metric_start")
@@ -346,6 +380,7 @@ def find_breakpoints(
         result["fourier_ls"] = {
             "loci": fourier_ls["loci"],
             "metric": _metric_to_json(fourier_ls_metric),
+            "unrefined_count": fourier_ls_unrefined_count,
         }
     if "uniform" in requested_subsets:
         if uniform_loci is None or uniform_metric is None:
@@ -360,6 +395,7 @@ def find_breakpoints(
         result["uniform_ls"] = {
             "loci": uniform_ls["loci"],
             "metric": _metric_to_json(uniform_ls_metric),
+            "unrefined_count": uniform_ls_unrefined_count,
         }
 
     output_path.write_text(json.dumps(result, indent=2))

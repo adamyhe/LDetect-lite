@@ -106,6 +106,8 @@ This is the core block-detection step. It applies a Hanning (raised cosine) smoo
 
 Each candidate breakpoint is then refined by a local search (`fourier_ls`, `uniform_ls`): nearby positions are evaluated using the sum of squared inter-block correlations as the quality metric. The default path uses native floats for speed; add `--high-precision` to use 50-digit Decimal arithmetic for exact reference-style comparisons. The position that minimises this metric is chosen as the final breakpoint.
 
+A breakpoint whose search window collapses onto an adjacent candidate (two candidates within ~1bp of each other) cannot be locally searched; it's kept at its raw, un-refined position instead. This is a known legacy LDetect/MacDonald2022 issue (their READMEs call it out without explaining the mechanism) that affects `uniform_ls` far more than `fourier_ls`, since uniform breakpoints are spaced by raw SNP-index count with no minimum physical-distance guarantee. Each `fourier_ls`/`uniform_ls` output block reports an `unrefined_count` field for how many breakpoints hit this, and a warning is logged whenever it's nonzero. See `notes/logs/local-search-divergence-asn22.md`.
+
 By default, the standalone command computes all four breakpoint sets for backward compatibility: `fourier`, `fourier_ls`, `uniform`, `uniform_ls`. Use repeated `--subset` flags to compute only selected sets. `fourier_ls` is the recommended output.
 
 Arguments:
