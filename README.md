@@ -110,4 +110,6 @@ The available breakpoint sets are `fourier` and `uniform` (raw minima from Fouri
 
 ## Pre-computed LD blocks
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21733349.svg)](https://doi.org/10.5281/zenodo.21733349)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21840998.svg)](https://doi.org/10.5281/zenodo.21840998)
+
+Pre-computed LD blocks are available at [LDetect-lite-replications](https://github.com/adamyhe/LDetect-lite-replications) and on Zenodo.
