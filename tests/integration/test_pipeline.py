@@ -38,7 +38,7 @@ def _full_pipeline_bed_regions(
     example_store,
     tmp_path: Path,
     *,
-    filter_window: str = "scipy-periodic",
+    filter_window: str = "symmetric",
 ) -> list[tuple[str, int, int]]:
     """Run the toy full pipeline and return BED regions for one filter mode."""
     from ldetect_lite.io.bed import write_bed
@@ -401,35 +401,16 @@ def test_full_pipeline_bed_structure(example_store, tmp_path):
     assert regions[-1][2] == 40067769  # snp_last + 1
 
 
-def test_full_pipeline_bed_matches_scipy_periodic_expected(
-    example_store,
-    tmp_path,
-):
-    """Default periodic Hann output has its own exactness fixture.
-
-    The deprecated symmetric Hann fixture has one additional raw minimum around
-    40.015-40.021 Mb.  The supported scipy-periodic path smooths that local dip
-    away, yielding 11 internal boundaries and 12 BED blocks for this toy input.
-    """
-    assert (
-        _full_pipeline_bed_regions(
-            example_store,
-            tmp_path,
-            filter_window="scipy-periodic",
-        )
-        == SCIPY_PERIODIC_TOY_BED_REGIONS
-    )
-
-
-@pytest.mark.deprecated
-def test_full_pipeline_bed_matches_symmetric_reference(
+def test_full_pipeline_bed_matches_symmetric_expected(
     example_data_dir,
     example_store,
     tmp_path,
 ):
-    """Deprecated symmetric Hann mode preserves the historical toy fixture.
+    """Default symmetric Hann output matches the historical toy fixture.
 
-    Delete this test when the deprecated ``symmetric`` filter mode is removed.
+    ``symmetric`` is the default filter-window mode: it matches the window
+    Berisa & Pickrell (2016) specify in their own supplement, and it's what
+    generated this toy fixture originally.
     """
     ref_regions = _parse_bed(example_data_dir / "bed/EUR-chr2-50-39967768-40067768.bed")
     out_regions = _full_pipeline_bed_regions(
@@ -445,3 +426,24 @@ def test_full_pipeline_bed_matches_symmetric_reference(
         assert out[1] == ref[1] and out[2] == ref[2], (
             f"Region {i}: got ({out[1]}, {out[2]}), expected ({ref[1]}, {ref[2]})"
         )
+
+
+def test_full_pipeline_bed_matches_scipy_periodic_expected(
+    example_store,
+    tmp_path,
+):
+    """Alternate periodic Hann output (needed for modern-scipy-era
+    reproductions, e.g. MacDonald et al. 2022) has its own exactness fixture.
+
+    The default symmetric Hann fixture has one additional raw minimum around
+    40.015-40.021 Mb.  The scipy-periodic path smooths that local dip away,
+    yielding 11 internal boundaries and 12 BED blocks for this toy input.
+    """
+    assert (
+        _full_pipeline_bed_regions(
+            example_store,
+            tmp_path,
+            filter_window="scipy-periodic",
+        )
+        == SCIPY_PERIODIC_TOY_BED_REGIONS
+    )

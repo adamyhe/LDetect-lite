@@ -74,13 +74,11 @@ def test_scipy_periodic_filter_window_matches_get_window_default():
     )
 
 
-def test_default_filter_window_is_scipy_periodic():
+def test_default_filter_window_is_symmetric():
     width = 7
-    np.testing.assert_allclose(
+    np.testing.assert_array_equal(
         _filter_window(width),
-        sig.get_window("hann", 2 * width + 1),
-        atol=1e-15,
-        rtol=1e-15,
+        np.hanning(2 * width + 1),
     )
 
 
@@ -373,7 +371,7 @@ def test_apply_filter_falls_back_to_scipy_when_numba_unavailable(monkeypatch):
     monkeypatch.setattr(filters_mod, "_HAVE_NUMBA", False)
 
     width = 5
-    window = sig.get_window("hann", 2 * width + 1)
+    window = np.hanning(2 * width + 1)
     kernel = window / window.sum()
     expected = ndimage.convolve1d(_ARR, kernel)
 

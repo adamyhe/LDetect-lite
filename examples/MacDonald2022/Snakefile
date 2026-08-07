@@ -99,6 +99,16 @@ def block_set_reference_bed(block_set):
     return config["block_sets"][block_set]["reference_bed"]
 
 
+def block_set_filter_window(block_set):
+    """Per-block-set Hann window override, falling back to the run-wide
+    `filter_window` config default (scipy-periodic -- see
+    notes/findings/ldetect-original-reproduction.md and
+    notes/findings/macdonald2022-reproduction.md)."""
+    return config["block_sets"][block_set].get(
+        "filter_window", config.get("filter_window", "scipy-periodic")
+    )
+
+
 def diagnostic_resource(filename):
     primary = RES_DIR / filename
     nested = RES_DIR / RES_DIR.name / filename
@@ -258,11 +268,20 @@ def vcf_map_position_targets():
 
 
 def ldetect_run_params_for(block_set):
+    # MacDonald et al. (2022) ran the original ldetect code on a post-1.1.0
+    # scipy, after the periodic-Hann construction defect (see
+    # notes/findings/ldetect-original-reproduction.md) was fixed -- so their
+    # deCODE/EUR and non-corrected pyrho published output needs the genuinely
+    # periodic window, independent of ldetect-lite's own CLI default, which
+    # is `symmetric` (the formula Berisa & Pickrell's supplement specifies).
+    # See block_set_filter_window() and config.yaml's per-block-set overrides
+    # for the pyrho_*_corrected diagnostic tracks, which deliberately use
+    # `symmetric` instead.
     return {
         "all_breakpoint_subsets": True,
         "cov_cutoff": config["cov_cutoff"],
         "filter_convolution": "scipy_ndimage_convolve1d",
-        "filter_window": config.get("filter_window", "scipy-periodic"),
+        "filter_window": block_set_filter_window(block_set),
         "filter_workers": config.get("filter_workers", 1),
         "ld_kernel": config.get("ld_kernel", "bitpacked"),
         "matrix_backend": config.get("matrix_backend", "array"),
@@ -840,7 +859,7 @@ rule run_ldetect:
         n_snps_bw_bpoints=config["n_snps_bw_bpoints"],
         matrix_backend=config.get("matrix_backend", "array"),
         ld_kernel=config.get("ld_kernel", "bitpacked"),
-        filter_window=config.get("filter_window", "scipy-periodic"),
+        filter_window=lambda wc: block_set_filter_window(wc.block_set),
         filter_workers=config.get("filter_workers", 1),
         ld_neighborhood_window_bp=config.get("ld_neighborhood_window_bp", 500_000),
     shell:

@@ -32,32 +32,29 @@ The main outputs are:
 
 `--cores N` lets Snakemake schedule multiple chromosome/population jobs concurrently (each claiming `workers`-many cores). `ldetect` manages native BLAS/numba thread caps at CLI startup, so `workers` remains the controlling knob for the process-pooled stages (see `docs/optimizations.md` #13).
 
-### "Corrected" blocks (`scipy-periodic` filtering)
-
-The main pipeline above uses `--filter-window symmetric`, which reproduces
-Berisa & Pickrell's actual 2015 output: their code requested a periodic Hann
-window, but scipy's periodic-window construction was a no-op for odd-length
-windows until scipy 1.1.0 (2018), so their era's scipy silently computed the
-symmetric window instead. See
-`notes/findings/ldetect-original-reproduction.md` for the full writeup.
-
-A parallel "corrected" run uses `--filter-window scipy-periodic` — the window
-the original code intended and would produce on any modern, bug-fixed scipy —
-to show what the analysis looks like with that historical defect fixed:
-
-- `results/corrected/{POP}/{chrom}/{chrom}-ld-blocks.bed`
-- `results/corrected/{POP}_LD_blocks.bed`
-- `results/corrected/compare/{POP}_block_comparison.tsv`
-
-This recomputes covariance independently from the main run (filter window
-only affects Step 4, but the two output trees are kept fully separate rather
-than sharing the covariance cache, for simplicity/robustness) — expect
-roughly double the compute cost of the main pipeline if you build `rule all`
-in full.
+This pipeline uses `--filter-window symmetric` (the CLI default), which
+reproduces Berisa & Pickrell's actual 2015 output: their code's library call
+literally requested a periodic Hann window, but scipy's periodic-window
+construction was a no-op for odd-length windows until scipy 1.1.0 (2018), so
+their era's scipy silently computed the symmetric window instead — the same
+formula their own supplement specifies mathematically anyway. See
+`notes/findings/ldetect-original-reproduction.md` for the full writeup. (An
+earlier revision of this example also ran a parallel `scipy-periodic`
+"corrected" track to show what the analysis would look like with that
+historical scipy defect fixed. That comparison is no longer included here:
+once the supplement's own formula confirmed `symmetric` is correct rather
+than merely a historical-reproduction artifact, showing an alternate
+"corrected" window stopped being a meaningful demonstration for this
+from-scratch reproduction. The equivalent modern-scipy-era comparison lives
+in `examples/MacDonald2022` instead: its `EUR` block set genuinely needs
+`scipy-periodic` to match MacDonald's published output, paired with an
+`EUR_symmetric` block set that is identical except for the window, isolating
+the same symmetric-vs-periodic question on that data — see that example's
+`config.yaml`.)
 
 ## LD-Neighborhood Plots
 
-Both tracks generate LD-neighborhood sanity-check plots by default (`rule all`
+This generates LD-neighborhood sanity-check plots by default (`rule all`
 includes them, so a full `uv run snakemake --cores N` run produces all of the
 below without any extra targets). See the root `README.md`'s
 `--generate-ld-neighborhood-plot` entry for what the plot itself shows.
@@ -66,15 +63,12 @@ Each population/chromosome gets a self-contained plot straight from
 `ldetect run` (no reference BED needed):
 
 - `results/{POP}/{chrom}/{chrom}-ld-neighborhood.svg`
-- `results/corrected/{POP}/{chrom}/{chrom}-ld-neighborhood.svg`
 
-Both tracks also get per-chromosome and genome-wide comparison plots, against
-their own boundaries and against the published reference boundaries:
+It also gets per-chromosome and genome-wide comparison plots, against its own
+boundaries and against the published reference boundaries:
 
 - `results/compare/ld_neighborhood/{POP}/chr{chrom}.svg` and `genomewide.svg`
 - `results/compare/ld_neighborhood/published/{POP}/chr{chrom}.svg` and `genomewide.svg`
-- `results/corrected/compare/ld_neighborhood/{POP}/chr{chrom}.svg` and `genomewide.svg`
-- `results/corrected/compare/ld_neighborhood/published/{POP}/chr{chrom}.svg` and `genomewide.svg`
 
 To build only these plots instead of the full pipeline, request them as
 explicit targets (Snakemake targets don't support wildcard expansion on the
@@ -86,9 +80,7 @@ LD-neighborhood coverage for a population:
 ```bash
 uv run snakemake --cores N \
   results/compare/ld_neighborhood/EUR/genomewide.svg \
-  results/compare/ld_neighborhood/published/EUR/genomewide.svg \
-  results/corrected/compare/ld_neighborhood/EUR/genomewide.svg \
-  results/corrected/compare/ld_neighborhood/published/EUR/genomewide.svg
+  results/compare/ld_neighborhood/published/EUR/genomewide.svg
 ```
 
 ## Important Reproduction Detail: SNP Filtering
