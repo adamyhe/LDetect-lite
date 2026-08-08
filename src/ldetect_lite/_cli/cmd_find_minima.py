@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-_VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+_VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls", "dp")
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -144,7 +144,99 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         metavar="SUBSET",
         help=(
             "Breakpoint subset to compute. Repeat to compute multiple subsets. "
-            "By default, all subsets are computed for backward compatibility."
+            "By default, the four LDetect subsets are computed for backward "
+            "compatibility ('dp' must be requested explicitly)."
+        ),
+    )
+    p.add_argument(
+        "--dp-min-size",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Minimum SNPs per block for the 'dp' subset (default: 1).",
+    )
+    p.add_argument(
+        "--dp-max-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Maximum SNPs per block for the 'dp' subset "
+            "(default: the full requested region, i.e. no limit)."
+        ),
+    )
+    p.add_argument(
+        "--dp-max-k",
+        type=int,
+        default=500,
+        metavar="N",
+        help=(
+            "Solve the 'dp' subset for every block count from 1 up to this "
+            "many in one pass (default: 500)."
+        ),
+    )
+    p.add_argument(
+        "--dp-candidate-mode",
+        choices=("filter", "all"),
+        default="filter",
+        help=(
+            "'filter' (default) restricts 'dp' candidate breakpoints to the "
+            "local minima of a small, fixed-width Hann filter "
+            "(--dp-candidate-width); 'all' allows a cut at every SNP with "
+            "covariance data, which is exact over every position but more "
+            "expensive."
+        ),
+    )
+    p.add_argument(
+        "--dp-candidate-width",
+        type=int,
+        default=25,
+        metavar="N",
+        help=(
+            "Half-width of the dense candidate-generating Hann filter used "
+            "when --dp-candidate-mode=filter (default: 25)."
+        ),
+    )
+    p.add_argument(
+        "--dp-thr-r2",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help=(
+            "Ignore pairs with r^2 below this threshold in the 'dp' "
+            "objective (default: 0.0, i.e. no filtering)."
+        ),
+    )
+    p.add_argument(
+        "--dp-max-r2",
+        type=float,
+        default=1.0,
+        metavar="FLOAT",
+        help=(
+            "Forbid any 'dp' breakpoint that would separate a pair whose "
+            "r^2 exceeds this (default: 1.0, i.e. no constraint)."
+        ),
+    )
+    p.add_argument(
+        "--dp-min-size-bp",
+        type=int,
+        default=None,
+        metavar="BP",
+        help=(
+            "Minimum physical (bp) width per block for the 'dp' subset "
+            "(default: no minimum). A block must satisfy this and "
+            "--dp-min-size."
+        ),
+    )
+    p.add_argument(
+        "--dp-max-size-bp",
+        type=int,
+        default=None,
+        metavar="BP",
+        help=(
+            "Maximum physical (bp) width per block for the 'dp' subset "
+            "(default: no maximum). A block must satisfy this and "
+            "--dp-max-size."
         ),
     )
     p.set_defaults(func=_run)
@@ -176,5 +268,14 @@ def _run(args: argparse.Namespace) -> int:
         subsets=set(args.subset) if args.subset else None,
         filter_window=args.filter_window,
         filter_workers=args.filter_workers,
+        dp_min_size=args.dp_min_size,
+        dp_max_size=args.dp_max_size,
+        dp_max_k=args.dp_max_k,
+        dp_candidate_mode=args.dp_candidate_mode,
+        dp_candidate_width=args.dp_candidate_width,
+        dp_thr_r2=args.dp_thr_r2,
+        dp_max_r2=args.dp_max_r2,
+        dp_min_size_bp=args.dp_min_size_bp,
+        dp_max_size_bp=args.dp_max_size_bp,
     )
     return 0

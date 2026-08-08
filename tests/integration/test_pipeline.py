@@ -188,7 +188,7 @@ def test_find_breakpoints_fourier_subset_skips_local_search(
     assert "uniform" not in data
     assert "uniform_ls" not in data
     assert data["computed_subsets"] == ["fourier"]
-    assert data["skipped_subsets"] == ["fourier_ls", "uniform", "uniform_ls"]
+    assert data["skipped_subsets"] == ["dp", "fourier_ls", "uniform", "uniform_ls"]
 
 
 def test_find_breakpoints_fourier_ls_skips_uniform_local_search(
@@ -226,7 +226,7 @@ def test_find_breakpoints_fourier_ls_skips_uniform_local_search(
     assert "uniform" not in data
     assert "uniform_ls" not in data
     assert data["computed_subsets"] == ["fourier", "fourier_ls"]
-    assert data["skipped_subsets"] == ["uniform", "uniform_ls"]
+    assert data["skipped_subsets"] == ["dp", "uniform", "uniform_ls"]
 
 
 def test_find_breakpoints_uniform_ls_skips_fourier_local_search(
@@ -265,7 +265,7 @@ def test_find_breakpoints_uniform_ls_skips_fourier_local_search(
     assert "uniform" in data
     assert "uniform_ls" in data
     assert data["computed_subsets"] == ["uniform", "uniform_ls"]
-    assert data["skipped_subsets"] == ["fourier", "fourier_ls"]
+    assert data["skipped_subsets"] == ["dp", "fourier", "fourier_ls"]
 
 
 def test_find_breakpoints_loci_in_range(example_data_dir, example_store, tmp_path):

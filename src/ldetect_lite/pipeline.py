@@ -17,11 +17,13 @@ from ldetect_lite._util.binary_search import find_ge_ind, find_le_ind
 from ldetect_lite._util.covariance_array import (
     ChromosomeCovariance,
     LocalSearchPartition,
+    load_chromosome_covariance,
     load_covariance_arrays,  # noqa: F401 - kept for monkeypatch compatibility
     metric_from_arrays,
 )
 from ldetect_lite._util.logging import log_msg
 from ldetect_lite._util.memory import log_memory_checkpoint, max_rss_mib
+from ldetect_lite.dp_split import generate_filter_candidates, optimal_partitions
 from ldetect_lite.filters import (
     apply_filter_get_minima_serial,
     apply_filter_get_minima_threaded,
@@ -48,7 +50,11 @@ class _LocalSearchGroupResult(TypedDict):
     metrics: list[_LocalSearchDetails | None]
 
 
-_VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
+_VALID_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls", "dp"})
+# `None`/`--all-breakpoint-subsets` historically means these four; `dp` is a
+# heavier, distinct algorithm (see dp_split.py) that must be requested
+# explicitly rather than silently bundled into "compute everything".
+_DEFAULT_SUBSETS = frozenset({"fourier", "fourier_ls", "uniform", "uniform_ls"})
 
 
 def _count_unrefined(metrics: list[_LocalSearchDetails | None]) -> int:
@@ -114,6 +120,15 @@ def find_breakpoints(
     subsets: set[str] | None = None,
     filter_window: str = "symmetric",
     filter_workers: int = 1,
+    dp_min_size: int = 1,
+    dp_max_size: int | None = None,
+    dp_max_k: int = 500,
+    dp_candidate_mode: str = "filter",
+    dp_candidate_width: int = 25,
+    dp_thr_r2: float = 0.0,
+    dp_max_r2: float = 1.0,
+    dp_min_size_bp: int | None = None,
+    dp_max_size_bp: int | None = None,
 ) -> None:
     """Run minima detection and write selected breakpoint subsets to JSON.
 
@@ -171,6 +186,32 @@ def find_breakpoints(
             convolutions. Trackback candidate sweeps always force each
             concurrent candidate filter to one thread to avoid nested
             parallelism.
+        dp_min_size: Minimum SNPs per block for the ``dp`` subset.
+        dp_max_size: Maximum SNPs per block for the ``dp`` subset. Defaults
+            to the full region span (no upper limit) when ``None``.
+        dp_max_k: Solve the DP for every block count from 1 up to this many
+            (see :func:`ldetect_lite.dp_split.optimal_partitions`).
+        dp_candidate_mode: ``"filter"`` (default) restricts DP candidate
+            breakpoints to the local minima of a small, fixed-width Hann
+            filter (see *dp_candidate_width*); ``"all"`` allows a cut at
+            every SNP with covariance data, which is exact over every
+            position but more expensive.
+        dp_candidate_width: Half-width of the dense candidate-generating
+            Hann filter used when *dp_candidate_mode* is ``"filter"``. This
+            is independent of the *n_bpoints*-targeted *found_width* used by
+            ``fourier``/``uniform`` -- it should be small enough to yield
+            many more candidates than *dp_max_k*.
+        dp_thr_r2: Ignore pairs with r^2 below this threshold in the ``dp``
+            objective (mirrors bigsnpr's ``snp_ldsplit(thr_r2=...)``).
+        dp_max_r2: Forbid any ``dp`` breakpoint that would separate a pair
+            whose r^2 exceeds this (mirrors ``snp_ldsplit(max_r2=...)``).
+        dp_min_size_bp: Minimum physical (bp) width per block for the ``dp``
+            subset. ``None`` (default) means no minimum. Physical-distance
+            analog of ``snp_ldsplit()``'s genetic-distance ``pos_scaled``
+            constraint -- a block must satisfy this *and* *dp_min_size*.
+        dp_max_size_bp: Maximum physical (bp) width per block for the ``dp``
+            subset. ``None`` (default) means no maximum. A block must
+            satisfy this *and* *dp_max_size*.
     """
     search_workers = workers
     adaptive_filter_workers = _adaptive_filter_workers(workers, filter_workers)
@@ -179,6 +220,11 @@ def find_breakpoints(
     needs_uniform = bool(requested_subsets & {"uniform", "uniform_ls"})
     needs_fourier_ls = "fourier_ls" in requested_subsets
     needs_uniform_ls = "uniform_ls" in requested_subsets
+    needs_dp = "dp" in requested_subsets
+    # `uniform` needs `fourier_loci` only for its length (evenly spaced step
+    # count), not its metric -- so the Hann filter-width search below is only
+    # skippable when neither actually needs it, e.g. a `dp`-only request.
+    needs_filter_search = needs_fourier_metric or needs_uniform
 
     snp_first, snp_last = first_last(chr_name, store, snp_first, snp_last)
 
@@ -199,47 +245,52 @@ def find_breakpoints(
         n_bpoints = int(math.ceil(len(np_array_x) / n_snps_bw_bpoints - 1))
     log_msg(f"Target breakpoints: {n_bpoints}")
 
-    # 3. Binary search for filter width
-    log_memory_checkpoint("filter_width_search_start")
-    log_msg(
-        "Searching for filter width "
-        f"(candidate_workers={search_workers}, "
-        f"adaptive_filter_workers={adaptive_filter_workers}, "
-        "trackback_filter_workers=1)"
-    )
-    found_width = custom_binary_search_with_trackback(
-        np_array,
-        lambda arr, width: apply_filter_get_minima_threaded(
-            arr,
-            width,
+    # 3-4. Binary search for filter width, then extract minima. Only
+    # `fourier`/`fourier_ls`/`uniform`/`uniform_ls` need this -- `dp` (when
+    # requested alone) generates its own, independently-widthed candidate set
+    # below and never needs `found_width`/`fourier_loci`.
+    found_width: int | None = None
+    fourier_loci: list[int] = []
+    if needs_filter_search:
+        log_memory_checkpoint("filter_width_search_start")
+        log_msg(
+            "Searching for filter width "
+            f"(candidate_workers={search_workers}, "
+            f"adaptive_filter_workers={adaptive_filter_workers}, "
+            "trackback_filter_workers=1)"
+        )
+        found_width = custom_binary_search_with_trackback(
+            np_array,
+            lambda arr, width: apply_filter_get_minima_threaded(
+                arr,
+                width,
+                filter_window,
+                workers=adaptive_filter_workers,
+            ),
+            n_bpoints,
+            trackback_delta=trackback_delta,
+            trackback_step=trackback_step,
+            init_search_location=init_search_location,
+            search_workers=search_workers,
+            trackback_f=lambda arr, width: apply_filter_get_minima_serial(
+                arr,
+                width,
+                filter_window,
+            ),
+        )
+        log_msg(f"Found width: {found_width}")
+        log_memory_checkpoint("filter_width_search_end")
+
+        log_memory_checkpoint("minima_extraction_start")
+        log_msg("Applying filter and extracting minima")
+        g = apply_filter_threaded(
+            np_array,
+            found_width,
             filter_window,
             workers=adaptive_filter_workers,
-        ),
-        n_bpoints,
-        trackback_delta=trackback_delta,
-        trackback_step=trackback_step,
-        init_search_location=init_search_location,
-        search_workers=search_workers,
-        trackback_f=lambda arr, width: apply_filter_get_minima_serial(
-            arr,
-            width,
-            filter_window,
-        ),
-    )
-    log_msg(f"Found width: {found_width}")
-    log_memory_checkpoint("filter_width_search_end")
-
-    # 4. Extract minima positions
-    log_memory_checkpoint("minima_extraction_start")
-    log_msg("Applying filter and extracting minima")
-    g = apply_filter_threaded(
-        np_array,
-        found_width,
-        filter_window,
-        workers=adaptive_filter_workers,
-    )
-    fourier_loci = get_minima_loc(g, np_array_x)
-    log_memory_checkpoint("minima_extraction_end")
+        )
+        fourier_loci = get_minima_loc(g, np_array_x)
+        log_memory_checkpoint("minima_extraction_end")
 
     metric_cov = None if use_decimal else covariance_cache
     if metric_cov is not None:
@@ -358,8 +409,65 @@ def find_breakpoints(
         )
         log_memory_checkpoint("uniform_ls_metric_end")
 
+    # DP-optimal split. Independent of the fourier/uniform pipeline above --
+    # it consumes covariance triplets directly, not the corr-sum vector's
+    # filter-derived minima (except to generate its own, separately-widthed
+    # candidate set in "filter" mode).
+    dp_result: dict[str, object] | None = None
+    if needs_dp:
+        log_msg("Computing DP-optimal breakpoints")
+        log_memory_checkpoint("dp_split_start")
+        dp_cov = (
+            covariance_cache
+            if covariance_cache is not None and covariance_cache.i_pos.size > 0
+            else load_chromosome_covariance(
+                chr_name,
+                store,
+                get_final_partitions(store, chr_name, snp_first, snp_last),
+                snp_first,
+                snp_last,
+            )
+        )
+        if dp_candidate_mode == "all":
+            dp_candidates: list[int] = [int(x) for x in dp_cov.loci]
+        elif dp_candidate_mode == "filter":
+            dp_candidates = generate_filter_candidates(
+                np_array, np_array_x, dp_candidate_width, filter_window
+            )
+        else:
+            raise ValueError(f"Unknown dp_candidate_mode: {dp_candidate_mode!r}")
+        dp_max_size_eff = (
+            dp_max_size if dp_max_size is not None else (snp_last - snp_first + 1)
+        )
+        dp_solutions = optimal_partitions(
+            dp_cov,
+            snp_first,
+            snp_last,
+            dp_candidates,
+            min_size=dp_min_size,
+            max_size=dp_max_size_eff,
+            max_k=dp_max_k,
+            thr_r2=dp_thr_r2,
+            max_r2=dp_max_r2,
+            min_size_bp=dp_min_size_bp,
+            max_size_bp=dp_max_size_bp,
+        )
+        dp_result = {
+            "candidate_mode": dp_candidate_mode,
+            "min_size": dp_min_size,
+            "max_size": dp_max_size_eff,
+            "min_size_bp": dp_min_size_bp,
+            "max_size_bp": dp_max_size_bp,
+            "candidates": [
+                {"n_block": sol.n_block, "cost": sol.cost, "loci": sol.loci}
+                for sol in dp_solutions
+            ],
+        }
+        log_msg(f"DP done: {len(dp_solutions)} feasible block counts")
+        log_memory_checkpoint("dp_split_end")
+
     # 8. Serialise to JSON
-    result = {
+    result: dict[str, object] = {
         "n_bpoints": n_bpoints,
         "found_width": found_width,
         "computed_subsets": sorted(requested_subsets),
@@ -397,6 +505,10 @@ def find_breakpoints(
             "metric": _metric_to_json(uniform_ls_metric),
             "unrefined_count": uniform_ls_unrefined_count,
         }
+    if "dp" in requested_subsets:
+        if dp_result is None:
+            raise RuntimeError("DP output was not computed")
+        result["dp"] = dp_result
 
     output_path.write_text(json.dumps(result, indent=2))
     log_msg(f"Breakpoints written to {output_path}")
@@ -429,10 +541,11 @@ def _normalise_subsets(subsets: set[str] | None) -> tuple[set[str], bool]:
 
     Returns the expanded subset set plus a flag indicating whether the caller
     explicitly requested a subset selection.  ``None`` means historical full
-    output and is not treated as an explicit selection.
+    output (the four LDetect subsets, not ``dp``) and is not treated as an
+    explicit selection.
     """
     if subsets is None:
-        return set(_VALID_SUBSETS), False
+        return set(_DEFAULT_SUBSETS), False
     invalid = set(subsets) - _VALID_SUBSETS
     if invalid:
         raise ValueError(f"Invalid breakpoint subset(s): {', '.join(sorted(invalid))}")
