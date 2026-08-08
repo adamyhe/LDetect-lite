@@ -19,7 +19,7 @@ if TYPE_CHECKING:
         _DiagVectorPartitionResult,
     )
 
-_VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
+_VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls", "dp")
 
 # Numpy/BLAS/numba read these once at library-init time to size their own
 # internal thread pools. Left unset, they default to the *whole machine's*
@@ -254,6 +254,111 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "convolutions. Trackback keeps candidate-width threading and "
             "forces each candidate filter to one thread to avoid nested "
             "parallelism (default: 1)."
+        ),
+    )
+    p.add_argument(
+        "--dp-min-size",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Minimum SNPs per block for the 'dp' subset (default: 1).",
+    )
+    p.add_argument(
+        "--dp-max-size",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Maximum SNPs per block for the 'dp' subset "
+            "(default: the full requested region, i.e. no limit)."
+        ),
+    )
+    p.add_argument(
+        "--dp-max-k",
+        type=int,
+        default=500,
+        metavar="N",
+        help=(
+            "Solve the 'dp' subset for every block count from 1 up to this "
+            "many in one pass (default: 500)."
+        ),
+    )
+    p.add_argument(
+        "--dp-candidate-mode",
+        choices=("filter", "all"),
+        default="filter",
+        help=(
+            "'filter' (default) restricts 'dp' candidate breakpoints to the "
+            "local minima of a small, fixed-width Hann filter "
+            "(--dp-candidate-width); 'all' allows a cut at every SNP with "
+            "covariance data, which is exact over every position but more "
+            "expensive."
+        ),
+    )
+    p.add_argument(
+        "--dp-candidate-width",
+        type=int,
+        default=25,
+        metavar="N",
+        help=(
+            "Half-width of the dense candidate-generating Hann filter used "
+            "when --dp-candidate-mode=filter. Independent of the "
+            "n-bpoints-targeted filter width used by fourier/uniform -- "
+            "should be small enough to yield many more candidates than "
+            "--dp-max-k (default: 25)."
+        ),
+    )
+    p.add_argument(
+        "--dp-thr-r2",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help=(
+            "Ignore pairs with r^2 below this threshold in the 'dp' "
+            "objective (default: 0.0, i.e. no filtering)."
+        ),
+    )
+    p.add_argument(
+        "--dp-max-r2",
+        type=float,
+        default=1.0,
+        metavar="FLOAT",
+        help=(
+            "Forbid any 'dp' breakpoint that would separate a pair whose "
+            "r^2 exceeds this (default: 1.0, i.e. no constraint)."
+        ),
+    )
+    p.add_argument(
+        "--dp-min-size-bp",
+        type=int,
+        default=None,
+        metavar="BP",
+        help=(
+            "Minimum physical (bp) width per block for the 'dp' subset "
+            "(default: no minimum). A block must satisfy this and "
+            "--dp-min-size. Physical-distance analog of snp_ldsplit()'s "
+            "genetic-distance pos_scaled constraint."
+        ),
+    )
+    p.add_argument(
+        "--dp-max-size-bp",
+        type=int,
+        default=None,
+        metavar="BP",
+        help=(
+            "Maximum physical (bp) width per block for the 'dp' subset "
+            "(default: no maximum). A block must satisfy this and "
+            "--dp-max-size."
+        ),
+    )
+    p.add_argument(
+        "--dp-n-block",
+        type=int,
+        default=None,
+        metavar="K",
+        help=(
+            "Required when --subset=dp: which block count's solution to "
+            "write to the final BED file."
         ),
     )
     p.add_argument(
@@ -633,6 +738,15 @@ def _run(args: argparse.Namespace) -> int:
         subsets=_breakpoint_subsets_for_run(args.subset, args.all_breakpoint_subsets),
         filter_window=args.filter_window,
         filter_workers=args.filter_workers,
+        dp_min_size=args.dp_min_size,
+        dp_max_size=args.dp_max_size,
+        dp_max_k=args.dp_max_k,
+        dp_candidate_mode=args.dp_candidate_mode,
+        dp_candidate_width=args.dp_candidate_width,
+        dp_thr_r2=args.dp_thr_r2,
+        dp_max_r2=args.dp_max_r2,
+        dp_min_size_bp=args.dp_min_size_bp,
+        dp_max_size_bp=args.dp_max_size_bp,
     )
     log_memory_checkpoint("step4_end")
 
@@ -651,7 +765,26 @@ def _run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    loci: list[int] = data[args.subset]["loci"]
+    if args.subset == "dp":
+        if args.dp_n_block is None:
+            print(
+                "Error: --dp-n-block is required when --subset=dp.",
+                file=sys.stderr,
+            )
+            return 1
+        candidates = data["dp"]["candidates"]
+        matching = [c for c in candidates if c["n_block"] == args.dp_n_block]
+        if not matching:
+            available = ", ".join(str(c["n_block"]) for c in candidates) or "(none)"
+            print(
+                f"Error: no dp solution for --dp-n-block={args.dp_n_block}. "
+                f"Available block counts: {available}",
+                file=sys.stderr,
+            )
+            return 1
+        loci: list[int] = matching[0]["loci"]
+    else:
+        loci = data[args.subset]["loci"]
 
     write_bed(
         name=chrom,
