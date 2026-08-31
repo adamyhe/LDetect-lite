@@ -4,7 +4,7 @@
 [![Tests](https://github.com/adamyhe/ldetect-lite/actions/workflows/tests.yml/badge.svg)](https://github.com/adamyhe/ldetect-lite/actions/workflows/tests.yml)
 [![PyPI Downloads](https://static.pepy.tech/personalized-badge/ldetect-lite?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/ldetect-lite)
 
-A modern, fast re-implementation of [LDetect](https://bitbucket.org/nygcresearch/ldetect), a method for calculating approximately independent linkage disequilibrium (LD) blocks in the human genome. The algorithm is described in [Berisa & Pickrell, 2016](https://academic.oup.com/bioinformatics/article/32/2/283/1743626).
+A fast (~60x) re-implementation of [LDetect](https://bitbucket.org/nygcresearch/ldetect), a method for calculating approximately independent linkage disequilibrium (LD) blocks in the human genome. The algorithm is described in [Berisa & Pickrell, 2016](https://academic.oup.com/bioinformatics/article/32/2/283/1743626).
 
 ## Installation
 
