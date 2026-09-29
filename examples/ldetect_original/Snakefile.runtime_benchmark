@@ -1,0 +1,526 @@
+"""Head-to-head runtime and results benchmark: LDetect vs ldetect-lite.
+
+Generalizes the earlier single-chromosome comparison (README, "Full EUR chr21
+Runtime Benchmark") in two ways.
+
+Whole genome. The ldetect-lite arm runs every chromosome in
+`benchmark_chromosomes`, at both one worker and `lite_parallel_workers`.
+
+End-to-end legacy. The earlier chr21 comparison timed legacy *downstream only*
+(`P01`/`P02`/`P03`) starting from ldetect-lite-generated covariance staged into
+legacy's text format, while timing the lite arm end-to-end. That handed legacy
+its single most expensive stage for free and understated the speedup. Here the
+legacy arm computes its own covariance with the vendored
+`P00_01_calc_covariance.py`, one process per partition, exactly as the original
+pipeline did. Because that stage is pure-Python O(n^2), it runs only for
+`legacy_full_chromosomes`, not all 22.
+
+Partitioning is shared: the vendored legacy snapshot contains no partitioner,
+so both arms use the partition list ldetect-lite emits. It is a small fraction
+of either runtime, and the shared partition list is also what makes the
+covariance outputs directly comparable.
+
+Metrics. CPU-seconds (user + sys) is primary; both arms parallelize, so wall
+clock alone would report core count rather than efficiency. Wall clock is
+recorded alongside, tagged with the worker count that produced it.
+
+Usage:
+    cd examples/ldetect_original
+    uv run snakemake -s Snakefile.runtime_benchmark -n
+    uv run snakemake -s Snakefile.runtime_benchmark --cores 32
+"""
+
+from pathlib import Path
+
+
+configfile: "config.yaml"
+configfile: "runtime_benchmark.yaml"
+
+
+POPULATION = config["benchmark_population"]
+CHROMS = [str(chrom) for chrom in config["benchmark_chromosomes"]]
+LEGACY_CHROMS = [str(chrom) for chrom in config["legacy_full_chromosomes"]]
+SERIAL_WORKERS = int(config["lite_serial_workers"])
+PARALLEL_WORKERS = int(config["lite_parallel_workers"])
+WORKER_COUNTS = sorted({SERIAL_WORKERS, PARALLEL_WORKERS})
+
+RAW_DIR = Path(config["raw_vcf_dir"])
+MAPS_DIR = Path(config["maps_dir"])
+RES_DIR = Path(config["resources_dir"])
+RESULTS = Path(config["results_dir"])
+BENCH = RESULTS / "runtime_benchmark"
+VCF_TMPL = config["vcf_filename_template"]
+RAW_VCF = str(RAW_DIR / VCF_TMPL)
+FILT_VCF = str(
+    RESULTS
+    / "filtered_vcf"
+    / "{population}"
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+)
+
+LITE_DIR = str(BENCH / "lite" / "w{workers}" / "{chrom}")
+LITE_TIMING = str(BENCH / "lite" / "w{workers}" / "{chrom}" / "timing.log")
+LEGACY_DIR = str(BENCH / "legacy" / "{chrom}")
+
+_unknown = sorted(set(LEGACY_CHROMS) - set(CHROMS), key=int)
+if _unknown:
+    raise ValueError(
+        "legacy_full_chromosomes must be a subset of benchmark_chromosomes; "
+        f"not in benchmark_chromosomes: {_unknown}"
+    )
+
+
+wildcard_constraints:
+    chrom=r"\d+",
+    workers=r"\d+",
+    population=POPULATION,
+
+
+def pop_ne(population):
+    return config["populations"][population]["ne"]
+
+
+def pop_subpops(population):
+    return config["populations"][population]["subpops"]
+
+
+def lite_timing(chrom, workers):
+    return LITE_TIMING.format(chrom=chrom, workers=workers)
+
+
+def lite_output(chrom, workers, name):
+    return str(Path(LITE_DIR.format(chrom=chrom, workers=workers)) / name)
+
+
+def legacy_output(chrom, name):
+    return str(Path(LEGACY_DIR.format(chrom=chrom)) / name)
+
+
+# ---------------------------------------------------------------------------
+# Target rule
+# ---------------------------------------------------------------------------
+
+
+def final_targets():
+    targets = [
+        str(BENCH / "timings.tsv"),
+        str(BENCH / "summary.tsv"),
+        str(BENCH / "runtime.svg"),
+        str(BENCH / "compare" / "lite_vs_published.tsv"),
+    ]
+    # The lite-vs-legacy and legacy-vs-published tables only exist if the
+    # legacy arm ran at all; `legacy_full_chromosomes: []` is a valid
+    # ldetect-lite-only configuration.
+    if LEGACY_CHROMS:
+        targets += [
+            str(BENCH / "compare" / "lite_vs_legacy.tsv"),
+            str(BENCH / "compare" / "legacy_vs_published.tsv"),
+        ]
+    return targets
+
+
+rule all:
+    input:
+        final_targets(),
+
+
+# ---------------------------------------------------------------------------
+# Step 0: Inputs (same sources as the main reproduction workflow)
+# ---------------------------------------------------------------------------
+
+
+rule bench_download_vcf:
+    output:
+        vcf=RAW_VCF,
+        tbi=RAW_VCF + ".tbi",
+    params:
+        base_url=config["vcf_base_url"],
+        fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {RAW_DIR}
+        wget -q -O {output.vcf} {params.base_url}/{params.fname}
+        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        """
+
+
+rule bench_download_map:
+    output:
+        str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+    params:
+        base_url=config["maps_base_url"],
+        fname=lambda wc: config["map_filename_template"].format(chrom=wc.chrom),
+    shell:
+        """
+        mkdir -p {MAPS_DIR}
+        wget -q -O {output} {params.base_url}/{params.fname}
+        """
+
+
+rule bench_download_panel:
+    output:
+        str(RES_DIR / "phase1_integrated_calls.20101123.ALL.panel"),
+    params:
+        url=config["panel_url"],
+    shell:
+        "mkdir -p {RES_DIR} && wget -q -O {output} '{params.url}'"
+
+
+rule bench_download_ref_bed:
+    output:
+        str(RES_DIR / "ldetect_ref" / "{population}_fourier_ls-all.bed"),
+    params:
+        base_url=config["ldetect_data_base_url"],
+    shell:
+        """
+        mkdir -p {RES_DIR}/ldetect_ref
+        wget -q -O {output} \
+            "{params.base_url}/{wildcards.population}/fourier_ls-all.bed"
+        """
+
+
+rule bench_prep_individuals:
+    input:
+        panel=rules.bench_download_panel.output[0],
+        vcf=RAW_VCF.replace("{chrom}", "22"),
+        tbi=RAW_VCF.replace("{chrom}", "22") + ".tbi",
+    output:
+        str(RES_DIR / "{population}_inds.txt"),
+    params:
+        subpops=lambda wc: " ".join(pop_subpops(wc.population)),
+    shell:
+        """
+        uv run python scripts/prep_individuals.py \
+            --panel {input.panel} \
+            --subpops {params.subpops} \
+            --vcf {input.vcf} \
+            --output {output}
+        """
+
+
+rule bench_filter_vcf:
+    input:
+        vcf=RAW_VCF,
+        tbi=RAW_VCF + ".tbi",
+        individuals=str(RES_DIR / "{population}_inds.txt"),
+    output:
+        vcf=FILT_VCF,
+        tbi=FILT_VCF + ".tbi",
+    shell:
+        """
+        mkdir -p $(dirname {output.vcf})
+        bcftools view -S {input.individuals} -Ou {input.vcf} \
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
+        tabix -f -p vcf {output.vcf}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 1: ldetect-lite arm, once per worker count
+#
+# No --generate-ld-neighborhood-plot here: plotting is not part of what the
+# legacy arm does, so including it would inflate the lite timing.
+# ---------------------------------------------------------------------------
+
+
+rule bench_lite_run:
+    input:
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.replace("{population}", POPULATION),
+        tbi=FILT_VCF.replace("{population}", POPULATION) + ".tbi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+    output:
+        bed=str(Path(LITE_DIR) / "{chrom}-ld-blocks.bed"),
+        partitions=str(Path(LITE_DIR) / "{chrom}_partitions.txt"),
+        breakpoints=str(Path(LITE_DIR) / "breakpoints-{chrom}.json"),
+        vector=str(Path(LITE_DIR) / "vector-{chrom}.txt.gz"),
+    log:
+        run=str(Path(LITE_DIR) / "ldetect.log"),
+        timing=LITE_TIMING,
+    threads: lambda wc: int(wc.workers)
+    params:
+        output_dir=LITE_DIR,
+        ne=pop_ne(POPULATION),
+        cutoff=config["cov_cutoff"],
+        covariance_cache=config.get("covariance_cache", "compact"),
+        ld_kernel=config.get("ld_kernel", "bitpacked"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config["subset"],
+        filter_window=config.get("filter_window", "symmetric"),
+    shell:
+        """
+        mkdir -p {params.output_dir}
+        /usr/bin/time -v -o {log.timing} \
+            uv run ldetect run \
+            --genetic-map {input.genetic_map} \
+            --reference-panel {input.vcf} \
+            --individuals {input.individuals} \
+            --chromosome {wildcards.chrom} \
+            --output-dir {params.output_dir} \
+            --ne {params.ne} \
+            --cov-cutoff {params.cutoff} \
+            --covariance-cache {params.covariance_cache} \
+            --ld-kernel {params.ld_kernel} \
+            --n-snps-bw-bpoints {params.n_snps} \
+            --subset {params.subset} \
+            --workers {wildcards.workers} \
+            --local-search-workers {wildcards.workers} \
+            --filter-window {params.filter_window} \
+            >{log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Legacy arm, stage 1 -- original covariance, one process per partition
+# ---------------------------------------------------------------------------
+
+
+rule bench_legacy_covariance:
+    input:
+        partitions=lambda wc: lite_output(
+            wc.chrom, SERIAL_WORKERS, f"{wc.chrom}_partitions.txt"
+        ),
+        genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
+        vcf=FILT_VCF.replace("{population}", POPULATION),
+        tbi=FILT_VCF.replace("{population}", POPULATION) + ".tbi",
+        individuals=str(RES_DIR / f"{POPULATION}_inds.txt"),
+        driver="scripts/run_legacy_covariance.py",
+        script="scripts/legacy_ldetect/ldetect/examples/P00_01_calc_covariance.py",
+    output:
+        timings=str(Path(LEGACY_DIR) / "covariance_partition_timings.tsv"),
+        staged=str(Path(LEGACY_DIR) / "dataset" / "scripts" / "{chrom}_partitions"),
+    log:
+        str(Path(LEGACY_DIR) / "covariance.log"),
+    threads: int(config["legacy_covariance_workers"])
+    params:
+        dataset=str(Path(LEGACY_DIR) / "dataset"),
+        ne=pop_ne(POPULATION),
+        cutoff=config["cov_cutoff"],
+        population=POPULATION,
+    shell:
+        """
+        uv run python scripts/run_legacy_covariance.py \
+            --chromosome {wildcards.chrom} \
+            --population {params.population} \
+            --partitions {input.partitions} \
+            --vcf {input.vcf} \
+            --genetic-map {input.genetic_map} \
+            --individuals {input.individuals} \
+            --ne {params.ne} \
+            --cutoff {params.cutoff} \
+            --dataset-dir {params.dataset} \
+            --timings {output.timings} \
+            --workers {threads} \
+            --covariance-script {input.script} \
+            >{log} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Legacy arm, stage 2 -- original downstream (P01/P02/P03)
+# ---------------------------------------------------------------------------
+
+
+rule bench_legacy_downstream:
+    input:
+        staged=rules.bench_legacy_covariance.output.staged,
+        timings=rules.bench_legacy_covariance.output.timings,
+        runner="scripts/run_legacy_ldetect.py",
+    output:
+        bed=str(Path(LEGACY_DIR) / "out" / "{chrom}-ld-blocks.bed"),
+        vector=str(Path(LEGACY_DIR) / "out" / "vector-{chrom}.txt.gz"),
+        breakpoints=str(Path(LEGACY_DIR) / "out" / "breakpoints-{chrom}.json"),
+    log:
+        run=str(Path(LEGACY_DIR) / "downstream.log"),
+        timing=str(Path(LEGACY_DIR) / "downstream.timing.log"),
+    threads: 1
+    params:
+        dataset=str(Path(LEGACY_DIR) / "dataset"),
+        output_dir=str(Path(LEGACY_DIR) / "out"),
+        n_snps=config["n_snps_bw_bpoints"],
+        subset=config["subset"],
+        population=POPULATION,
+        filter_window=config.get("filter_window", "symmetric"),
+    shell:
+        """
+        /usr/bin/time -v -o {log.timing} \
+            uv run python scripts/run_legacy_ldetect.py \
+                --dataset-path {params.dataset} \
+                --chromosome {wildcards.chrom} \
+                --population {params.population} \
+                --output-dir {params.output_dir} \
+                --n-snps-bw-bpoints {params.n_snps} \
+                --subset {params.subset} \
+                --filter-window {params.filter_window} \
+            >{log.run} 2>&1
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Runtime aggregation
+# ---------------------------------------------------------------------------
+
+
+def collect_arguments():
+    parts = []
+    for chrom in CHROMS:
+        for workers in WORKER_COUNTS:
+            parts.append(
+                f"--lite {POPULATION} {chrom} {workers} {lite_timing(chrom, workers)}"
+            )
+    for chrom in LEGACY_CHROMS:
+        timings = legacy_output(chrom, "covariance_partition_timings.tsv")
+        downstream = legacy_output(chrom, "downstream.timing.log")
+        parts.append(f"--legacy-covariance {POPULATION} {chrom} {timings}")
+        parts.append(f"--legacy-downstream {POPULATION} {chrom} {downstream}")
+    return " ".join(parts)
+
+
+rule bench_collect_runtime:
+    input:
+        lite=[
+            lite_timing(chrom, workers)
+            for chrom in CHROMS
+            for workers in WORKER_COUNTS
+        ],
+        legacy_covariance=[
+            legacy_output(chrom, "covariance_partition_timings.tsv")
+            for chrom in LEGACY_CHROMS
+        ],
+        legacy_downstream=[
+            legacy_output(chrom, "downstream.timing.log") for chrom in LEGACY_CHROMS
+        ],
+        script="scripts/collect_runtime_benchmark.py",
+    output:
+        timings=str(BENCH / "timings.tsv"),
+        summary=str(BENCH / "summary.tsv"),
+        plot=str(BENCH / "runtime.svg"),
+    params:
+        arguments=collect_arguments(),
+        serial_workers=SERIAL_WORKERS,
+    shell:
+        """
+        uv run python scripts/collect_runtime_benchmark.py \
+            {params.arguments} \
+            --serial-workers {params.serial_workers} \
+            --timings {output.timings} \
+            --summary {output.summary} \
+            --plot {output.plot}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Results comparison
+#
+# Per-chromosome lite-vs-legacy and legacy-vs-published concordance on the
+# chromosomes where legacy ran, plus lite-vs-published genome-wide.
+# ---------------------------------------------------------------------------
+
+
+rule bench_compare_chrom:
+    input:
+        lite_vector=lambda wc: lite_output(
+            wc.chrom, SERIAL_WORKERS, f"vector-{wc.chrom}.txt.gz"
+        ),
+        lite_breakpoints=lambda wc: lite_output(
+            wc.chrom, SERIAL_WORKERS, f"breakpoints-{wc.chrom}.json"
+        ),
+        lite_bed=lambda wc: lite_output(
+            wc.chrom, SERIAL_WORKERS, f"{wc.chrom}-ld-blocks.bed"
+        ),
+        legacy_vector=rules.bench_legacy_downstream.output.vector,
+        legacy_breakpoints=rules.bench_legacy_downstream.output.breakpoints,
+        legacy_bed=rules.bench_legacy_downstream.output.bed,
+        reference_bed=str(
+            RES_DIR / "ldetect_ref" / f"{POPULATION}_fourier_ls-all.bed"
+        ),
+        script="scripts/compare_legacy_outputs.py",
+    output:
+        lite_vs_legacy=str(Path(LEGACY_DIR) / "compare" / "lite_vs_legacy.tsv"),
+        legacy_vs_reference=str(
+            Path(LEGACY_DIR) / "compare" / "legacy_vs_published.tsv"
+        ),
+    params:
+        subset=config["subset"],
+        tolerance=config["tolerance"],
+    shell:
+        """
+        uv run python scripts/compare_legacy_outputs.py \
+            --chromosome {wildcards.chrom} \
+            --ldetect-lite-vector {input.lite_vector} \
+            --legacy-vector {input.legacy_vector} \
+            --ldetect-lite-breakpoints {input.lite_breakpoints} \
+            --legacy-breakpoints {input.legacy_breakpoints} \
+            --ldetect-lite-bed {input.lite_bed} \
+            --legacy-bed {input.legacy_bed} \
+            --reference-bed {input.reference_bed} \
+            --subset {params.subset} \
+            --tolerance {params.tolerance} \
+            --ldetect-lite-vs-legacy {output.lite_vs_legacy} \
+            --legacy-vs-reference {output.legacy_vs_reference}
+        """
+
+
+rule bench_combine_lite_vs_legacy:
+    input:
+        [
+            str(Path(LEGACY_DIR.format(chrom=chrom)) / "compare" / "lite_vs_legacy.tsv")
+            for chrom in LEGACY_CHROMS
+        ],
+    output:
+        str(BENCH / "compare" / "lite_vs_legacy.tsv"),
+    shell:
+        "uv run python scripts/combine_tsv.py --input {input} --output {output}"
+
+
+rule bench_combine_legacy_vs_published:
+    input:
+        [
+            str(
+                Path(LEGACY_DIR.format(chrom=chrom))
+                / "compare"
+                / "legacy_vs_published.tsv"
+            )
+            for chrom in LEGACY_CHROMS
+        ],
+    output:
+        str(BENCH / "compare" / "legacy_vs_published.tsv"),
+    shell:
+        "uv run python scripts/combine_tsv.py --input {input} --output {output}"
+
+
+rule bench_lite_genomewide_bed:
+    input:
+        [
+            lite_output(chrom, SERIAL_WORKERS, f"{chrom}-ld-blocks.bed")
+            for chrom in CHROMS
+        ],
+    output:
+        str(BENCH / f"{POPULATION}_LD_blocks.bed"),
+    shell:
+        """
+        mkdir -p $(dirname {output})
+        echo -e "#chr\tstart\tstop" >{output}
+        for f in {input}; do
+            tail -n +2 "$f" | sed 's/^/chr/' >>{output}
+        done
+        """
+
+
+rule bench_lite_vs_published:
+    input:
+        ours=rules.bench_lite_genomewide_bed.output[0],
+        ref=str(RES_DIR / "ldetect_ref" / f"{POPULATION}_fourier_ls-all.bed"),
+        script="scripts/compare_blocks.py",
+    output:
+        str(BENCH / "compare" / "lite_vs_published.tsv"),
+    params:
+        tolerance=config["tolerance"],
+    shell:
+        """
+        uv run python scripts/compare_blocks.py \
+            --ours {input.ours} \
+            --ref {input.ref} \
+            --output {output} \
+            --tolerance {params.tolerance}
+        """
