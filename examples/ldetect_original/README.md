@@ -184,7 +184,22 @@ Published reference block counts are:
 Matching block counts alone is not enough. Boundary offsets and recall should
 be used to decide whether the analysis is reproducing the original result.
 
-## Full EUR chr21 Runtime Benchmark
+## Full EUR chr21 Runtime Benchmark (downstream-only; superseded)
+
+> **This comparison is not like-for-like.** The `ldetect-lite` arm below is
+> timed end-to-end (`ldetect run`: partition, covariance, matrix-to-vector,
+> find-minima, extract-bpoints), but the legacy arm is
+> `scripts/run_legacy_ldetect.py`, which runs *only* `P01`/`P02`/`P03` and
+> starts from `ldetect-lite`-generated covariance staged into legacy's text
+> format. Legacy's most expensive stage, `P00_01_calc_covariance.py`, is never
+> run, so the resulting speedup understates `ldetect-lite` substantially. Both
+> rows are nonetheless labelled `full_chromosome` in `timings.tsv`.
+>
+> For an end-to-end comparison where the legacy arm computes its own
+> covariance, and for whole-genome coverage, use
+> **[Whole-Genome Runtime Benchmark](#whole-genome-runtime-benchmark)**
+> instead. The procedure below is kept because it documents the staged-dataset
+> route the legacy diagnostics also use.
 
 The manuscript-scale chr21 timing comparison lives with this full reproduction
 workflow, not the toy `ldetect_example` fixture. The plotting helper
@@ -287,6 +302,99 @@ uv run python scripts/runtime_benchmark.py \
 Do not pass `--legacy-dir`, `--lite-dir`, or `--output` to
 `scripts/runtime_benchmark.py`; those are not supported options. The script
 combines timing logs only and does not inspect pipeline output directories.
+
+## Whole-Genome Runtime Benchmark
+
+`Snakefile.runtime_benchmark` is the end-to-end head-to-head: original LDetect
+versus `ldetect-lite`, across all 22 autosomes for one population (EUR by
+default). It supersedes the downstream-only chr21 comparison above.
+
+### What it measures
+
+The `ldetect-lite` arm runs every chromosome in `benchmark_chromosomes`, twice
+-- once at one worker (like-for-like against legacy's single process) and once
+at `lite_parallel_workers` (how the tool is actually used).
+
+The legacy arm runs **end-to-end**: its own `P00_01_calc_covariance.py`, one
+process per partition exactly as the original pipeline did, then `P01`/`P02`/
+`P03`. Because that covariance stage is pure-Python O(n^2), it runs only for
+`legacy_full_chromosomes` (chr19-22 by default), not all 22 -- extrapolating
+the chr2 toy interval timing puts EUR genome-wide legacy covariance at order
+10^3-10^4 CPU-hours.
+
+**CPU-seconds (user + sys) is the primary metric.** Legacy covariance is
+embarrassingly parallel across partitions and `ldetect-lite` parallelizes
+internally, so a wall-clock-only comparison would report how many cores each
+arm was given rather than how efficient it is. Wall clock is recorded
+alongside, tagged with the worker count that produced it.
+
+### What parallelizes
+
+Only legacy's covariance stage. `P01`'s `calc_diag_lean` streams partitions in
+order accumulating a running diagonal sum; `P02`'s
+`custom_binary_search_with_trackback` is an inherently serial search over
+filter widths. Both are single-threaded per chromosome, so legacy's
+per-chromosome wall-clock floor is its downstream time regardless of core
+count. Chromosomes themselves are independent for both arms.
+
+### Running it
+
+```bash
+cd examples/ldetect_original
+
+uv run snakemake -s Snakefile.runtime_benchmark -n          # dry-run
+uv run snakemake -s Snakefile.runtime_benchmark --cores 32
+```
+
+Scope the legacy arm, or skip it entirely, via config:
+
+```bash
+# ldetect-lite arm only, all 22 autosomes
+uv run snakemake -s Snakefile.runtime_benchmark --cores 32 \
+  --config legacy_full_chromosomes='[]'
+
+# just chr22, more parallelism for legacy covariance
+uv run snakemake -s Snakefile.runtime_benchmark --cores 64 \
+  --config legacy_full_chromosomes='[22]' legacy_covariance_workers=32
+```
+
+Budget roughly 1 GiB per `legacy_covariance_workers` slot: each partition
+process holds the whole-chromosome genetic map plus its own haplotypes.
+
+### Outputs
+
+```text
+results/runtime_benchmark/timings.tsv                   # tidy per-arm/stage/chromosome
+results/runtime_benchmark/summary.tsv                   # per-chromosome speedups
+results/runtime_benchmark/runtime.svg                   # CPU-hours, log scale
+results/runtime_benchmark/compare/lite_vs_legacy.tsv    # vector/breakpoint/BED concordance
+results/runtime_benchmark/compare/legacy_vs_published.tsv
+results/runtime_benchmark/compare/lite_vs_published.tsv # genome-wide, all 22
+```
+
+`timings.tsv` carries `wall_seconds`, `cpu_seconds` and `max_rss_mib` per
+`(chromosome, arm, stage, workers)`. Note that `max_rss_mib` is a peak for a
+single process, not a sum across concurrent workers, so it understates
+whole-pipeline memory for both parallel arms.
+
+`summary.tsv` adds `cpu_speedup_vs_lite_serial`,
+`cpu_speedup_vs_lite_parallel`, and `legacy_covariance_share` -- the fraction
+of legacy's CPU time spent in covariance.
+
+### The Hann window pin
+
+The legacy arm is run with `--filter-window symmetric`. `run_legacy_ldetect.py`
+maps the vendored `get_window('hanning', ...)` call onto modern scipy, which
+computes the *periodic* window; scipy 0.16.0's defect meant the 2015 code
+actually got the *symmetric* one (see
+`notes/findings/ldetect-original-reproduction.md`). Without this pin the legacy
+arm diverges from `ldetect-lite` -- whose own default is `symmetric` -- for a
+reason unrelated to either implementation. Verified on the chr2 toy interval:
+with `symmetric` the legacy chain reproduces the published reference BED
+exactly (13/13 blocks); with `scipy-periodic` it yields 12.
+
+The flag defaults to `scipy-periodic` so `Snakefile.legacy_diagnostics` keeps
+its existing behaviour.
 
 ## Diagnostic Workflow
 

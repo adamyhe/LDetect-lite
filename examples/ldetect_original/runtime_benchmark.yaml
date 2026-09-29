@@ -1,0 +1,33 @@
+# Whole-genome LDetect vs ldetect-lite runtime benchmark.
+#
+# The lite arm runs every chromosome in `benchmark_chromosomes`, twice: once
+# single-worker (comparable to legacy's single process) and once at
+# `lite_parallel_workers` (how the tool is actually used).
+#
+# The legacy arm runs end-to-end -- its own `P00_01_calc_covariance.py` per
+# partition, then `P01`/`P02`/`P03` -- but only for `legacy_full_chromosomes`.
+# Legacy covariance is pure-Python O(n^2); extrapolating the chr2 toy interval
+# timing puts EUR genome-wide at order 10^3-10^4 CPU-hours, so a full 22-autosome
+# legacy run is not the intended use of this workflow.
+
+benchmark_population: EUR
+
+benchmark_chromosomes: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+
+# Chromosomes to run legacy LDetect end-to-end on. Smallest autosomes by
+# default; chr21 overlaps the earlier (downstream-only) chr21 benchmark.
+legacy_full_chromosomes: [19, 20, 21, 22]
+
+# ldetect-lite worker counts. `lite_serial_workers` is the like-for-like
+# comparison against legacy's single process.
+lite_serial_workers: 1
+lite_parallel_workers: 4
+
+# Parallelism for the legacy covariance stage. Only affects wall clock -- the
+# reported CPU-seconds are summed per partition and are worker-count invariant.
+# Each partition process holds the whole chromosome genetic map plus its own
+# haplotypes, so budget roughly 1 GiB per worker.
+legacy_covariance_workers: 8
+
+# Boundary-matching tolerance for the block comparison, in base pairs.
+tolerance: 100000

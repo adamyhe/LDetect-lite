@@ -54,6 +54,26 @@ This is a third, independent data point alongside the two established above:
 
 **Consequence: the CLI default was flipped from `scipy-periodic` to `symmetric`** (`filters.py`, `pipeline.py`, `cmd_run.py`, `cmd_find_minima.py`, and all docs/examples referencing the default — see git history around this finding's date). `scipy-periodic` remains available and is still the necessary, non-default mode for reproducing modern-scipy-era published output — MacDonald et al. (2022) ran the original code after the scipy defect was fixed, so their published blocks genuinely need the periodic window (see `notes/findings/macdonald2022-reproduction.md`). This does not contradict the root-cause analysis above; it's an additional, independent line of evidence pointing the same direction as the empirical 2015 output.
 
+## Direct end-to-end confirmation on the vendored code path (2026-09-10)
+
+The three data points above are about scipy's behaviour and the paper's text.
+This is the same conclusion reached by running the vendored legacy chain
+itself, end to end, on the chr2 toy interval — original
+`P00_01_calc_covariance.py` for covariance, then `P01`/`P02`/`P03`:
+
+- with the periodic window (modern scipy's `fftbins=True`, which is what
+  `scripts/run_legacy_ldetect.py` computed until now): `fourier_ls` yields 11
+  loci → 12 blocks, which does **not** match the published reference;
+- with the symmetric window (`np.hanning`, i.e. scipy 0.16.0's actual output):
+  12 loci → **13 blocks, exactly matching** `EUR-chr2-50-39967768-40067768.bed`.
+
+Same covariance, same vector (671 rows, roundoff-identical), same code — only
+the window differs, and only the symmetric one reproduces the published
+blocks. `run_legacy_ldetect.py` gained a `--filter-window` flag for this; it
+defaults to `scipy-periodic` to preserve existing diagnostic behaviour, and
+the whole-genome runtime benchmark passes `symmetric`. Process notes:
+`notes/logs/whole-genome-runtime-benchmark.md`.
+
 ## Status: parked, not actively being investigated (pre-existing, as of 2026-07-03)
 
 `examples/ldetect_original` reproduces Berisa & Pickrell (2016)'s published LD blocks:

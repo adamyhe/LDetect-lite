@@ -18,7 +18,21 @@ def _install_legacy_import_path() -> Path:
     return legacy_root
 
 
-def _patch_legacy_scipy_window() -> None:
+def _patch_legacy_scipy_window(filter_window: str = "scipy-periodic") -> None:
+    """Make the vendored `sig.get_window('hanning', ...)` call work on modern scipy.
+
+    `scipy-periodic` keeps the literal behaviour of the 2015 code under a
+    current scipy: `fftbins=True` yields the periodic Hann window.
+
+    `symmetric` instead returns `np.hanning`. That is what the original code
+    *actually* computed in 2015: scipy 0.16.0's `hann` only applied the
+    periodic adjustment for even lengths, and `2*width+1` is always odd, so
+    `fftbins=True` silently returned the symmetric window. See
+    `notes/findings/ldetect-original-reproduction.md`. It also matches
+    ldetect-lite's own default, so use it whenever legacy output is being
+    compared against ldetect-lite or against published 2015-era blocks.
+    """
+    import numpy as np
     import scipy.signal as signal
 
     original_get_window = signal.get_window
@@ -26,6 +40,8 @@ def _patch_legacy_scipy_window() -> None:
     def get_window(window, nx, fftbins=True, *, xp=None, device=None):
         if window == "hanning":
             window = "hann"
+        if filter_window == "symmetric" and window == "hann":
+            return np.hanning(nx)
         try:
             return original_get_window(
                 window, nx, fftbins=fftbins, xp=xp, device=device
@@ -132,7 +148,7 @@ def _write_json_breakpoints(pickle_path: Path, output_path: Path) -> None:
 
 def run_legacy(args: argparse.Namespace) -> None:
     _install_legacy_import_path()
-    _patch_legacy_scipy_window()
+    _patch_legacy_scipy_window(args.filter_window)
 
     import P01_matrix_to_vector_pipeline as matrix_pipeline
     import P02_minima_pipeline as minima_pipeline
@@ -198,6 +214,15 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--n-snps-bw-bpoints", required=True, type=int)
     parser.add_argument("--subset", default="fourier_ls")
+    parser.add_argument(
+        "--filter-window",
+        choices=("scipy-periodic", "symmetric"),
+        default="scipy-periodic",
+        help=(
+            "Hann window for the minima filter. Use 'symmetric' to match what "
+            "the 2015 code actually computed (and ldetect-lite's default)."
+        ),
+    )
     parser.add_argument(
         "--stage",
         choices=("all", "matrix-to-vector", "find-minima", "extract-bpoints"),
