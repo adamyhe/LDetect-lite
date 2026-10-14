@@ -75,7 +75,7 @@ exclude = [
     "/.uv-cache",
     "/.gitattributes",
     "/.gitignore",
-    "/AGENTS.md",
+    "/CLAUDE.md",
     "/uv.lock",
     "/**/__pycache__",
     "/**/.mypy_cache",

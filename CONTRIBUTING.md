@@ -36,7 +36,7 @@ CI (`.github/workflows/tests.yml`) runs the same lint, type-check, and test step
 - Keep PRs scoped to one concern — prefer several small, independently-mergeable PRs over one that mixes unrelated fixes/features.
 - Add or update tests for any behavior change. New modules under `src/ldetect_lite/` should have corresponding tests under `tests/`.
 - If a change affects reproduction behavior against `examples/ldetect_original` or `examples/MacDonald2022`, note the finding in `notes/findings/` (confirmed summaries) or `notes/logs/` (dated experiment notes), whichever fits.
-- Update `README.md`/`AGENTS.md` if you add a CLI flag, module, or change documented behavior.
+- Update `README.md`/`CLAUDE.md` if you add a CLI flag, module, or change documented behavior.
 
 ## Versioning and releases
 
