@@ -443,6 +443,15 @@ A per-stage profile of serial Step 2 over all 103 EUR chr21 partitions (377,790 
 
 **Speed and memory:** serial Step 2 on EUR chr21 77.4 s -> 51.6 s (`array_seconds` 24.4 -> 1.0 s). With `ldetect run --workers 4` (same node, alternating reps, on top of #19): Step 2 ~32 s -> ~29 s and peak RSS ~630 -> ~580 MB. The 4-worker gain is smaller than serial/4 would suggest; wall times on this run were noisier (node shared) than the #19 measurement.
 
-**What remains in Step 2:** VCF text parsing. ~75% of `vcf_seconds` is htslib iterating records before any genotype access; converting the same panel to a GT-only BCF (`bcftools annotate -x INFO,^FORMAT/GT -Ob`, 15 s once) cuts per-partition decode 3.5-4x (46.1 s -> 11.3 s for all chr21 partitions, serial). Separately, partitions overlap (their lengths sum to 1.55x the chromosome span), so each SNP is decoded ~1.5x; a whole-chromosome packed cache prototype (out-of-tree benchmark script; decodes once and slicing per partition with tabix overlap, per-region skip counts and per-region dedupe reproduced) matched the per-partition path exactly on all 103 partitions, decoding chr21 in 20.0 s serial (6.4 s from the GT-only BCF) vs 37.4 s, with slicing taking 0.03 s total. Not yet integrated.
+**What remains in Step 2:** VCF text parsing. ~75% of `vcf_seconds` is htslib iterating records before any genotype access; converting the same panel to a GT-only BCF (`bcftools annotate -x INFO,^FORMAT/GT -Ob`, 15 s once) cuts per-partition decode 3.5-4x (46.1 s -> 11.3 s for all chr21 partitions, serial). Separately, partitions overlap (their lengths sum to 1.55x the chromosome span), so each SNP is decoded ~1.5x; a whole-chromosome packed cache prototype (out-of-tree benchmark script; decodes once and slicing per partition with tabix overlap, per-region skip counts and per-region dedupe reproduced) matched the per-partition path exactly on all 103 partitions, decoding chr21 in 20.0 s serial (6.4 s from the GT-only BCF) vs 37.4 s, with slicing taking 0.03 s total.
+
+**Worker scaling and why the cache was shelved:** Step 2 scales well across physical cores. `ldetect run` on EUR chr21 on a Slurm `-c 8` allocation (4 physical cores plus their hyperthread siblings, AMD EPYC 9554):
+
+| Input | Step 2, 1 worker | 2 workers | 4 workers | 8 workers (4 cores + HT) |
+|---|---:|---:|---:|---:|
+| `.vcf.gz` | 75 s | 38 s | 20 s | 16 s |
+| GT-only `.bcf` | 46 s | 24 s | 13 s | 10 s |
+
+The BED was byte-identical across all eight runs, both inputs and every worker count. An earlier `-c 4` measurement that suggested only ~1.8x at 4 workers was most likely an allocation of 2 physical cores plus hyperthreads; Slurm `-c` counts hardware threads on this cluster. At this scaling, the whole-chromosome cache would save about 4-5 s of a 20 s Step 2 on VCF input and about 1-2 s of 13 s on the recommended GT-only BCF input. That is not worth restructuring `cmd_run` for, so the cache is shelved. If it is revisited (for example, for much larger panels where decode dominates), share it across workers as a read-only memory-mapped `.npy` in node-local scratch rather than pickling it to each worker. Packed size is `n_records x ceil(2N/64) x 8` bytes: ~21 MiB for EUR chr21, ~200 MB estimated for chr2, ~3.5 GB for chr2 at N=10,000.
 
 **CLI:** no change.

@@ -35,7 +35,7 @@ bcftools annotate -x INFO,^FORMAT/GT -Ob -o 1000G.chr2.gt.bcf 1000G.chr2.vcf.gz
 bcftools index 1000G.chr2.gt.bcf
 ```
 
-Then pass `--reference-panel 1000G.chr2.gt.bcf`. This keeps every record, position, and genotype, so results are unchanged. On EUR chr21 from 1000 Genomes Phase 1 (379 individuals), it made reading genotypes for all covariance partitions 3.5–4x faster (46 s to 11 s, serial). The conversion took 15 s, so it roughly pays for itself in a single run and is pure gain when the same panel is reused across runs or populations. If you're analyzing one population from a larger panel, you can also add `-S individuals.txt` (via `bcftools view -S individuals.txt -Ou ... | bcftools annotate ...`) to drop the other samples.
+Then pass `--reference-panel 1000G.chr2.gt.bcf`. This keeps every record, position, and genotype, so results are unchanged (on EUR chr21 the BED was byte-identical to the VCF run). On EUR chr21 from 1000 Genomes Phase 1 (379 individuals), it made reading genotypes for all covariance partitions 3.5–4x faster (46 s to 11 s, serial). The conversion took 15 s, so it roughly pays for itself in a single run and is pure gain when the same panel is reused across runs or populations. If you're analyzing one population from a larger panel, you can also add `-S individuals.txt` (via `bcftools view -S individuals.txt -Ou ... | bcftools annotate ...`) to drop the other samples.
 
 ### End-to-end pipeline
 
