@@ -427,6 +427,22 @@ The same pattern -- `np.unique(np.concatenate((lo, hi)))`, sorting 2n row endpoi
 
 **Exactness:** both helpers return exactly what the `np.unique` call they replace would, including dtype; `tests/test_sorted_unique.py` checks parity on edge cases (empty, single, unsorted fallback, `hi` values outside `lo`, mixed int32/int64), randomized partition-shaped rows with and without the diagonal, and that the append writer's `lo_values`/`lo_offsets` index is unchanged when one `lo` run is split across streamed chunks. The existing suite (including the fused-vector byte-identity tests) passes unchanged.
 
-**Speed:** compact HDF5 append writer 50.7 -> 20.7 ns/row (2.4x, identical file size), i.e. Step 2's kernel+write cost per emitted row 79 -> 49 ns, before VCF decode. Not yet measured end-to-end on a real chromosome.
+**Speed:** compact HDF5 append writer 50.7 -> 20.7 ns/row (2.4x, identical file size), i.e. Step 2's kernel+write cost per emitted row 79 -> 49 ns, before VCF decode. End to end on EUR chr21 (1000G Phase 1, 379 individuals, `ldetect run --workers 4`, cbsubscb19, two alternating reps after warm-up): Step 2 ~24.5 s -> 22 s, total wall 50.5 s -> 48.1 s, same peak RSS; all 103 covariance partitions, the vector, breakpoint JSON and BED bitwise identical to the pre-change build.
+
+**CLI:** no change.
+
+---
+
+## 20. Pack haplotypes at decode time (`_util/reference_panel.py`)
+
+**Affected code:** `read_reference_panel` (new `layout` argument), `pack_haplotype_rows`/`unpack_haplotypes`, `ReferencePanel` in `src/ldetect_lite/_util/reference_panel.py`; `_build_covariance_inputs`/`calc_covariance` in `src/ldetect_lite/shrinkage.py`
+
+A per-stage profile of serial Step 2 over all 103 EUR chr21 partitions (377,790 partition-SNPs, 281M emitted rows) showed the bitpacked kernel was only 8% of the time (6.5 s) and HDF5 writes another 8%; 83% was getting genotypes into arrays: 39.8 s of VCF reading and 24.4 s of `_build_covariance_inputs`. The panel was decoded into a Python `list[list[int]]` (one `gt.tolist()` of 2N ints per variant), converted back with `np.array(list)`, then re-packed into `uint64` words by `_pack_haplotypes_impl`. `read_reference_panel` now writes each usable record straight into NumPy buffers: with `layout="packed"` (what `calc_covariance` uses for the default bitpacked kernel) rows go into a bounded 4096-row `uint8` block that `np.packbits` packs into the identical word layout whenever it fills; `layout="uint8"` (all other paths) fills a growable `uint8` matrix. Duplicate-position de-duplication moved inline (first usable record wins, as before). The rare `uint8` fallbacks after a failed bitpacked single-pass write unpack via `ReferencePanel.haplotype_matrix()`.
+
+**Exactness:** `tests/test_reference_panel.py` checks `pack_haplotype_rows` against `_pack_haplotypes_impl` across word boundaries (1-758 haplotypes, including allele index 2), and both layouts against an independent list-based oracle on a random 140-haplotype panel with unmapped, unphased, missing and duplicate records, non-VCF sample order, region queries and forced block flushes. EUR chr21 end to end: all 103 partitions, vector, JSON and BED bitwise identical to `main`.
+
+**Speed and memory:** serial Step 2 on EUR chr21 77.4 s -> 51.6 s (`array_seconds` 24.4 -> 1.0 s). With `ldetect run --workers 4` (same node, alternating reps, on top of #19): Step 2 ~32 s -> ~29 s and peak RSS ~630 -> ~580 MB. The 4-worker gain is smaller than serial/4 would suggest; wall times on this run were noisier (node shared) than the #19 measurement.
+
+**What remains in Step 2:** VCF text parsing. ~75% of `vcf_seconds` is htslib iterating records before any genotype access; converting the same panel to a GT-only BCF (`bcftools annotate -x INFO,^FORMAT/GT -Ob`, 15 s once) cuts per-partition decode 3.5-4x (46.1 s -> 11.3 s for all chr21 partitions, serial). Separately, partitions overlap (their lengths sum to 1.55x the chromosome span), so each SNP is decoded ~1.5x; a whole-chromosome packed cache prototype (out-of-tree benchmark script; decodes once and slicing per partition with tabix overlap, per-region skip counts and per-region dedupe reproduced) matched the per-partition path exactly on all 103 partitions, decoding chr21 in 20.0 s serial (6.4 s from the GT-only BCF) vs 37.4 s, with slicing taking 0.03 s total. Not yet integrated.
 
 **CLI:** no change.
