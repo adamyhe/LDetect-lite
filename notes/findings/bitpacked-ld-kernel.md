@@ -45,7 +45,12 @@ covariance stage.
 
 - Prefer indexed BCF over `vcf.gz` when users control the reference-panel file
   format; it should be treated as guidance rather than an enforced input
-  constraint.
+  constraint. Now measured: a GT-only BCF makes chr21 genotype reading
+  3.5-4x faster with byte-identical output, and the README recommends it
+  (see [`step2-covariance-profiling.md`](step2-covariance-profiling.md)).
+- The kernel itself is near its floor: LLVM already emits hardware `popcnt`
+  for `_popcount64`, and it is about 8% of Step 2 on real data. Don't spend
+  more effort on popcount variants without new evidence.
 - Keep partition-level parallelism as the main execution model. Any future
   VCF/BCF IO optimization must preserve that parallelism or prove a stronger
   end-to-end speedup.

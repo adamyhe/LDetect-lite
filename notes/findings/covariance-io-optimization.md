@@ -63,6 +63,12 @@ duplicate-position edge cases all still exercised through the new code path).
   version, node-local storage staging). Needs profiling evidence that
   overlap-driven re-decoding is actually large before it's worth the
   complexity — not undertaken this round.
+  **Update 2026-11-04:** now measured and shelved. Partitions on EUR chr21
+  overlap 1.55x. A prototype matched the per-partition path exactly and
+  halved decode work, but Step 2 scales well across cores, so the expected
+  wall gain is only about 4-5 s (VCF) or 1-2 s (GT-only BCF) of a 20 s / 13 s
+  Step 2 at 4 workers. See
+  [`step2-covariance-profiling.md`](step2-covariance-profiling.md).
 - **CSR/banded covariance storage schema.** This is the same idea as the "v2
   lo-less schema" already prototyped and shelved on the unmerged
   `covariance-cache-redesign` branch: real measured reduction was 6.4%, far
@@ -97,6 +103,10 @@ duplicate-position edge cases all still exercised through the new code path).
   and never rewrite a genetic map file in place at the same path within one
   process. Both hold today (verified across all call sites and the test
   suite); revisit if either assumption changes.
+- Decode-time packing (no per-variant Python lists) shipped later as
+  `docs/optimizations.md` #20, and a GT-only BCF is now the README's
+  recommended panel format; see
+  [`step2-covariance-profiling.md`](step2-covariance-profiling.md).
 - If the packed-haplotype-cache idea is revisited later, profile the actual
   overlap-driven re-decode fraction first (e.g. count/measure genotype
   fetches for positions shared by 2+ partitions on a real chromosome) rather

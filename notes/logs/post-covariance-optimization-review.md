@@ -134,3 +134,22 @@ uv run pytest tests/integration/test_pipeline.py
 uv run ruff check src/ldetect_lite tests
 cd examples/ldetect_original && uv run snakemake -n --config chromosomes='[22]'
 ```
+
+## Update 2026-11-04: Step 4 is now the largest remaining cost
+
+Step 2 (covariance) was profiled and optimized on real data (EUR chr21, 1000G
+Phase 1, 379 individuals); see `notes/logs/step2-covariance-profiling-2026-11.md`
+and `docs/optimizations.md` #19/#20. Step 3 and Step 4 were not changed. With
+those Step 2 changes and the README's GT-only BCF input, Step 2 is no longer
+the dominant stage:
+
+| `ldetect run` chr21 (cbsubscb19) | Total wall | Step 2 | Everything else (mostly Step 4) |
+|---|---:|---:|---:|
+| BCF, `--workers 4` | 40.9 s | 13 s | ~28 s |
+| BCF, `--workers 8` (4 cores + HT) | 32.7 s | 10 s | ~23 s |
+| VCF, `--workers 4` | 47.7 s | 20 s | ~28 s |
+
+Step 3 (fused vector) takes about 1 s. The earlier `-c 4` job measured Step 4
+at about 24 s on both `main` and the Step 2 branch. Step 4 (metric + local
+search) is therefore the next optimization target. It has not yet been
+profiled at the stage level on this data.
