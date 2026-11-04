@@ -26,6 +26,17 @@ The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](h
 
 ## Usage
 
+### Preparing the reference panel (recommended)
+
+Most of the covariance step's runtime goes to parsing the reference panel, not computing LD: `ldetect` only reads `GT`, but htslib still has to parse every other INFO/FORMAT field in a VCF text record (e.g. the `GL`/`DS` fields in 1000 Genomes releases). Converting the panel once to a GT-only BCF removes that cost:
+
+```bash
+bcftools annotate -x INFO,^FORMAT/GT -Ob -o 1000G.chr2.gt.bcf 1000G.chr2.vcf.gz
+bcftools index 1000G.chr2.gt.bcf
+```
+
+Then pass `--reference-panel 1000G.chr2.gt.bcf`. This keeps every record, position, and genotype, so results are unchanged. On EUR chr21 from 1000 Genomes Phase 1 (379 individuals), it made reading genotypes for all covariance partitions 3.5–4x faster (46 s to 11 s, serial). The conversion took 15 s, so it roughly pays for itself in a single run and is pure gain when the same panel is reused across runs or populations. If you're analyzing one population from a larger panel, you can also add `-S individuals.txt` (via `bcftools view -S individuals.txt -Ou ... | bcftools annotate ...`) to drop the other samples.
+
 ### End-to-end pipeline
 
 ```bash
