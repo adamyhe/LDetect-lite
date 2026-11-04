@@ -15,6 +15,7 @@ import numpy as np
 from numba import njit
 
 from ldetect_lite._util.reference_panel import (
+    HaplotypeLayout,
     ReferencePanel,
     read_genetic_map,
     read_individuals,
@@ -53,9 +54,14 @@ def _njit_inline(fn: _F) -> _F:
 
 @dataclass(frozen=True)
 class _CovarianceInputs:
-    """Array form of a reference panel ready for compiled covariance kernels."""
+    """Array form of a reference panel ready for compiled covariance kernels.
 
-    hap_mat: np.ndarray
+    Exactly one of ``hap_mat`` (uint8) and ``packed_hap_mat`` (uint64 words) is
+    set, mirroring the panel's layout; see ``ReferencePanel.haplotype_matrix``.
+    """
+
+    hap_mat: np.ndarray | None
+    packed_hap_mat: np.ndarray | None
     gpos_arr: np.ndarray
     hap_sums: np.ndarray
     j_stop_by_i: np.ndarray
@@ -807,11 +813,10 @@ def _build_covariance_inputs(
     cutoff: float,
 ) -> _CovarianceInputs:
     """Convert parsed haplotypes into arrays shared by all pair kernels."""
-    hap_mat = np.array(panel.haplotypes, dtype=np.uint8)  # (n_snps, n_haps)
     gpos_arr = np.array(
         [pos2gpos[p] for p in panel.positions], dtype=np.float64
     )  # (n_snps,)
-    hap_sums = np.asarray(hap_mat.sum(axis=1), dtype=np.float64)
+    hap_sums = panel.hap_sums
     assume_monotonic_gpos = bool(
         gpos_arr.size <= 1 or np.all(np.diff(gpos_arr) >= 0.0)
     )
@@ -823,7 +828,8 @@ def _build_covariance_inputs(
         pos_arr.size <= 1 or np.all(pos_arr[1:] > pos_arr[:-1])
     )
     return _CovarianceInputs(
-        hap_mat=hap_mat,
+        hap_mat=panel.haplotypes,
+        packed_hap_mat=panel.packed_haplotypes,
         gpos_arr=gpos_arr,
         hap_sums=hap_sums,
         j_stop_by_i=j_stop_by_i,
@@ -999,7 +1005,10 @@ def calc_covariance(
         profile["prepare_seconds"] = time.perf_counter() - prep_start
 
     vcf_start = time.perf_counter()
-    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos)
+    # The bitpacked kernel consumes uint64 words, so pack while decoding;
+    # every other path needs the uint8 matrix.
+    layout: HaplotypeLayout = "packed" if ld_kernel == "bitpacked" else "uint8"
+    panel = read_reference_panel(vcf_path, region, individuals, pos2gpos, layout)
     if profile is not None:
         profile["vcf_seconds"] = time.perf_counter() - vcf_start
         profile["n_snps"] = float(len(panel.positions))
@@ -1018,7 +1027,7 @@ def calc_covariance(
     inputs = _build_covariance_inputs(panel, pos2gpos, ne, n_ind, cutoff)
     log_debug(
         "calc_covariance arrays_built "
-        f"n_snps={inputs.hap_mat.shape[0]} n_haps={inputs.hap_mat.shape[1]} "
+        f"n_snps={inputs.pos_arr.size} n_haps={panel.n_haps} "
         f"seconds={time.perf_counter() - array_start:.3f}"
     )
     if not inputs.assume_monotonic_gpos:
@@ -1033,7 +1042,6 @@ def calc_covariance(
         profile["array_seconds"] = time.perf_counter() - array_start
     log_memory_checkpoint("calc_covariance_arrays_built", debug=True)
 
-    hap_mat = inputs.hap_mat
     gpos_arr = inputs.gpos_arr
     hap_sums = inputs.hap_sums
     j_stop_by_i = inputs.j_stop_by_i
@@ -1052,15 +1060,11 @@ def calc_covariance(
                     diag_val_all[diag_valid],
                 )
             if ld_kernel == "bitpacked":
-                pack_start = time.perf_counter()
-                packed_hap_mat = _pack_haplotypes_impl(hap_mat)
+                # packed at decode time by read_reference_panel(layout="packed")
+                packed_hap_mat = inputs.packed_hap_mat
+                assert packed_hap_mat is not None
                 if profile is not None:
-                    profile["pack_seconds"] = time.perf_counter() - pack_start
-                log_debug(
-                    "calc_covariance haplotypes_bitpacked "
-                    f"n_words={packed_hap_mat.shape[1]} "
-                    f"seconds={time.perf_counter() - pack_start:.3f}"
-                )
+                    profile["pack_seconds"] = 0.0
                 row_chunks = _compact_pair_chunks_single_pass_bitpacked(
                     packed_hap_mat,
                     gpos_arr,
@@ -1075,8 +1079,9 @@ def calc_covariance(
                     compact_chunk_rows,
                 )
             else:
+                assert inputs.hap_mat is not None
                 row_chunks = _compact_pair_chunks_single_pass(
-                    hap_mat,
+                    inputs.hap_mat,
                     gpos_arr,
                     hap_sums,
                     j_stop_by_i,
@@ -1126,6 +1131,9 @@ def calc_covariance(
                 sidecar.mark_invalid()
             log_debug("calc_covariance compact_single_pass_failed using fallback")
 
+    # Remaining paths use the uint8 kernels (unpacked if decoded packed).
+    hap_mat = panel.haplotype_matrix()
+    if compact_output and assume_sorted_unique_rows:
         count_start = time.perf_counter()
         row_counts = _count_pairwise_ld_by_i_impl(
             hap_mat,

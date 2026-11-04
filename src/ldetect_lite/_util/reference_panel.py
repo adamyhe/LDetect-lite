@@ -8,26 +8,87 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import cyvcf2
 import numpy as np
+
+HaplotypeLayout = Literal["uint8", "packed"]
+
+#: Rows buffered as uint8 before each ``np.packbits`` call in packed layout.
+#: Bounds the transient uint8 footprint to ``_PACK_BLOCK_ROWS * n_haps`` bytes.
+_PACK_BLOCK_ROWS = 4096
 
 
 @dataclass(frozen=True)
 class ReferencePanel:
     """Phased reference haplotypes after map filtering and de-duplication.
 
-    Positions and ``rs_ids`` are kept parallel to ``haplotypes``. Each
-    haplotype row is a flat diploid expansion of the requested individuals:
+    ``positions`` and ``rs_ids`` are parallel to the haplotype rows. Each row is
+    a flat diploid expansion of the requested individuals:
     ``sample0_hap0, sample0_hap1, sample1_hap0, ...``.
+
+    Exactly one haplotype representation is populated, chosen by
+    ``read_reference_panel``'s ``layout``:
+
+    * ``haplotypes`` -- ``uint8`` matrix ``(n_snps, n_haps)`` of allele indexes
+      (``layout="uint8"``).
+    * ``packed_haplotypes`` -- ``uint64`` matrix ``(n_snps, ceil(n_haps/64))``
+      with haplotype ``k`` at word ``k // 64``, bit ``k % 64``, set for any
+      non-reference allele (``layout="packed"``; identical to
+      ``shrinkage._pack_haplotypes_impl`` applied to the uint8 matrix).
+
+    ``hap_sums`` is the per-row sum of allele indexes, as the uint8 matrix's
+    ``sum(axis=1)`` would give, in both layouts.
     """
 
     positions: list[int]
     rs_ids: list[str]
-    haplotypes: list[list[int]]
+    n_haps: int
+    hap_sums: np.ndarray
     skipped_unphased: int
     duplicate_positions: int
+    haplotypes: np.ndarray | None = None
+    packed_haplotypes: np.ndarray | None = None
+
+    def haplotype_matrix(self) -> np.ndarray:
+        """The ``uint8`` haplotype matrix, unpacking packed rows if needed.
+
+        Unpacking recovers 0/1 values, so for the (unsupported) case of
+        multi-allelic records with allele indexes above 1 it is not identical
+        to what ``layout="uint8"`` would have returned.
+        """
+        if self.haplotypes is not None:
+            return self.haplotypes
+        assert self.packed_haplotypes is not None
+        return unpack_haplotypes(self.packed_haplotypes, self.n_haps)
+
+
+def pack_haplotype_rows(rows: np.ndarray) -> np.ndarray:
+    """Pack ``(n, n_haps)`` allele rows into ``uint64`` words (nonzero -> bit)."""
+    rows = np.asarray(rows)
+    n_haps = rows.shape[1]
+    n_words = (n_haps + 63) // 64
+    if rows.shape[0] == 0:
+        return np.zeros((0, n_words), dtype=np.uint64)
+    bits = rows != 0
+    pad = n_words * 64 - n_haps
+    if pad:
+        bits = np.concatenate(
+            (bits, np.zeros((rows.shape[0], pad), dtype=bool)), axis=1
+        )
+    # little bit order + little-endian word view: bit k -> word k//64, bit k%64
+    packed = np.packbits(bits, axis=1, bitorder="little")
+    return np.ascontiguousarray(packed).view("<u8").astype(np.uint64, copy=False)
+
+
+def unpack_haplotypes(packed: np.ndarray, n_haps: int) -> np.ndarray:
+    """Inverse of ``pack_haplotype_rows`` for 0/1 rows."""
+    packed = np.ascontiguousarray(packed, dtype="<u8")
+    if packed.shape[0] == 0:
+        return np.zeros((0, n_haps), dtype=np.uint8)
+    bits = np.unpackbits(packed.view(np.uint8), axis=1, bitorder="little")
+    return np.ascontiguousarray(bits[:, :n_haps])
 
 
 def read_individuals(individuals_path: Path) -> list[str]:
@@ -69,14 +130,23 @@ def read_reference_panel(
     region: str | None,
     individuals: list[str],
     pos2gpos: dict[int, float],
+    layout: HaplotypeLayout = "uint8",
 ) -> ReferencePanel:
     """Load phased haplotypes for mapped variants in a VCF/BCF region.
 
     Only variants present in ``pos2gpos`` are retained, because covariance
     output is keyed to the interpolated genetic map. Missing or unphased
     genotypes are skipped. If multiple records share a physical position, the
-    first record is retained to preserve legacy position-keyed semantics.
+    first usable record is retained to preserve legacy position-keyed
+    semantics.
+
+    Rows are written straight into NumPy buffers -- a ``uint8`` matrix, or
+    with ``layout="packed"`` bounded ``uint8`` blocks packed into ``uint64``
+    words as they fill -- rather than round-tripping through per-variant
+    Python lists.
     """
+    if layout not in ("uint8", "packed"):
+        raise ValueError("layout must be one of: uint8, packed")
     vcf = cyvcf2.VCF(str(vcf_path), samples=individuals)
     missing = [ind for ind in individuals if ind not in vcf.samples]
     if missing:
@@ -89,11 +159,20 @@ def read_reference_panel(
     # preserves the caller's order.
     sample_index = {ind: idx for idx, ind in enumerate(vcf.samples)}
     order = np.array([sample_index[ind] for ind in individuals])
+    identity_order = bool(np.array_equal(order, np.arange(order.size)))
+    n_haps = 2 * len(individuals)
+    packed_layout = layout == "packed"
 
-    all_pos: list[int] = []
-    all_rs: list[str] = []
-    haps: list[list[int]] = []
+    positions: list[int] = []
+    rs_ids: list[str] = []
+    hap_sums: list[int] = []
+    seen_positions: set[int] = set()
     skipped_unphased = 0
+    duplicate_positions = 0
+    # uint8 layout: growable matrix; packed layout: one reusable block.
+    buf = np.empty((_PACK_BLOCK_ROWS, n_haps), dtype=np.uint8)
+    n_buf = 0
+    blocks: list[np.ndarray] = []
 
     variants: Iterator[Any] = vcf(region) if region is not None else vcf
     for variant in variants:
@@ -103,28 +182,56 @@ def read_reference_panel(
 
         # ``genotype.array()`` returns ``(n_samples, 3)``: allele1, allele2,
         # phased (1/0), matching ``variant.genotypes`` but as a single
-        # vectorized array instead of a Python list of tuples -- avoids a
-        # per-individual Python loop over every variant.
-        gt = variant.genotype.array()[order]
+        # vectorized array instead of a Python list of tuples.
+        gt = variant.genotype.array()
+        if not identity_order:
+            gt = gt[order]
         if np.any(gt[:, 2] == 0) or np.any(gt[:, :2] < 0):
             skipped_unphased += 1
             continue
+        if pos in seen_positions:
+            duplicate_positions += 1
+            continue
+        seen_positions.add(pos)
 
-        all_pos.append(pos)
-        all_rs.append(variant.ID or ".")
-        haps.append(gt[:, :2].reshape(-1).tolist())
+        if n_buf == buf.shape[0]:
+            if packed_layout:
+                blocks.append(pack_haplotype_rows(buf))
+                n_buf = 0
+            else:
+                grown = np.empty((2 * buf.shape[0], n_haps), dtype=np.uint8)
+                grown[:n_buf] = buf
+                buf = grown
+        row = buf[n_buf]
+        row[:] = gt[:, :2].reshape(-1)
+        hap_sums.append(int(row.sum()))
+        n_buf += 1
+        positions.append(pos)
+        rs_ids.append(variant.ID or ".")
 
     vcf.close()
 
-    unique_pos, unique_rs, unique_haps, duplicate_positions = _dedupe_positions(
-        all_pos, all_rs, haps
-    )
+    sums = np.asarray(hap_sums, dtype=np.float64)
+    if packed_layout:
+        blocks.append(pack_haplotype_rows(buf[:n_buf]))
+        packed = blocks[0] if len(blocks) == 1 else np.concatenate(blocks)
+        return ReferencePanel(
+            positions=positions,
+            rs_ids=rs_ids,
+            n_haps=n_haps,
+            hap_sums=sums,
+            skipped_unphased=skipped_unphased,
+            duplicate_positions=duplicate_positions,
+            packed_haplotypes=packed,
+        )
     return ReferencePanel(
-        positions=unique_pos,
-        rs_ids=unique_rs,
-        haplotypes=unique_haps,
+        positions=positions,
+        rs_ids=rs_ids,
+        n_haps=n_haps,
+        hap_sums=sums,
         skipped_unphased=skipped_unphased,
         duplicate_positions=duplicate_positions,
+        haplotypes=np.ascontiguousarray(buf[:n_buf]),
     )
 
 
@@ -143,28 +250,3 @@ def warn_reference_panel_skips(panel: ReferencePanel) -> None:
             f"variant(s); covariance partitions are keyed by physical position",
             file=sys.stderr,
         )
-
-
-def _dedupe_positions(
-    positions: list[int],
-    rs_ids: list[str],
-    haplotypes: list[list[int]],
-) -> tuple[list[int], list[str], list[list[int]], int]:
-    """Keep the first variant for each physical position."""
-    if not positions:
-        return positions, rs_ids, haplotypes, 0
-
-    duplicate_positions = 0
-    seen_positions: set[int] = set()
-    unique_pos: list[int] = []
-    unique_rs: list[str] = []
-    unique_haps: list[list[int]] = []
-    for pos, rs, row_haps in zip(positions, rs_ids, haplotypes, strict=True):
-        if pos in seen_positions:
-            duplicate_positions += 1
-            continue
-        seen_positions.add(pos)
-        unique_pos.append(pos)
-        unique_rs.append(rs)
-        unique_haps.append(row_haps)
-    return unique_pos, unique_rs, unique_haps, duplicate_positions
