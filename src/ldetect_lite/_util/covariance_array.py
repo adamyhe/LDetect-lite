@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from ldetect_lite._util.logging import log_debug
+from ldetect_lite._util.sorted_unique import unique_loci
 from ldetect_lite.io.covariance import MetricDict
 from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
 from ldetect_lite.io.partitions import CovarianceStore
@@ -782,7 +783,7 @@ def _metric_arrays_from_files(
         i_pos = i_pos[in_range]
         j_pos = j_pos[in_range]
         shrink = shrink[in_range]
-        loci_chunks.append(np.unique(np.concatenate((i_pos, j_pos))))
+        loci_chunks.append(unique_loci(i_pos, j_pos))
 
         diag_mask = i_pos == j_pos
         if np.any(diag_mask):
@@ -910,8 +911,10 @@ def _metric_arrays_from_partitions(
         j_pos = j_pos[in_range]
         shrink = shrink[in_range]
 
-        loci_chunks.append(i_pos)
-        loci_chunks.append(j_pos)
+        # Reduce to this partition's distinct loci now (O(n) for sorted
+        # compact rows), so the cross-partition np.unique below only sorts
+        # per-partition locus sets instead of every row endpoint.
+        loci_chunks.append(unique_loci(i_pos, j_pos))
         i_chunks.append(i_pos)
         j_chunks.append(j_pos)
         s_chunks.append(shrink)

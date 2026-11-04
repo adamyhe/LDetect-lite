@@ -414,3 +414,19 @@ Followed up on an external I/O review (`notes/logs/covariance-io-optimization-re
 **Not done:** the review's higher-effort proposals (a whole-chromosome packed haplotype cache; a CSR/banded covariance storage schema) were evaluated and not implemented — see `notes/findings/covariance-io-optimization.md` for why.
 
 **CLI:** no change; transparent to `calc_covariance`'s callers.
+
+---
+
+## 19. Sort-free unique/count for sorted covariance rows (`_util/sorted_unique.py`)
+
+**Affected code:** `sorted_unique_counts`, `unique_loci` in `src/ldetect_lite/_util/sorted_unique.py`; `write_compact_covariance_partition_hdf5_append` in `io/covariance_hdf5.py`; `CovarianceSidecarAccumulator.finalize_vector` in `_util/covariance_sidecars.py`; `_compute_diag_vector_partition_array` in `_util/vector_array.py`; `_metric_arrays_from_files`/`_metric_arrays_from_partitions` in `_util/covariance_array.py`; `summarize_covariance` in `_util/covariance_summary.py`
+
+A per-row cost breakdown of Step 2 (synthetic 8,000-SNP / 758-haplotype partition with a neutral MAC>=1 frequency spectrum, ~3M emitted rows, cbsubscb19) showed the bitpacked kernel itself was no longer the dominant cost: kernel + position gathers took 28 ns/row, while the compact HDF5 append writer took 50 ns/row, and ~28 ns/row of that was a single `np.unique(lo, return_counts=True)` per chunk building the `lo_values`/`lo_offsets` index. zstd level made no measurable difference (zstd-1, zstd-3 and uncompressed writes were within ~5 ns/row once warmed up). The rows are sorted by `(lo, hi)` by construction (and validated as such on the line before), so the sort was pure waste: distinct values and counts are run boundaries, an O(n) pass (0.4 ns/row).
+
+The same pattern -- `np.unique(np.concatenate((lo, hi)))`, sorting 2n row endpoints to recover a partition's locus set -- appeared in the fused-vector sidecar finalize, the Step 3 array path, both metric loaders, and `covariance-summary`. `unique_loci` takes the run boundaries of sorted `lo` and only membership-checks `hi` against them with `searchsorted`: in compact covariance every locus with any row has its own diagonal row, so `hi` endpoints are normally already present, and any that aren't are merged in with `union1d`, keeping the result exact regardless. Measured 17.8 vs 34.7 ns/row on the same rows. Both helpers detect unsorted input (e.g. legacy full-schema rows) in O(n) and fall back to `np.unique`, so no caller needs schema-specific handling.
+
+**Exactness:** both helpers return exactly what the `np.unique` call they replace would, including dtype; `tests/test_sorted_unique.py` checks parity on edge cases (empty, single, unsorted fallback, `hi` values outside `lo`, mixed int32/int64), randomized partition-shaped rows with and without the diagonal, and that the append writer's `lo_values`/`lo_offsets` index is unchanged when one `lo` run is split across streamed chunks. The existing suite (including the fused-vector byte-identity tests) passes unchanged.
+
+**Speed:** compact HDF5 append writer 50.7 -> 20.7 ns/row (2.4x, identical file size), i.e. Step 2's kernel+write cost per emitted row 79 -> 49 ns, before VCF decode. Not yet measured end-to-end on a real chromosome.
+
+**CLI:** no change.

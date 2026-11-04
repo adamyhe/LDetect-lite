@@ -10,6 +10,8 @@ from typing import Any
 import hdf5plugin
 import numpy as np
 
+from ldetect_lite._util.sorted_unique import sorted_unique_counts
+
 # Importing hdf5plugin (unconditionally, at module scope) registers its
 # bundled filter plugins -- including zstd -- with the HDF5 library for the
 # lifetime of this process. This must happen here, not lazily inside the
@@ -519,7 +521,9 @@ def write_compact_covariance_partition_hdf5_append(
             hi_ds[offset:stop] = hi
             shrink_ds[offset:stop] = shrink
 
-            lo_values, lo_counts = np.unique(lo, return_counts=True)
+            # ``lo`` was just validated as sorted, so its distinct values
+            # and counts are run boundaries (O(n)) -- no sort needed.
+            lo_values, lo_counts = sorted_unique_counts(lo)
             lo_idx = np.searchsorted(positions, lo_values)
             in_bounds = lo_idx < positions.size
             if not np.all(in_bounds):

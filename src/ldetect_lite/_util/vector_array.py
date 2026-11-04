@@ -18,6 +18,7 @@ from ldetect_lite._util.covariance_array import (
 )
 from ldetect_lite._util.logging import log_debug
 from ldetect_lite._util.memory import log_memory_checkpoint
+from ldetect_lite._util.sorted_unique import unique_loci
 from ldetect_lite.io.covariance_hdf5 import (
     HDF5CovariancePartitionReader,
     open_covariance_reader,
@@ -439,7 +440,7 @@ def _compute_diag_vector_partition_array(
         hi = np.maximum(i_pos, j_pos)
     _log_vector_checkpoint(f"{checkpoint}_lo_hi_end")
     _log_vector_checkpoint(f"{checkpoint}_loci_unique_start")
-    loci = np.unique(np.concatenate((lo, hi)))
+    loci = unique_loci(lo, hi)
     _log_vector_checkpoint(f"{checkpoint}_loci_unique_end")
     if loci.size == 0:
         _log_vector_checkpoint(f"{checkpoint}_no_loci")
