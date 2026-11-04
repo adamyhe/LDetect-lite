@@ -603,66 +603,37 @@ def _metric_partition_result(
                 break
             row_read_seconds += time.perf_counter() - read_start
             rows_read += int(chunk.lo.size)
+
+            # Select block-crossing pairs first (a lookup into the handful of
+            # breakpoints), then look up diagonals only for those rows. The
+            # surviving rows, their order and the r2 values are the same as
+            # filtering by diagonal first, so the sum is bitwise unchanged.
+            crossing_start = time.perf_counter()
             pair_mask = chunk.lo < chunk.hi
-            if not np.any(pair_mask):
+            pair_rows += int(np.count_nonzero(pair_mask))
+            candidate = pair_mask & (
+                np.searchsorted(breakpoints, chunk.lo, side="left")
+                != np.searchsorted(breakpoints, chunk.hi, side="left")
+            )
+            crossing_seconds += time.perf_counter() - crossing_start
+            if not np.any(candidate):
                 continue
-            pair_i = chunk.lo[pair_mask]
-            pair_j = chunk.hi[pair_mask]
-            pair_s = chunk.shrink_ld[pair_mask]
-            pair_rows += int(pair_i.size)
 
             normalize_start = time.perf_counter()
-            diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
-            diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
-            has_diag = (diag_i_idx < unique_diag_pos.size) & (
-                diag_j_idx < unique_diag_pos.size
+            chunk_sum, chunk_count = _metric_crossing_sum(
+                chunk.lo[candidate],
+                chunk.hi[candidate],
+                chunk.shrink_ld[candidate],
+                unique_diag_pos,
+                unique_diag_val,
             )
-            safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
-            safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
-            has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
-                unique_diag_pos[safe_j_idx] == pair_j
-            )
-            if not np.any(has_diag):
-                normalize_seconds += time.perf_counter() - normalize_start
-                continue
-
-            pair_i = pair_i[has_diag]
-            pair_j = pair_j[has_diag]
-            pair_s = pair_s[has_diag]
-            diag_i = unique_diag_val[diag_i_idx[has_diag]]
-            diag_j = unique_diag_val[diag_j_idx[has_diag]]
-
-            positive = (diag_i > 0.0) & (diag_j > 0.0)
-            if not np.any(positive):
-                normalize_seconds += time.perf_counter() - normalize_start
-                continue
-
-            pair_i = pair_i[positive]
-            pair_j = pair_j[positive]
-            pair_s = pair_s[positive]
-            diag_i = diag_i[positive]
-            diag_j = diag_j[positive]
-            normalized_rows += int(pair_i.size)
+            normalized_rows += int(np.count_nonzero(candidate))
             normalize_seconds += time.perf_counter() - normalize_start
-
-            crossing_start = time.perf_counter()
-            i_blocks = np.searchsorted(breakpoints, pair_i, side="left")
-            j_blocks = np.searchsorted(breakpoints, pair_j, side="left")
-            crossing = i_blocks != j_blocks
-            crossing_count = int(np.count_nonzero(crossing))
-            if crossing_count == 0:
-                crossing_seconds += time.perf_counter() - crossing_start
+            if chunk_count == 0:
                 continue
-
-            r2 = (
-                pair_s[crossing]
-                * pair_s[crossing]
-                / (diag_i[crossing] * diag_j[crossing])
-            )
-            total_sum += float(np.sum(r2))
-            n_nonzero += crossing_count
-            crossing_rows += crossing_count
-            crossing_seconds += time.perf_counter() - crossing_start
+            total_sum += chunk_sum
+            n_nonzero += chunk_count
+            crossing_rows += chunk_count
 
     return _MetricPartitionResult(
         p_index=p_index,
@@ -676,6 +647,43 @@ def _metric_partition_result(
         normalize_seconds=normalize_seconds,
         crossing_seconds=crossing_seconds,
     )
+
+
+def _metric_crossing_sum(
+    pair_i: np.ndarray,
+    pair_j: np.ndarray,
+    pair_s: np.ndarray,
+    unique_diag_pos: np.ndarray,
+    unique_diag_val: np.ndarray,
+) -> tuple[float, int]:
+    """Sum r2 over block-crossing pairs whose two diagonals exist and are > 0.
+
+    Returns ``(sum, n_rows_summed)``. ``n_rows_summed == 0`` means nothing
+    contributed (the sum is then 0.0 and should not be added).
+    """
+    n_diag = unique_diag_pos.size
+    if n_diag == 0:
+        return 0.0, 0
+    diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
+    diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
+    has_diag = (diag_i_idx < n_diag) & (diag_j_idx < n_diag)
+    safe_i_idx = np.minimum(diag_i_idx, n_diag - 1)
+    safe_j_idx = np.minimum(diag_j_idx, n_diag - 1)
+    has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
+        unique_diag_pos[safe_j_idx] == pair_j
+    )
+    if not np.any(has_diag):
+        return 0.0, 0
+    pair_s = pair_s[has_diag]
+    diag_i = unique_diag_val[diag_i_idx[has_diag]]
+    diag_j = unique_diag_val[diag_j_idx[has_diag]]
+    positive = (diag_i > 0.0) & (diag_j > 0.0)
+    count = int(np.count_nonzero(positive))
+    if count == 0:
+        return 0.0, 0
+    pair_s = pair_s[positive]
+    r2 = pair_s * pair_s / (diag_i[positive] * diag_j[positive])
+    return float(np.sum(r2)), count
 
 
 def _owned_bounds(

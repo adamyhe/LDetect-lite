@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from ldetect_lite.io.covariance_hdf5 import write_covariance_partition_hdf5
-from ldetect_lite.io.partitions import CovarianceStore
+from ldetect_lite.io.partitions import CovarianceStore, read_partitions
 from ldetect_lite.metric import Metric
 from tests._partition_fixtures import (
     divergent_overlap_partitions,
@@ -279,3 +279,173 @@ def test_high_precision_metric_ignores_supplied_covariance_arrays(
     )
 
     assert result["sum"] == pytest.approx(0.25)
+
+
+def _pre_reorder_metric_partition_result(
+    *,
+    name,
+    store,
+    partitions,
+    p_index,
+    start,
+    end,
+    snp_first,
+    snp_last,
+    breakpoints,
+    unique_diag_pos,
+    unique_diag_val,
+):
+    """Oracle: the per-partition metric as it was before the crossing-first
+    reorder (diagonal lookups and masks on every pair row, crossing last)."""
+    import ldetect_lite._util.covariance_array as ca
+
+    lower_min, lower_max, include_lower_min = ca._owned_bounds(
+        partitions, p_index, snp_first, snp_last
+    )
+    total_sum = 0.0
+    n_nonzero = 0
+    path = store.partition_path(name, start, end)
+    with ca.open_covariance_reader(path, start, end) as reader:
+        for chunk in reader.iter_owned_rows(
+            lower_min,
+            lower_max,
+            snp_first,
+            snp_last,
+            ca._DEFAULT_CHUNK_ROWS,
+            include_lower_min=include_lower_min,
+        ):
+            pair_mask = chunk.lo < chunk.hi
+            if not np.any(pair_mask):
+                continue
+            pair_i = chunk.lo[pair_mask]
+            pair_j = chunk.hi[pair_mask]
+            pair_s = chunk.shrink_ld[pair_mask]
+            diag_i_idx = np.searchsorted(unique_diag_pos, pair_i)
+            diag_j_idx = np.searchsorted(unique_diag_pos, pair_j)
+            has_diag = (diag_i_idx < unique_diag_pos.size) & (
+                diag_j_idx < unique_diag_pos.size
+            )
+            safe_i_idx = np.minimum(diag_i_idx, unique_diag_pos.size - 1)
+            safe_j_idx = np.minimum(diag_j_idx, unique_diag_pos.size - 1)
+            has_diag &= (unique_diag_pos[safe_i_idx] == pair_i) & (
+                unique_diag_pos[safe_j_idx] == pair_j
+            )
+            if not np.any(has_diag):
+                continue
+            pair_i = pair_i[has_diag]
+            pair_j = pair_j[has_diag]
+            pair_s = pair_s[has_diag]
+            diag_i = unique_diag_val[diag_i_idx[has_diag]]
+            diag_j = unique_diag_val[diag_j_idx[has_diag]]
+            positive = (diag_i > 0.0) & (diag_j > 0.0)
+            if not np.any(positive):
+                continue
+            pair_i = pair_i[positive]
+            pair_j = pair_j[positive]
+            pair_s = pair_s[positive]
+            diag_i = diag_i[positive]
+            diag_j = diag_j[positive]
+            i_blocks = np.searchsorted(breakpoints, pair_i, side="left")
+            j_blocks = np.searchsorted(breakpoints, pair_j, side="left")
+            crossing = i_blocks != j_blocks
+            crossing_count = int(np.count_nonzero(crossing))
+            if crossing_count == 0:
+                continue
+            r2 = (
+                pair_s[crossing]
+                * pair_s[crossing]
+                / (diag_i[crossing] * diag_j[crossing])
+            )
+            total_sum += float(np.sum(r2))
+            n_nonzero += crossing_count
+    return ca._MetricPartitionResult(
+        p_index=p_index,
+        total_sum=total_sum,
+        n_nonzero=n_nonzero,
+        rows_read=0,
+        pair_rows=0,
+        normalized_rows=0,
+        crossing_rows=0,
+        row_read_seconds=0.0,
+        normalize_seconds=0.0,
+        crossing_seconds=0.0,
+    )
+
+
+def _random_compact_store(tmp_path: Path, seed: int) -> tuple[CovarianceStore, list]:
+    """Overlapping partitions with random LD, missing and zero diagonals."""
+    rng = np.random.default_rng(seed)
+    loci = np.sort(rng.choice(np.arange(100, 5000), size=120, replace=False))
+    missing_diag = set(rng.choice(loci, size=8, replace=False).tolist())
+    zero_diag = set(rng.choice(loci, size=8, replace=False).tolist())
+    partitions = [
+        (int(loci[0]), int(loci[59])),
+        (int(loci[40]), int(loci[99])),
+        (int(loci[80]), int(loci[-1])),
+    ]
+    root = tmp_path / f"cov{seed}"
+    chrom_dir = root / "chr1"
+    chrom_dir.mkdir(parents=True)
+    (root / "chr1_partitions.txt").write_text(
+        "\n".join(f"{a} {b}" for a, b in partitions) + "\n"
+    )
+    for a, b in partitions:
+        part = [int(p) for p in loci if a <= p <= b]
+        i_pos, j_pos, s = [], [], []
+        for k, pi in enumerate(part):
+            for pj in part[k : k + 25]:
+                if pi == pj:
+                    if pi in missing_diag:
+                        continue
+                    value = 0.0 if pi in zero_diag else rng.uniform(0.2, 1.0)
+                elif rng.random() < 0.3:
+                    continue
+                else:
+                    value = rng.normal(0.0, 0.2)
+                i_pos.append(pi)
+                j_pos.append(pj)
+                s.append(value)
+        write_covariance_partition_hdf5(
+            chrom_dir / f"chr1.{a}.{b}.h5",
+            i_pos=np.array(i_pos, dtype=np.int32),
+            j_pos=np.array(j_pos, dtype=np.int32),
+            shrink_ld=np.array(s),
+        )
+    return CovarianceStore(root=root), [int(p) for p in loci]
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("chunk_rows", [7, 1_000_000])
+def test_crossing_first_metric_is_bitwise_identical_to_previous_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed: int,
+    chunk_rows: int,
+) -> None:
+    import ldetect_lite._util.covariance_array as ca
+
+    store, loci = _random_compact_store(tmp_path, seed)
+    partitions = read_partitions("chr1", store)
+    monkeypatch.setattr(ca, "_DEFAULT_CHUNK_ROWS", chunk_rows)
+    rng = np.random.default_rng(100 + seed)
+    breakpoint_sets = [
+        [],
+        [loci[30]],  # on a locus
+        [loci[30] + 1, loci[70]],
+        sorted(rng.choice(loci, size=6, replace=False).tolist()),
+        [loci[0], loci[-1]],
+    ]
+    first, last = loci[0], loci[-1]
+    new = [
+        ca.metric_from_files("chr1", store, partitions, first, last, bp)
+        for bp in breakpoint_sets
+    ]
+    monkeypatch.setattr(
+        ca, "_metric_partition_result", _pre_reorder_metric_partition_result
+    )
+    old = [
+        ca.metric_from_files("chr1", store, partitions, first, last, bp)
+        for bp in breakpoint_sets
+    ]
+    assert new == old  # exact float equality, not approx
+    assert any(result["N_nonzero"] > 0 for result in new)
