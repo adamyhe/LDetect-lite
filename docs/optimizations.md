@@ -457,3 +457,19 @@ A per-stage profile of serial Step 2 over all 103 EUR chr21 partitions (377,790 
 The BED was byte-identical across all eight runs, both inputs and every worker count. An earlier `-c 4` measurement that suggested only ~1.8x at 4 workers was most likely an allocation of 2 physical cores plus hyperthreads; Slurm `-c` counts hardware threads on this cluster. At this scaling, the whole-chromosome cache would save about 4-5 s of a 20 s Step 2 on VCF input and about 1-2 s of 13 s on the recommended GT-only BCF input. That is not worth restructuring `cmd_run` for, so the cache is shelved. Full measurements: `notes/findings/step2-covariance-profiling.md`. If it is revisited (for example, for much larger panels where decode dominates), share it across workers as a read-only memory-mapped `.npy` in node-local scratch rather than pickling it to each worker. Packed size is `n_records x ceil(2N/64) x 8` bytes: ~21 MiB for EUR chr21, ~200 MB estimated for chr2, ~3.5 GB for chr2 at N=10,000.
 
 **CLI:** no change.
+
+---
+
+## 21. Crossing-first streaming metric (`_util/covariance_array.py`)
+
+**Affected code:** `_metric_partition_result` and the new `_metric_crossing_sum` in `src/ldetect_lite/_util/covariance_array.py` (the streaming metric used by `metric_from_files` for the Fourier and final metrics)
+
+A cProfile of serial `find-minima` on EUR chr21 (83.6 s) put 31 s in the two streaming metric passes over the 281M cached covariance rows. Of that, 17.5 s was `np.searchsorted`, mostly looking up both endpoints of every pair row in the chromosome-wide diagonal index (~233k positions), and another 7.3 s was masked copies. Only afterwards were rows filtered to those crossing a breakpoint, which are a small fraction. The metric now computes the crossing mask first, with a `searchsorted` into the ~24 breakpoints, and runs the diagonal lookups, has-diagonal check and positivity filter only on crossing rows.
+
+**Exactness:** the rows that reach `np.sum`, their order and their r2 values are unchanged, so the result is bitwise identical. A test (`test_crossing_first_metric_is_bitwise_identical_to_previous_order`) runs `metric_from_files` against a verbatim copy of the previous per-partition routine, comparing with exact float equality. It uses random overlapping partitions with missing and zero diagonals, breakpoints on and between loci, and both single-chunk and 7-row chunked reads. On EUR chr21, the breakpoint JSON was byte-identical to the old code's in all 10 runs. The debug-only counter `normalized_rows` now counts crossing candidate rows.
+
+**Speed:** each metric pass on chr21 drops from ~16 s to ~6 s serial. `find-minima` on the cached chr21 covariance (cbsubscb19, `-c 8` = 4 cores + HT, two reps after warm-up) went from 80.7 s to 59.7 s serial (-26%) and from 20.8 s to 16.6 s at `--workers 8` (-20%).
+
+**What remains in Step 4:** local search (~36 s serial, ~8 s at 8 workers) is now the largest piece, split between per-row lookups/accumulation, overlap de-duplication (`_first_seen_pair_mask`) and re-reading overlapping partitions for each window. A fix needs a redesign of window assembly and must respect the multi-partition exactness constraint, so it was not attempted. Filter-width search (~13 s serial, 46 direct convolutions) could use FFT convolution, but that changes floating-point rounding and so possibly breakpoints. It would only be acceptable as an opt-in, non-exact mode.
+
+**CLI:** no change.
