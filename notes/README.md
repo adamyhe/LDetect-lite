@@ -7,6 +7,7 @@ Internal working notes — not the polished public documentation (that's `README
   - `ldetect-example-benchmarks.md` — current command-level benchmark and exactness summary for the original LDetect chr2 toy example, with links to generated figures.
   - `macdonald2022-reproduction.md` — status of reproducing MacDonald et al. (2022)'s GRCh38 LD blocks (deCODE map interpolation bug + fix, pyrho reproduction mechanisms).
   - `bitpacked-ld-kernel.md` — current status of the bitpacked default backend, validation evidence, performance summary, and follow-up optimization guidance.
+  - `step2-covariance-profiling.md` — where Step 2 time goes on real data (EUR chr21), the two shipped fixes (sort-free unique, decode-time packing), the GT-only BCF recommendation, what was ruled out (faster popcount, pair skipping, whole-chromosome packed cache), and worker-scaling/Slurm `-c` guidance.
 - **`logs/`** — raw, dated, first-person investigation logs kept for provenance and audit. Not meant to be read end-to-end; each findings doc above links to the relevant log(s) for full detail.
   - `implementation-plan.md` — original architecture/porting plan (historical).
   - `ldetect-original-main-pipeline-audit.md` — full dated audit log behind `findings/ldetect-original-reproduction.md`.
@@ -17,5 +18,6 @@ Internal working notes — not the polished public documentation (that's `README
   - `post-covariance-optimization-review.md` — post-covariance-optimization performance review and roadmap.
   - `ldetect-example-benchmarking.md` — dated log for the VCF-start toy example exactness and command-level timing benchmarks.
   - `bitpacked-ld-kernel.md` — raw bitpacked popcount LD kernel log (`--ld-kernel bitpacked`), toy-scale validation history, and genome-scale diagnostics.
+  - `step2-covariance-profiling-2026-11.md` — dated log behind `findings/step2-covariance-profiling.md`: job-by-job measurements, A/B runs, cache prototype, scaling.
 
 The performance-optimization counterpart to this directory, `docs/optimizations.md`, lives outside `notes/` because it's human-facing reference documentation, not an internal working note.

@@ -8,6 +8,7 @@ from typing import Literal
 
 import numpy as np
 
+from ldetect_lite._util.sorted_unique import unique_loci as _unique_loci
 from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
 from ldetect_lite.io.partitions import CovarianceStore, first_last, get_final_partitions
 
@@ -100,7 +101,7 @@ def summarize_covariance(
             snp_last,
         )
         owned_offdiag = owned & (i_pos < j_pos)
-        loci = np.unique(np.concatenate((i_pos[owned], j_pos[owned])))
+        loci = _unique_loci(i_pos[owned], j_pos[owned])
         unique_loci = int(loci.size)
         owned_offdiag_rows = int(np.count_nonzero(owned_offdiag))
 

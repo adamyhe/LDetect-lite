@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ldetect_lite._util.sorted_unique import unique_loci
 from ldetect_lite._util.vector_array import (
     _accumulate_vector_chunk,
     _DiagVectorPartitionResult,
@@ -124,7 +125,9 @@ class CovarianceSidecarAccumulator:
                 profile={"checkpoint": checkpoint},
             )
 
-        loci = np.unique(np.concatenate([chunk.lo for chunk in self._buffered]))
+        # Buffered chunks are globally sorted by (lo, hi), so this is an O(n)
+        # run-boundary pass rather than a sort.
+        loci = unique_loci(np.concatenate([chunk.lo for chunk in self._buffered]))
 
         if next_start is not None:
             end_locus = int((end + next_start) / 2)
