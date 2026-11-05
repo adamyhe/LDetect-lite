@@ -151,5 +151,10 @@ the dominant stage:
 
 Step 3 (fused vector) takes about 1 s. The earlier `-c 4` job measured Step 4
 at about 24 s on both `main` and the Step 2 branch. Step 4 (metric + local
-search) is therefore the next optimization target. It has not yet been
-profiled at the stage level on this data.
+search) is therefore the next optimization target.
+
+**Follow-up (same day):** Step 4 was profiled and the streaming metric
+reordered to filter block-crossing rows first (`docs/optimizations.md` #21;
+`notes/logs/step4-profiling-2026-11.md`). That made `find-minima` 80.7 s → 59.7 s
+serial and 20.8 s → 16.6 s at 8 workers, with bitwise-identical output. Local
+search is now the largest Step 4 phase.

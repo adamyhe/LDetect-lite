@@ -59,8 +59,9 @@ All outputs were bitwise identical.
 
 **Incident:** that job's scratch directory, `/workdir/ayh8/ldetect-realtest-4107083`,
 was found empty after the job ended (presumably a Slurm epilog). Later jobs used
-`/workdir/ayh8/ldetect-chr21-data`, a name not tied to a job ID, and it
-persisted.
+`/workdir/ayh8/ldetect-chr21-data`, a name not tied to a job ID. It
+survived between back-to-back jobs but was later found wiped too (see
+`step4-profiling-2026-11.md`), so scripts must rebuild inputs in the job.
 
 ## 3. Per-stage profile (serial `calc_covariance`, all 103 partitions)
 
