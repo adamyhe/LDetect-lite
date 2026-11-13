@@ -1,9 +1,10 @@
 # LDetect Example Benchmarks
 
-**Findings summary (current as of 2026-08-05).** Distilled for human review
+**Findings summary (current as of 2026-11-13).** Distilled for human review
 and manuscript drafting. Full process notes: `notes/logs/ldetect-example-benchmarking.md`
-(2026-07-12 methodology notes; timings below were re-measured on 2026-08-05 on
-a different host — see the hardware note below).
+(2026-07-12 methodology notes). The timings below were re-measured for v0.5.3 on
+2026-11-12 on an exclusive AMD EPYC 7702 node; raw log:
+`notes/logs/benchmark-figures-0.5.3-2026-11.md`.
 
 ## Scope
 
@@ -29,26 +30,33 @@ useful for detailed profiling and backend experiments, especially bitpacking.
 
 ## Current command-level timings
 
-Measured on the toy interval after one Snakemake preparation run, on
-`cbsugpu01` (Intel Xeon E5-2620 v4 @ 2.1GHz). Downstream stages used one
-warmup and five measured repeats; covariance used one warmup and two measured
-repeats because the original script is slow.
+Measured with `ldetect-lite` v0.5.3 after one Snakemake preparation run, on
+**cbsubscb17, an AMD EPYC 7702 64-Core Processor** (1 socket, 64 cores, 2 threads
+per core, max 3.35 GHz). The node was allocated exclusively, load average ~1, and
+all commands were pinned to 4 physical cores plus their hyperthread siblings
+(CPUs 0-3,64-67). Downstream stages used one warmup and five measured repeats.
+Covariance used one warmup and two measured repeats, because the original script
+is slow.
 
 | Stage | Original LDetect mean seconds | LDetect-lite mean seconds | Speedup |
 |---|---:|---:|---:|
-| `calc-covariance` | 259.278 | 4.651 | 55.75x |
-| `matrix-to-vector` | 2.112 | 0.365 | 5.79x |
-| `find-minima` | 23.844 | 1.892 | 12.60x |
-| `extract-bpoints` | 1.082 | 0.296 | 3.66x |
+| `calc-covariance` | 213.458 | 3.850 | 55.45x |
+| `matrix-to-vector` | 1.832 | 0.335 | 5.46x |
+| `find-minima` | 21.036 | 1.646 | 12.78x |
+| `extract-bpoints` | 0.916 | 0.272 | 3.38x |
 
-This supersedes an earlier measurement (99.936s / 3.222s / 31.02x for
-`calc-covariance`, etc.) taken on a different, faster host (an AMD EPYC
-9554) — absolute times are not comparable across hosts, but legacy and
-LDetect-lite were timed together on the same host in both cases, so each
-speedup ratio is a valid same-environment comparison.
+These ratios are within ~10% of the previous measurement, taken on `cbsugpu01`
+(Intel Xeon E5-2620 v4 @ 2.1GHz) with earlier code: 55.75x / 5.79x / 12.60x /
+3.66x. The v0.5.x Step 2 and Step 4 optimizations mostly pay off at chromosome
+scale, not on this one-window interval. Absolute times are not comparable across
+hosts. Each speedup is a same-host, same-job comparison.
 
-Covariance peak RSS in this command-level run was 445.87 MiB for original
-LDetect and 716.95 MiB for LDetect-lite. Output sizes were 6.21 MB for
+A run of the same job on a heavily shared node (cbsubscb19, load average ~200)
+gave noisier and inconsistent ratios: `find-minima` 8.43x, `calc-covariance`
+63.5x. Use exclusive allocations for figures.
+
+Covariance peak RSS in this command-level run was 446.1 MiB for original
+LDetect and 717.3 MiB for LDetect-lite. Output sizes were 6.21 MB for
 original gzipped text and 1.58 MB for LDetect-lite. This **is** now the
 compact-cache storage comparison: `calc-covariance` ties `compact_output` to
 `--ld-kernel` (bitpacked, the default, always writes compact output; `uint8`

@@ -16,7 +16,7 @@ the same VCF-start example interval. Reproduce the figures with:
 cd examples/ldetect_example
 uv run snakemake --cores 1
 uv run python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
-uv run python scripts/benchmark_legacy_covariance.py --warmups 0 --repeats 1
+uv run python scripts/benchmark_legacy_covariance.py --warmups 1 --repeats 2
 ```
 
 `uv run snakemake --cores 1` must run first — it prepares `ref/` and `work/vcf/`
@@ -34,19 +34,14 @@ Timing plots are tracked under `examples/ldetect_example/plots/`:
 
 ![extract-bpoints timing](../examples/ldetect_example/plots/timings-extract_bpoints.svg)
 
-Current measured command-level timings on the example interval:
+Current measured command-level timings on the example interval (`ldetect-lite` v0.5.3):
 
 | Stage              | Original LDetect mean seconds | `ldetect-lite` mean seconds | Speedup |
 | ------------------ | ----------------------------: | --------------------------: | ------: |
-| `calc-covariance`  |                        259.278 |                       4.651 |  55.75x |
-| `matrix-to-vector` |                          2.112 |                       0.365 |   5.79x |
-| `find-minima`      |                         23.844 |                       1.892 |  12.60x |
-| `extract-bpoints`  |                          1.082 |                       0.296 |   3.66x |
-
-Measured on the same Xeon E5-2620 v4 host as the full EUR chr21 benchmark
-below; this supersedes an earlier measurement (96.649s / 3.276s / 29.50x for
-`calc-covariance`, etc.) taken on a different, faster host — see the hardware
-note under the chr21 table.
+| `calc-covariance`  |                       213.458 |                       3.850 |  55.45x |
+| `matrix-to-vector` |                         1.832 |                       0.335 |   5.46x |
+| `find-minima`      |                        21.036 |                       1.646 |  12.78x |
+| `extract-bpoints`  |                         0.916 |                       0.272 |   3.38x |
 
 The full EUR chr21 timing benchmark is generated from the
 `examples/ldetect_original/` reproduction workflow. It compares the vendored
@@ -55,15 +50,38 @@ chromosome data; see that example's README for the exact commands.
 
 ![full EUR chr21 timing](../examples/ldetect_original/plots/timings-full-eur-chr21.svg)
 
-| Stage      | Original LDetect mean seconds | `ldetect-lite` mean seconds |   Speedup |
-| ---------- | ----------------------------: | --------------------------: | --------: |
-| `pipeline` |                  10177.000000 |                   168.860000 | 60.268862 |
+| Stage      | Original LDetect seconds | `ldetect-lite` seconds | Speedup |
+| ---------- | -----------------------: | ---------------------: | ------: |
+| `pipeline` |                     9018 |                 136.06 |  66.28x |
 
-Measured on an Intel Xeon E5-2620 v4 @ 2.1GHz. This supersedes an
-earlier measurement (6605.0s / 210.79s / 31.33x) taken on a newer AMD EPYC
-9554 host — absolute times are not comparable across hosts, but legacy and
-`ldetect-lite` were timed together on the same host in both cases, so each
-speedup ratio is a valid same-environment comparison.
+**Benchmark environment (both tables).** `ldetect-lite` v0.5.3 (the release
+tag, installed from `uv.lock`, Python 3.13.5), measured on 2026-11-12 in one
+Slurm job on **cbsubscb17, an AMD EPYC 7702 64-Core Processor** (1 socket, 64
+cores, 2 threads per core, max 3.35 GHz, 256 MiB L3, 1 TB RAM). The node was
+allocated exclusively (`--exclusive`, load average ~1 throughout), and every
+command was pinned with `taskset` to CPUs 0-3,64-67 (4 physical cores plus
+their hyperthread siblings), the equivalent of an 8-slot allocation. Inputs and
+outputs lived on node-local `/workdir` scratch. Original LDetect and
+`ldetect-lite` were timed back to back in that job.
+
+- The toy stages used one warmup plus five measured repeats (downstream
+  stages) or one warmup plus two measured repeats (`calc-covariance`).
+- The chr21 `ldetect-lite` time is one clean `ldetect run` (`workers=4`, the
+  workflow default), including covariance computation, first-use Numba JIT
+  compilation and the LD-neighborhood plot (~62 s). The original LDetect time
+  is its downstream scripts only (vector, minima/local search, BED) on
+  covariance converted from `ldetect-lite`'s, so this ratio is conservative.
+  With that covariance already cached, the same `ldetect run` took 99.12 s
+  (91.0x).
+- The chr21 `ldetect-lite` BED is byte-identical to the published Berisa &
+  Pickrell EUR `fourier_ls` blocks. The legacy downstream scripts, run on the
+  same covariance, place 2 of the 23 boundaries differently (see
+  `notes/logs/benchmark-figures-0.5.3-2026-11.md`).
+
+Absolute times are not comparable across hosts. These supersede measurements
+on an Intel Xeon E5-2620 v4 @ 2.1GHz with earlier code (toy: 259.278 s /
+4.651 s / 55.75x for `calc-covariance`; chr21: 10177 s / 168.86 s / 60.27x),
+which were also same-host comparisons.
 
 The covariance benchmark is intentionally a command boundary comparison:
 legacy uses the vendored `P00_01_calc_covariance.py` script with the prepared
