@@ -142,8 +142,8 @@ def block_set_maf_filter(block_set):
 
 def block_set_filtered_vcf(wc):
     if block_set_maf_filter(wc.block_set) == "minor":
-        return str(FILT_DIR / "minor" / f"chr{wc.chrom}.vcf.gz")
-    return str(FILT_DIR / f"chr{wc.chrom}.vcf.gz")
+        return str(FILT_DIR / "minor" / f"chr{wc.chrom}.gt.bcf")
+    return str(FILT_DIR / f"chr{wc.chrom}.gt.bcf")
 
 
 def block_set_genetic_map(wc):
@@ -595,13 +595,14 @@ rule filter_vcf:
         vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
         tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
     output:
-        vcf=str(FILT_DIR / "chr{chrom}.vcf.gz"),
-        tbi=str(FILT_DIR / "chr{chrom}.vcf.gz.tbi"),
+        vcf=str(FILT_DIR / "chr{chrom}.gt.bcf"),
+        csi=str(FILT_DIR / "chr{chrom}.gt.bcf.csi"),
     shell:
         """
         mkdir -p {FILT_DIR}
-        bcftools view --min-af 0.01 --types snps -Oz -o {output.vcf} {input.vcf}
-        bcftools index --tbi {output.vcf}
+        bcftools view --min-af 0.01 --types snps -Ou {input.vcf} \
+            | bcftools annotate -x INFO,^FORMAT/GT -Ob -o {output.vcf}
+        bcftools index -f {output.vcf}
         """
 
 
@@ -620,13 +621,14 @@ rule filter_vcf_minor:
         vcf=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}"),
         tbi=str(RAW_DIR / VCF_TMPL).replace("{chrom}", "{chrom}") + ".tbi",
     output:
-        vcf=str(FILT_DIR / "minor" / "chr{chrom}.vcf.gz"),
-        tbi=str(FILT_DIR / "minor" / "chr{chrom}.vcf.gz.tbi"),
+        vcf=str(FILT_DIR / "minor" / "chr{chrom}.gt.bcf"),
+        csi=str(FILT_DIR / "minor" / "chr{chrom}.gt.bcf.csi"),
     shell:
         """
         mkdir -p {FILT_DIR}/minor
-        bcftools view --min-af 0.01:minor --types snps -Oz -o {output.vcf} {input.vcf}
-        bcftools index --tbi {output.vcf}
+        bcftools view --min-af 0.01:minor --types snps -Ou {input.vcf} \
+            | bcftools annotate -x INFO,^FORMAT/GT -Ob -o {output.vcf}
+        bcftools index -f {output.vcf}
         """
 
 
@@ -637,7 +639,7 @@ rule filter_vcf_minor:
 
 rule prep_individuals:
     input:
-        vcf=str(FILT_DIR / "chr22.vcf.gz"),  # any chromosome suffices
+        vcf=str(FILT_DIR / "chr22.gt.bcf"),  # any chromosome suffices
     output:
         str(RES_DIR / "{population}_inds.txt"),
     params:
@@ -681,7 +683,7 @@ rule convert_decode_map:
 
 rule extract_snp_positions:
     input:
-        str(FILT_DIR / "chr{chrom}.vcf.gz"),
+        str(FILT_DIR / "chr{chrom}.gt.bcf"),
     output:
         str(MAPS_DIR / "snps" / "chr{chrom}.bed.gz"),
     shell:
@@ -1088,7 +1090,7 @@ rule run_legacy_from_vcf:
     input:
         genetic_map=block_set_genetic_map,
         vcf=block_set_filtered_vcf,
-        tbi=lambda wc: block_set_filtered_vcf(wc) + ".tbi",
+        csi=lambda wc: block_set_filtered_vcf(wc) + ".csi",
         individuals=lambda wc: str(
             RES_DIR / f"{block_set_population(wc.block_set)}_inds.txt"
         ),

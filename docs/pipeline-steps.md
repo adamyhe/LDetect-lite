@@ -38,7 +38,7 @@ Arguments:
 
 ```bash
 ldetect calc-covariance \
-  --reference-panel 1000G.chr2.vcf.gz \
+  --reference-panel 1000G.chr2.gt.bcf \
   --region chr2:39967768-40067768 \
   --genetic-map chr2.interpolated_genetic_map.gz \
   --individuals eurinds.txt \
@@ -47,14 +47,14 @@ ldetect calc-covariance \
 
 This step must be run once per partition. `ldetect run --workers N` runs partitions in parallel automatically.
 
-`ldetect calc-covariance` reads directly from an indexed `--reference-panel` (`.vcf.gz` with a `.tbi`, or `.bcf` with a `.csi`) via [cyvcf2](https://github.com/brentp/cyvcf2), restricting to `--region` if given. If `--reference-panel` is omitted, it instead reads VCF text from stdin with no region restriction of its own — e.g. `tabix -h 1000G.chr2.vcf.gz chr2:... | ldetect calc-covariance ...` (omitting `--reference-panel`/`--region`), useful for piping in output from arbitrary preprocessing (`bcftools view -i ...`, `zcat`, etc.) rather than a plain indexed file.
+`ldetect calc-covariance` reads directly from an indexed `--reference-panel` (`.bcf` with a `.csi`, recommended, or `.vcf.gz` with a `.tbi`) via [cyvcf2](https://github.com/brentp/cyvcf2), restricting to `--region` if given. If `--reference-panel` is omitted, it instead reads VCF text from stdin with no region restriction of its own — e.g. `bcftools view 1000G.chr2.gt.bcf chr2:... | ldetect calc-covariance ...` (omitting `--reference-panel`/`--region`), useful for piping in output from arbitrary preprocessing (`bcftools view -i ...`, `zcat`, etc.) rather than a plain indexed file.
 
-For large reference panels, prefer `.bcf`/`.csi` over `.vcf.gz`/`.tbi` — same output, but faster and lower-memory to read (see `docs/optimizations.md`).
+Convert the panel to a GT-only `.bcf`/`.csi` before running (see [Preparing the reference panel](../README.md#preparing-the-reference-panel-recommended)) — same output, but 3.5–4x faster genotype reading than `.vcf.gz`/`.tbi` (see `docs/optimizations.md`).
 
 Reads phased haplotypes and applies the [Wen & Stephens (2010)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2950123/) shrinkage estimator to compute pairwise LD. The estimator shrinks the sample correlation toward an expected decay curve based on the genetic distance between SNPs and Ne, reducing noise from finite sample sizes. Only pairs whose absolute shrinkage correlation exceeds `--cutoff` are written, keeping file sizes manageable. Output is an indexed HDF5 covariance partition (`.h5`) containing canonical SNP-position pairs, shrinkage LD values, diagonal entries, and lookup indexes. The default bitpacked backend writes the compact production schema; the older `uint8` backend is retained for reference and can write the full debug schema, including naive LD, genetic positions, and SNP IDs.
 
 Arguments:
-- `--reference-panel PATH` — VCF/BCF reference panel path, indexed with `tabix -p vcf` or `bcftools index`. If omitted, reads from stdin instead.
+- `--reference-panel PATH` — VCF/BCF reference panel path, indexed with `bcftools index` (BCF, recommended) or `tabix -p vcf` (VCF.gz). If omitted, reads from stdin instead.
 - `--region CHROM:START-END` — restrict to this region via an indexed fetch. Requires `--reference-panel`; omit to read the whole file/stream.
 - `--genetic-map PATH` — gzipped 3-column map used to convert physical positions to genetic distances (cM) for the shrinkage estimator
 - `--individuals PATH` — plain-text file with one individual ID per line; only these samples are extracted from the VCF

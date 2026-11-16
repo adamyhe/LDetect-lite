@@ -3,8 +3,11 @@
 This script reproduces the covariance-only timing comparison for the toy chr2
 example. It runs the vendored original ``P00_01_calc_covariance.py`` script as
 a subprocess, feeding it the prepared VCF through ``gzip -dc``, and compares it
-against the ldetect-lite ``ldetect calc-covariance`` CLI on the same VCF
-interval.
+against the ldetect-lite ``ldetect calc-covariance`` CLI on the same interval,
+read both from the ``.vcf.gz`` and from the GT-only ``.bcf`` (the recommended
+input). The one-time ``.vcf.gz`` -> GT-only BCF conversion (``bcftools
+annotate`` + ``bcftools index``) is timed separately and reported in the
+summary, so the BCF figure can be read with or without that cost.
 
 Run the Snakemake workflow once first so that ``ref/`` and ``work/vcf/`` exist.
 """
@@ -36,6 +39,7 @@ class Config:
     cutoff: float
     compression: str | None
     reference_panel: Path
+    bcf_panel: Path | None
     genetic_map: Path
     individuals: Path
     ref_covariance: Path
@@ -63,6 +67,18 @@ def main() -> None:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--poll-seconds", type=float, default=0.05)
     parser.add_argument("--reference-panel", type=Path, default=None)
+    parser.add_argument(
+        "--bcf-panel",
+        type=Path,
+        default=None,
+        help="GT-only BCF of the same interval (default: the Snakemake-prepared "
+        "work/vcf/...gt.bcf).",
+    )
+    parser.add_argument(
+        "--no-bcf",
+        action="store_true",
+        help="Skip the BCF backend and the BCF conversion timing.",
+    )
     parser.add_argument(
         "--genetic-map",
         type=Path,
@@ -113,6 +129,12 @@ def main() -> None:
         f"work/vcf/1000G.phase1.EUR.{args.vcf_chrom}."
         f"{args.start}-{args.end}.vcf.gz"
     )
+    bcf_panel = None
+    if not args.no_bcf:
+        bcf_panel = args.bcf_panel or Path(
+            f"work/vcf/1000G.phase1.EUR.{args.vcf_chrom}."
+            f"{args.start}-{args.end}.gt.bcf"
+        )
     cfg = Config(
         chrom=args.chrom,
         vcf_chrom=args.vcf_chrom,
@@ -122,6 +144,7 @@ def main() -> None:
         cutoff=args.cutoff,
         compression=args.compression,
         reference_panel=reference_panel,
+        bcf_panel=bcf_panel,
         genetic_map=args.genetic_map,
         individuals=args.individuals,
         ref_covariance=args.ref_covariance,
@@ -135,18 +158,21 @@ def main() -> None:
 
     rows: list[dict[str, str]] = []
     last_paths: dict[str, Path] = {}
-    for backend in ("legacy", "lite"):
+    backends = ["legacy", "lite"] + (["lite-bcf"] if cfg.bcf_panel else [])
+    for backend in backends:
         for run_index in range(args.warmups + args.repeats):
             measured = run_index >= args.warmups
             repeat = run_index - args.warmups
             label = f"{backend}-" + (f"repeat-{repeat}" if measured else "warmup")
             suffix = "gz" if backend == "legacy" else "h5"
             output_path = args.output_dir / f"{label}.{suffix}"
-            result = (
-                run_legacy(cfg, output_path)
-                if backend == "legacy"
-                else run_lite(cfg, output_path)
-            )
+            if backend == "legacy":
+                result = run_legacy(cfg, output_path)
+            elif backend == "lite-bcf":
+                assert cfg.bcf_panel is not None
+                result = run_lite(cfg, output_path, cfg.bcf_panel)
+            else:
+                result = run_lite(cfg, output_path, cfg.reference_panel)
             exactness = compare_covariance(
                 output_path,
                 cfg,
@@ -158,8 +184,14 @@ def main() -> None:
                 rows.append(row)
                 last_paths[backend] = output_path
 
+    conversion_seconds: list[float] = []
+    if cfg.bcf_panel is not None:
+        conversion_seconds = time_bcf_conversion(
+            cfg, args.output_dir, args.warmups, args.repeats
+        )
+
     write_tsv(args.output_dir / "timings.tsv", rows)
-    summary = summarize(rows, last_paths)
+    summary = summarize(rows, last_paths, conversion_seconds)
     write_summary(args.output_dir / "summary.tsv", summary)
     write_timing_plot(args.output_dir / f"timings.{args.plot_format}", rows)
     write_covariance_timing_plot(
@@ -176,6 +208,7 @@ def require_inputs(cfg: Config) -> None:
         path
         for path in (
             cfg.reference_panel,
+            *([cfg.bcf_panel] if cfg.bcf_panel else []),
             cfg.genetic_map,
             cfg.individuals,
             cfg.ref_covariance,
@@ -253,7 +286,41 @@ def run_legacy(cfg: Config, output_path: Path) -> dict[str, object]:
     }
 
 
-def run_lite(cfg: Config, output_path: Path) -> dict[str, object]:
+def time_bcf_conversion(
+    cfg: Config, output_dir: Path, warmups: int, repeats: int
+) -> list[float]:
+    """Time the one-time ``.vcf.gz`` -> GT-only BCF conversion plus indexing."""
+    if shutil.which("bcftools") is None:
+        print("bcftools not on PATH; skipping BCF conversion timing", flush=True)
+        return []
+    out = output_dir / "conversion.gt.bcf"
+    seconds: list[float] = []
+    for run_index in range(warmups + repeats):
+        out.unlink(missing_ok=True)
+        start = time.perf_counter()
+        subprocess.run(
+            [
+                "bcftools",
+                "annotate",
+                "-x",
+                "INFO,^FORMAT/GT",
+                "-Ob",
+                "-o",
+                str(out),
+                str(cfg.reference_panel),
+            ],
+            check=True,
+        )
+        subprocess.run(["bcftools", "index", "-f", str(out)], check=True)
+        elapsed = time.perf_counter() - start
+        label = "warmup" if run_index < warmups else f"repeat-{run_index - warmups}"
+        print(f"bcf-conversion-{label}\tseconds={elapsed:.6f}", flush=True)
+        if run_index >= warmups:
+            seconds.append(elapsed)
+    return seconds
+
+
+def run_lite(cfg: Config, output_path: Path, panel: Path) -> dict[str, object]:
     output_path.unlink(missing_ok=True)
     stop = threading.Event()
     peaks: list[float] = []
@@ -270,7 +337,7 @@ def run_lite(cfg: Config, output_path: Path) -> dict[str, object]:
     )
     start = time.perf_counter()
     lite_proc = subprocess.Popen(
-        lite_command(cfg, output_path),
+        lite_command(cfg, output_path, panel),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=False,
@@ -299,12 +366,12 @@ def live_pid(proc: subprocess.Popen | None) -> list[int]:
     return []
 
 
-def lite_command(cfg: Config, output_path: Path) -> list[str]:
+def lite_command(cfg: Config, output_path: Path, panel: Path) -> list[str]:
     cmd = [
         str(cfg.ldetect_bin),
         "calc-covariance",
         "--reference-panel",
-        str(cfg.reference_panel),
+        str(panel),
         "--region",
         f"{cfg.vcf_chrom}:{cfg.start}-{cfg.end}",
         "--genetic-map",
@@ -427,7 +494,9 @@ def make_row(
 
 
 def summarize(
-    rows: list[dict[str, str]], last_paths: dict[str, Path]
+    rows: list[dict[str, str]],
+    last_paths: dict[str, Path],
+    conversion_seconds: list[float] | None = None,
 ) -> dict[str, str]:
     lite_backend = optimized_backend(rows)
     legacy_seconds = values(rows, "legacy", "seconds")
@@ -448,6 +517,27 @@ def summarize(
     }
     ratio = last_paths["lite"].stat().st_size / last_paths["legacy"].stat().st_size
     summary["output_size_ratio_lite_vs_legacy"] = f"{ratio:.6f}"
+    bcf_seconds = values(rows, "lite-bcf", "seconds")
+    if bcf_seconds:
+        bcf_rss = values(rows, "lite-bcf", "peak_rss_mib")
+        summary.update(
+            {
+                "lite_bcf_mean_seconds": f"{np.mean(bcf_seconds):.6f}",
+                "lite_bcf_min_seconds": f"{np.min(bcf_seconds):.6f}",
+                "lite_bcf_peak_rss_mib_max": f"{np.max(bcf_rss):.6f}",
+                "bcf_mean_speedup_vs_legacy": (
+                    f"{np.mean(legacy_seconds) / np.mean(bcf_seconds):.6f}"
+                ),
+                "bcf_mean_speedup_vs_lite_vcf": (
+                    f"{np.mean(lite_seconds) / np.mean(bcf_seconds):.6f}"
+                ),
+            }
+        )
+    if conversion_seconds:
+        summary["bcf_conversion_mean_seconds"] = (
+            f"{np.mean(conversion_seconds):.6f}"
+        )
+        summary["bcf_conversion_min_seconds"] = f"{np.min(conversion_seconds):.6f}"
     return summary
 
 
@@ -482,18 +572,22 @@ def write_covariance_timing_plot(path: Path, rows: list[dict[str, str]]) -> None
     labels = [backend_label(backend) for backend in backends]
     means = [float(np.mean(values(rows, backend, "seconds"))) for backend in backends]
 
-    y = [0.0, 0.36]
-    fig, ax = plt.subplots(figsize=TIMING_FIGSIZE, constrained_layout=True)
+    y = [0.36 * i for i in range(len(labels))]
+    width, height = TIMING_FIGSIZE
+    fig, ax = plt.subplots(
+        figsize=(width, height + 0.4 * max(0, len(labels) - 2)),
+        constrained_layout=True,
+    )
     ax.barh(
         y,
         means,
         height=0.26,
-        color=["#0057b8", "#d62728"][: len(labels)],
+        color=["#0057b8", "#d62728", "#ff9896"][: len(labels)],
         edgecolor="#222222",
         linewidth=0.6,
     )
     ax.set_yticks(y, labels)
-    ax.set_ylim(0.58, -0.24)
+    ax.set_ylim(y[-1] + 0.22, -0.24)
     ax.set_xlabel("mean seconds")
     ax.set_title("calc_covariance")
     ax.grid(axis="x", color="#d0d0d0", linewidth=0.6, alpha=0.8)
@@ -541,7 +635,9 @@ def backend_label(backend: str) -> str:
     if backend == "legacy":
         return "LDetect"
     if backend == "lite":
-        return "LDetect-lite"
+        return "LDetect-lite (.vcf.gz)"
+    if backend == "lite-bcf":
+        return "LDetect-lite (.bcf)"
     return backend
 
 

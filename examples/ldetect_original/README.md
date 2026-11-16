@@ -128,9 +128,16 @@ The Snakefile implements this with:
 
 ```bash
 bcftools view -S {population_individuals} -Ou {raw_vcf} |
-bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {filtered_vcf}
-tabix -f -p vcf {filtered_vcf}
+bcftools view -i 'MAC[0]>=1' -m2 -M2 -Ou |
+bcftools annotate -x INFO,^FORMAT/GT -Ob -o {filtered_bcf}
+bcftools index -f {filtered_bcf}
 ```
+
+The final `annotate` step only drops INFO and non-GT FORMAT fields after
+filtering, so the filtered panel is a GT-only BCF
+(`results/filtered_vcf/{POP}/...population-polymorphic.gt.bcf`). The records,
+positions and genotypes are the same as before, but Step 2 decodes it 3.5-4x
+faster than the equivalent `.vcf.gz`.
 
 ## Individual Lists
 
@@ -522,7 +529,7 @@ uv run python scripts/profile_run.py \
   --output results/profiling/EUR-chr21.csv \
   --log-output results/profiling/EUR-chr21.log \
   -- uv run ldetect run --genetic-map data/maps/chr21.interpolated_genetic_map.gz \
-  --reference-panel results/filtered_vcf/EUR/ALL.chr21.phase1_release_v3.20101123.snps_indels_svs.genotypes.population-polymorphic.vcf.gz \
+  --reference-panel results/filtered_vcf/EUR/ALL.chr21.phase1_release_v3.20101123.snps_indels_svs.genotypes.population-polymorphic.gt.bcf \
   --individuals resources/EUR_inds.txt \
   --chromosome 21 --output-dir results/profiling/EUR/21 --workers 4
 

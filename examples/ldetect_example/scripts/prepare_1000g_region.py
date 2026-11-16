@@ -57,7 +57,20 @@ def main() -> None:
         ]
     )
     run(["tabix", "-f", "-p", "vcf", str(args.output_vcf)])
-    run(["bcftools", "view", "-Ob", "-o", str(args.output_bcf), str(args.output_vcf)])
+    # GT-only BCF: the recommended ldetect-lite input (same records, positions
+    # and genotypes; INFO and non-GT FORMAT fields are dropped).
+    run(
+        [
+            "bcftools",
+            "annotate",
+            "-x",
+            "INFO,^FORMAT/GT",
+            "-Ob",
+            "-o",
+            str(args.output_bcf),
+            str(args.output_vcf),
+        ]
+    )
     run(["bcftools", "index", "-f", str(args.output_bcf)])
 
 

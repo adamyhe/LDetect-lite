@@ -4,15 +4,17 @@ This workflow reproduces the original EUR chr2 toy example distributed with
 `ldetect`.
 
 The workflow downloads the original BitBucket reference intermediates and also
-fetches the matching 1000 Genomes Phase 1 chr2 interval. The main ldetect-lite
-path starts from the VCF:
+fetches the matching 1000 Genomes Phase 1 chr2 interval. It filters that
+interval to the toy example's EUR individuals and writes it both as a
+`.vcf.gz` (the input the original LDetect scripts read) and as a GT-only BCF
+(the recommended ldetect-lite input):
 
 ```text
 work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz
+work/vcf/1000G.phase1.EUR.2.39967768-40067768.gt.bcf
 ```
 
-It filters to the toy example's EUR individuals, computes covariance from the
-VCF, and compares each downstream artifact to the original LDetect reference
+The main ldetect-lite path computes covariance from the BCF and compares each downstream artifact to the original LDetect reference
 files:
 
 ```text
@@ -85,7 +87,11 @@ uv run python scripts/benchmark_legacy_covariance.py --warmups 1 --repeats 2
 
 This streams the prepared VCF into the vendored original
 `P00_01_calc_covariance.py` script and compares it with
-`ldetect calc-covariance` on the same interval. It writes
+`ldetect calc-covariance` on the same interval, read both from the `.vcf.gz`
+and from the GT-only `.gt.bcf`. It also times the one-time `.vcf.gz` to
+GT-only BCF conversion (`bcftools annotate` plus `bcftools index`) and reports
+it in `summary.tsv` (`bcf_conversion_mean_seconds`). Pass `--no-bcf` to time
+only the `.vcf.gz` input. It writes
 `results/legacy_covariance_benchmark/timings.tsv`, `summary.tsv`,
 `timings.svg`, and `timings-calc-covariance.svg`.
 
@@ -97,29 +103,29 @@ with the function-level or full-genome bitpacking benchmarks instead.
 
 ## VCF/BCF Ingestion Profiling
 
-The example workflow prepares both VCF.gz and BCF versions of the same EUR chr2
-interval:
+The example workflow prepares both VCF.gz and GT-only BCF versions of the same
+EUR chr2 interval:
 
 ```text
 work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz
-work/vcf/1000G.phase1.EUR.2.39967768-40067768.bcf
+work/vcf/1000G.phase1.EUR.2.39967768-40067768.gt.bcf
 ```
 
-To time VCF.gz to BCF conversion on this interval:
+To time VCF.gz to GT-only BCF conversion on this interval:
 
 ```bash
 mkdir -p results/bcf_conversion_profile
 
 /usr/bin/time -v \
   -o results/bcf_conversion_profile/vcf_to_bcf.timing.log \
-  bcftools view -Ob \
-    -o results/bcf_conversion_profile/1000G.phase1.EUR.2.39967768-40067768.bcf \
+  bcftools annotate -x INFO,^FORMAT/GT -Ob \
+    -o results/bcf_conversion_profile/1000G.phase1.EUR.2.39967768-40067768.gt.bcf \
     work/vcf/1000G.phase1.EUR.2.39967768-40067768.vcf.gz
 
 /usr/bin/time -v \
   -o results/bcf_conversion_profile/bcf_index.timing.log \
   bcftools index -f \
-    results/bcf_conversion_profile/1000G.phase1.EUR.2.39967768-40067768.bcf
+    results/bcf_conversion_profile/1000G.phase1.EUR.2.39967768-40067768.gt.bcf
 ```
 
 To split bitpacked covariance input preparation into raw cyvcf2 iteration,
@@ -129,7 +135,7 @@ sidecar writing, run the profiler on both prepared inputs:
 
 ```bash
 uv run python scripts/profile_bitpack_ingestion.py \
-  --reference-panel work/vcf/1000G.phase1.EUR.2.39967768-40067768.bcf \
+  --reference-panel work/vcf/1000G.phase1.EUR.2.39967768-40067768.gt.bcf \
   --region 2:39967768-40067768 \
   --genetic-map ref/chr2.interpolated_genetic_map.gz \
   --individuals ref/eurinds.txt \

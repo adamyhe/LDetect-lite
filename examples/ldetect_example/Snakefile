@@ -57,7 +57,7 @@ REF_BED      = REF_DIR / f"bed/EUR-{CHROM}-{N_SNPS}-{START}-{END}.bed"
 # Our pipeline outputs
 WORK_H5     = WORK_DIR / f"{CHROM}/{CHROM}.{START}.{END}.h5"
 WORK_VCF    = WORK_DIR / f"vcf/1000G.phase1.EUR.{VCF_CHROM}.{START}-{END}.vcf.gz"
-WORK_BCF    = WORK_DIR / f"vcf/1000G.phase1.EUR.{VCF_CHROM}.{START}-{END}.bcf"
+WORK_BCF    = WORK_DIR / f"vcf/1000G.phase1.EUR.{VCF_CHROM}.{START}-{END}.gt.bcf"
 WORK_PARTS  = WORK_DIR / f"{CHROM}_partitions.txt"
 WORK_VECTOR = WORK_DIR / f"vector-{CHROM}.txt.gz"
 WORK_BPTS   = WORK_DIR / f"breakpoints-{CHROM}.json"
@@ -149,7 +149,7 @@ rule prepare_1000g_vcf:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Calculate covariance from VCF.
+# Step 2: Calculate covariance from the GT-only BCF (the recommended input).
 #
 # The toy covariance exactness check compares full-schema legacy fields, so this
 # rule deliberately uses the uint8 reference backend rather than the production
@@ -158,8 +158,8 @@ rule prepare_1000g_vcf:
 
 rule calc_covariance:
     input:
-        vcf = str(WORK_VCF),
-        tbi = str(WORK_VCF) + ".tbi",
+        bcf = str(WORK_BCF),
+        csi = str(WORK_BCF) + ".csi",
         genetic_map = str(REF_MAP),
         individuals = str(REF_INDS),
     output:
@@ -168,7 +168,7 @@ rule calc_covariance:
         """
         mkdir -p $(dirname {output})
         uv run ldetect calc-covariance \
-            --reference-panel {input.vcf} \
+            --reference-panel {input.bcf} \
             --region {VCF_CHROM}:{START}-{END} \
             --genetic-map {input.genetic_map} \
             --individuals {input.individuals} \

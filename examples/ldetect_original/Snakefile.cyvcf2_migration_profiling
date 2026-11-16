@@ -14,7 +14,9 @@ since BCF support fell out of this migration and had no equivalent before it.
 
 Two things measured, both against a single install:
     vcf vs bcf  -- identical filtered VCF content (one as .vcf.gz/.tbi, one
-                   converted to .bcf/.csi), run through the same `ldetect`
+                   converted to a GT-only .gt.bcf/.csi, the recommended
+                   input; INFO and non-GT FORMAT fields dropped), run
+                   through the same `ldetect`
                    install; checked for byte-exact vector/BED/breakpoints
                    output (both are exact computations of the same thing)
                    alongside wall-clock/peak-RSS via Snakemake's `benchmark:`
@@ -47,7 +49,7 @@ FILT_VCF = str(
         ".vcf.gz", ".population-polymorphic.vcf.gz"
     )
 )
-FILT_BCF = FILT_VCF.replace(".vcf.gz", ".bcf")
+FILT_BCF = FILT_VCF.replace(".vcf.gz", ".gt.bcf")
 
 MODES = ["vcf", "bcf"]
 MODE_REFERENCE_PANEL = {
@@ -160,7 +162,7 @@ rule cyvcf2_migration_convert_bcf:
         csi=FILT_BCF + ".csi",
     shell:
         """
-        bcftools view -O b -o {output.bcf} {input.vcf}
+        bcftools annotate -x INFO,^FORMAT/GT -Ob -o {output.bcf} {input.vcf}
         bcftools index -f {output.bcf}
         """
 
