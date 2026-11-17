@@ -90,6 +90,7 @@ The package is under `src/ldetect_lite/`. Key modules:
 
 ## Repository Layout Beyond `src/`
 
+- `CHANGELOG.md` (per-release changes, keep the `[Unreleased]` section current) and `ROADMAP.md` (in-progress branches such as `dp-ld-splitter`, planned and shelved work).
 - `docs/` — human-facing reference documentation: `docs/pipeline-steps.md` (per-command CLI reference for running each pipeline stage individually) and `docs/optimizations.md` (up-to-date human-readable summary of implemented performance work).
 - `notes/` — internal working notes, split into `notes/findings/` (distilled, current-status summaries of reproduction investigations, meant to be read and mined for the paper writeup) and `notes/logs/` (raw, dated, agent-oriented investigation logs and historical design docs — see `notes/README.md` for the full index). `notes/logs/ldetect-original-*.md` and `notes/logs/local-search-divergence-asn22.md` back the ldetect_original reproduction status; `notes/logs/macdonald2022-*.md` back the MacDonald2022 reproduction status (see Reproduction Status below).
 - `examples/` — Snakemake reproduction workflows, each with its own `README.md`/`config.yaml`:
