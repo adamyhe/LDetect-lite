@@ -259,7 +259,7 @@ def _run_covariance_partition(
         env,
     ) = task
     region = f"{chrom}:{start}-{end}"
-    tabix_cmd = ["tabix", "-h", str(vcf), region]
+    reader_cmd = ["bcftools", "view", str(vcf), region]
     legacy_cmd = [
         sys.executable,
         str(p00_01),
@@ -270,20 +270,20 @@ def _run_covariance_partition(
         str(output),
     ]
     with log_path.open("wb") as log:
-        tabix = subprocess.Popen(tabix_cmd, stdout=subprocess.PIPE, stderr=log)
-        assert tabix.stdout is not None
+        reader = subprocess.Popen(reader_cmd, stdout=subprocess.PIPE, stderr=log)
+        assert reader.stdout is not None
         legacy = subprocess.Popen(
             legacy_cmd,
-            stdin=tabix.stdout,
+            stdin=reader.stdout,
             stdout=log,
             stderr=log,
             env=env,
         )
-        tabix.stdout.close()
+        reader.stdout.close()
         legacy_rc = legacy.wait()
-        tabix_rc = tabix.wait()
-    if tabix_rc != 0:
-        raise RuntimeError(f"tabix failed for {region}; see {log_path}")
+        reader_rc = reader.wait()
+    if reader_rc != 0:
+        raise RuntimeError(f"bcftools view failed for {region}; see {log_path}")
     if legacy_rc != 0:
         raise RuntimeError(f"legacy covariance failed for {region}; see {log_path}")
 

@@ -197,7 +197,7 @@ FILT_DIR = Path(config["results_dir"]) / "filtered_vcf"
 FILT_VCF = str(
     FILT_DIR
     / "{population}"
-    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.gt.bcf")
 )
 
 
@@ -232,6 +232,11 @@ rule prep_individuals:
 #
 # Do not add FILTER=PASS or --types snps here; the reference ldetect pipeline
 # consumed all biallelic records supplied to it.
+#
+# The filtered panel is written as a GT-only BCF (INFO and non-GT FORMAT
+# fields dropped after filtering): ldetect only reads GT, and skipping the
+# unused fields makes Step 2 genotype decoding 3.5-4x faster with
+# byte-identical results (see notes/findings/step2-covariance-profiling.md).
 # ---------------------------------------------------------------------------
 
 
@@ -242,13 +247,14 @@ rule filter_vcf:
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         vcf=FILT_VCF,
-        tbi=FILT_VCF + ".tbi",
+        csi=FILT_VCF + ".csi",
     shell:
         """
         mkdir -p $(dirname {output.vcf})
         bcftools view -S {input.individuals} -Ou {input.vcf} \
-            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
-        tabix -f -p vcf {output.vcf}
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Ou \
+            | bcftools annotate -x INFO,^FORMAT/GT -Ob -o {output.vcf}
+        bcftools index -f {output.vcf}
         """
 
 
@@ -262,7 +268,7 @@ rule run_ldetect:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=FILT_VCF,
-        tbi=FILT_VCF + ".tbi",
+        csi=FILT_VCF + ".csi",
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         bed=str(RESULTS / "{population}" / "{chrom}" / "{chrom}-ld-blocks.bed"),

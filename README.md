@@ -22,7 +22,7 @@ uv tool install ldetect-lite
 
 This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, and `ldl` — so pick whichever is most convenient; examples below use `ldetect`.
 
-The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the VCF/BCFs must be indexed before running `ldetect run` — `tabix -p vcf` (for `.vcf.gz`) or `bcftools index` (for `.bcf`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
+The main `ldetect run` pipeline reads the VCF/BCF reference panel via [cyvcf2](https://github.com/brentp/cyvcf2), a core dependency installed automatically — no separate `tabix` binary or htslib system package is required to *run* the pipeline. However, the reference panel must be indexed before running `ldetect run` — `bcftools index` (for `.bcf`, recommended; see below) or `tabix -p vcf` (for `.vcf.gz`), from [htslib](https://www.htslib.org/)/[bcftools](https://samtools.github.io/bcftools/) — since region-based partition reads require one.
 
 ## Usage
 
@@ -42,7 +42,7 @@ Then pass `--reference-panel 1000G.chr2.gt.bcf`. This keeps every record, positi
 ```bash
 ldetect run \
   --genetic-map chr2.interpolated_genetic_map.gz \
-  --reference-panel 1000G.chr2.vcf.gz \
+  --reference-panel 1000G.chr2.gt.bcf \
   --individuals eurinds.txt \
   --chromosome chr2 \
   --output-dir results/chr2/

@@ -30,7 +30,7 @@ FILT_DIR = RESULTS / "filtered_vcf"
 FILT_VCF = str(
     FILT_DIR
     / "{population}"
-    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.gt.bcf")
 )
 LEGACY_ROOT = RESULTS / "legacy_diagnostics"
 
@@ -156,13 +156,14 @@ rule legacy_filter_vcf:
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         vcf=FILT_VCF,
-        tbi=FILT_VCF + ".tbi",
+        csi=FILT_VCF + ".csi",
     shell:
         """
         mkdir -p $(dirname {output.vcf})
         bcftools view -S {input.individuals} -Ou {input.vcf} \
-            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
-        tabix -f -p vcf {output.vcf}
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Ou \
+            | bcftools annotate -x INFO,^FORMAT/GT -Ob -o {output.vcf}
+        bcftools index -f {output.vcf}
         """
 
 
@@ -170,7 +171,7 @@ rule legacy_run_ldetect_full:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=FILT_VCF,
-        tbi=FILT_VCF + ".tbi",
+        csi=FILT_VCF + ".csi",
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         bed=str(

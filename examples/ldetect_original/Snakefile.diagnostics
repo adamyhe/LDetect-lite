@@ -21,7 +21,7 @@ FILT_DIR = Path(config["results_dir"]) / "filtered_vcf"
 FILT_VCF = str(
     FILT_DIR
     / "{population}"
-    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.vcf.gz")
+    / VCF_TMPL.replace(".vcf.gz", ".population-polymorphic.gt.bcf")
 )
 
 
@@ -248,13 +248,14 @@ rule filter_vcf:
         individuals=str(RES_DIR / "{population}_inds.txt"),
     output:
         vcf=FILT_VCF,
-        tbi=FILT_VCF + ".tbi",
+        csi=FILT_VCF + ".csi",
     shell:
         """
         mkdir -p $(dirname {output.vcf})
         bcftools view -S {input.individuals} -Ou {input.vcf} \
-            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Oz -o {output.vcf}
-        tabix -f -p vcf {output.vcf}
+            | bcftools view -i 'MAC[0]>=1' -m2 -M2 -Ou \
+            | bcftools annotate -x INFO,^FORMAT/GT -Ob -o {output.vcf}
+        bcftools index -f {output.vcf}
         """
 
 
@@ -262,7 +263,7 @@ rule diagnostic_run_ldetect:
     input:
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         vcf=FILT_VCF.replace("{population}", DIAG_POP),
-        tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        csi=FILT_VCF.replace("{population}", DIAG_POP) + ".csi",
         individuals=str(RES_DIR / f"{DIAG_POP}_inds.txt"),
     output:
         bed=str(DIAG_ROOT / "{chrom}" / "run" / "{chrom}-ld-blocks.bed"),
@@ -317,7 +318,7 @@ rule diagnostic_input_summary:
         raw_vcf=RAW_VCF.replace("{chrom}", "{chrom}"),
         raw_tbi=RAW_VCF.replace("{chrom}", "{chrom}") + ".tbi",
         filtered_vcf=FILT_VCF.replace("{population}", DIAG_POP),
-        filtered_tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        filtered_csi=FILT_VCF.replace("{population}", DIAG_POP) + ".csi",
         genetic_map=str(MAPS_DIR / "chr{chrom}.interpolated_genetic_map.gz"),
         partitions=rules.diagnostic_run_ldetect.output.partitions,
         script="scripts/diagnose_inputs.py",
@@ -363,7 +364,7 @@ rule diagnostic_run_ldetect_omni:
     input:
         genetic_map=rules.download_omni_map.output[0],
         vcf=FILT_VCF.replace("{population}", DIAG_POP),
-        tbi=FILT_VCF.replace("{population}", DIAG_POP) + ".tbi",
+        csi=FILT_VCF.replace("{population}", DIAG_POP) + ".csi",
         individuals=str(RES_DIR / f"{DIAG_POP}_inds.txt"),
     output:
         bed=str(DIAG_ROOT / "{chrom}" / "omni_run" / "{chrom}-ld-blocks.bed"),
