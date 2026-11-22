@@ -25,23 +25,19 @@ from __future__ import annotations
 
 import argparse
 import csv
-import random
 import statistics
 from pathlib import Path
 
 import numpy as np
 
 from ldetect_lite.io.bed import Block, read_genome_bed
-from ldetect_lite.io.covariance_hdf5 import open_covariance_reader
 from ldetect_lite.io.partitions import CovarianceStore, read_partitions
 from ldetect_lite.ld_neighborhood import (
     CATEGORY_ORDER,
+    BottomKSampler,
     SeparationSamples,
-    category_masks,
-    owned_bounds,
-    r2_for_pairs,
+    iter_boundary_r2,
     read_diagonal_index,
-    reservoir_extend,
     write_separation_boxplot,
 )
 
@@ -70,8 +66,8 @@ def resolve_chrom_blocks(
     )
 
 
-def summarize(values: list[float]) -> dict[str, object]:
-    if not values:
+def summarize(values: np.ndarray) -> dict[str, object]:
+    if values.size == 0:
         return {
             "n": 0,
             "mean_r2": "",
@@ -108,59 +104,27 @@ def boundary_rows_and_samples(
         raise RuntimeError(f"No diagonal rows found for {name} in {store.root}")
 
     rows: list[dict[str, object]] = []
-    samples: SeparationSamples = {category: [] for category in CATEGORY_ORDER}
-    seen = {category: 0 for category in CATEGORY_ORDER}
-    rng = random.Random(seed)
+    rng = np.random.default_rng(seed)
+    samplers = {
+        category: BottomKSampler(sample_limit, rng) for category in CATEGORY_ORDER
+    }
 
     for boundary in boundaries:
-        left = boundary - window_bp
-        right = boundary + window_bp
-        per_boundary: dict[str, list[float]] = {
+        per_boundary: dict[str, list[np.ndarray]] = {
             category: [] for category in CATEGORY_ORDER
         }
-
-        for p_index, (start, end) in enumerate(partitions):
-            if end < left or start > right:
-                continue
-            lower_min, lower_max, include_lower_min = owned_bounds(
-                partitions,
-                p_index,
-                left,
-                right,
-            )
-            if lower_min > right or lower_max < left:
-                continue
-            path = store.partition_path(name, start, end)
-            with open_covariance_reader(path, start, end) as reader:
-                for chunk in reader.iter_owned_rows(
-                    lower_min,
-                    lower_max,
-                    left,
-                    right,
-                    chunk_rows,
-                    include_lower_min=include_lower_min,
-                ):
-                    masks = category_masks(chunk.lo, chunk.hi, boundary, left, right)
-                    for category, mask in masks.items():
-                        if not np.any(mask):
-                            continue
-                        values = r2_for_pairs(
-                            chunk.lo[mask],
-                            chunk.hi[mask],
-                            chunk.shrink_ld[mask],
-                            diag_pos,
-                            diag_val,
-                        )
-                        if values.size == 0:
-                            continue
-                        per_boundary[category].extend(values.tolist())
-                        seen[category] = reservoir_extend(
-                            samples[category],
-                            values,
-                            seen=seen[category],
-                            limit=sample_limit,
-                            rng=rng,
-                        )
+        for category, values in iter_boundary_r2(
+            boundary=boundary,
+            partitions=partitions,
+            store=store,
+            name=name,
+            window_bp=window_bp,
+            diag_pos=diag_pos,
+            diag_val=diag_val,
+            chunk_rows=chunk_rows,
+        ):
+            per_boundary[category].append(values)
+            samplers[category].extend(values)
 
         for category in CATEGORY_ORDER:
             row = {
@@ -169,9 +133,13 @@ def boundary_rows_and_samples(
                 "category": category,
                 "window_bp": window_bp,
             }
-            row.update(summarize(per_boundary[category]))
+            chunks = per_boundary[category]
+            row.update(summarize(np.concatenate(chunks) if chunks else np.array([])))
             rows.append(row)
 
+    samples: SeparationSamples = {
+        category: samplers[category].sample() for category in CATEGORY_ORDER
+    }
     return rows, samples
 
 

@@ -7,6 +7,16 @@ details and measurements for each optimization are in
 
 ## [Unreleased]
 
+### Performance
+- `--generate-ld-neighborhood-plot`: the r² sampler is vectorized (bottom-k
+  sampling with NumPy instead of a per-value Python reservoir loop), each
+  boundary reads only the covariance rows inside its window, and r² is
+  computed once per chunk against the window's slice of the diagonal. About
+  4.8x faster on a synthetic 8 Mb cache. The sample is still a uniform random
+  subset for a fixed seed, but the drawn values differ from earlier releases.
+  `examples/MacDonald2022/scripts/plot_ld_neighborhood_separation.py` uses
+  the same helpers; its per-boundary TSV is unchanged.
+
 ### Changed
 - The reproduction workflows (`examples/ldetect_original`,
   `examples/MacDonald2022`, `examples/ldetect_example`) now write their

@@ -18,8 +18,7 @@ run.
 from __future__ import annotations
 
 import os
-import random
-from collections.abc import Iterable
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -82,28 +81,38 @@ def r2_for_pairs(
     diag_pos: np.ndarray,
     diag_val: np.ndarray,
 ) -> np.ndarray:
-    if lo.size == 0 or diag_pos.size == 0:
-        return np.array([], dtype=np.float64)
+    values, valid = r2_with_mask(lo, hi, shrink_ld, diag_pos, diag_val)
+    return np.asarray(values[valid], dtype=np.float64)
 
-    lo_idx = np.searchsorted(diag_pos, lo)
-    hi_idx = np.searchsorted(diag_pos, hi)
-    has_diag = (lo_idx < diag_pos.size) & (hi_idx < diag_pos.size)
-    safe_lo_idx = np.minimum(lo_idx, diag_pos.size - 1)
-    safe_hi_idx = np.minimum(hi_idx, diag_pos.size - 1)
-    has_diag &= (diag_pos[safe_lo_idx] == lo) & (diag_pos[safe_hi_idx] == hi)
-    if not np.any(has_diag):
-        return np.array([], dtype=np.float64)
 
-    lo_idx = lo_idx[has_diag]
-    hi_idx = hi_idx[has_diag]
-    shrink = shrink_ld[has_diag]
+def r2_with_mask(
+    lo: np.ndarray,
+    hi: np.ndarray,
+    shrink_ld: np.ndarray,
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """r^2 for each pair, aligned with the input, plus a validity mask.
+
+    A pair is valid when both positions have a diagonal entry, the diagonal
+    product is positive and the result is finite; invalid entries of the
+    returned values are 0.0.
+    """
+    n = lo.size
+    values = np.zeros(n, dtype=np.float64)
+    if n == 0 or diag_pos.size == 0:
+        return values, np.zeros(n, dtype=bool)
+
+    lo_idx = np.minimum(np.searchsorted(diag_pos, lo), diag_pos.size - 1)
+    hi_idx = np.minimum(np.searchsorted(diag_pos, hi), diag_pos.size - 1)
+    valid = (diag_pos[lo_idx] == lo) & (diag_pos[hi_idx] == hi)
     denom = diag_val[lo_idx] * diag_val[hi_idx]
-    positive = denom > 0.0
-    if not np.any(positive):
-        return np.array([], dtype=np.float64)
-
-    values = shrink[positive] * shrink[positive] / denom[positive]
-    return np.asarray(values[np.isfinite(values)], dtype=np.float64)
+    valid &= denom > 0.0
+    shrink = np.asarray(shrink_ld, dtype=np.float64)
+    np.divide(shrink * shrink, denom, out=values, where=valid)
+    valid &= np.isfinite(values)
+    values[~valid] = 0.0
+    return values, valid
 
 
 def owned_bounds(
@@ -120,23 +129,94 @@ def owned_bounds(
     return lower_min, lower_max, p_index == 0
 
 
-def reservoir_extend(
-    sample: list[float],
-    values: Iterable[float],
-    *,
-    seen: int,
-    limit: int,
-    rng: random.Random,
-) -> int:
-    for value in values:
-        seen += 1
-        if len(sample) < limit:
-            sample.append(float(value))
-            continue
-        replacement = rng.randrange(seen)
-        if replacement < limit:
-            sample[replacement] = float(value)
-    return seen
+class BottomKSampler:
+    """Uniform random sample, without replacement, of at most *limit* values.
+
+    Bottom-k sampling: every value seen gets an independent uniform key and
+    the *limit* values with the smallest keys are kept. That is the same
+    distribution as classic reservoir sampling, but each batch is handled in
+    NumPy instead of a per-value Python loop. Once the sample is full, a value
+    whose key is not below the current *limit*-th smallest key can never be
+    kept, so it is dropped before buffering.
+    """
+
+    def __init__(self, limit: int, rng: np.random.Generator) -> None:
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+        self.limit = limit
+        self.seen = 0
+        self._rng = rng
+        self._keys: list[np.ndarray] = []
+        self._values: list[np.ndarray] = []
+        self._buffered = 0
+        # Keys >= this can never make the final sample (inf until full).
+        self._threshold = np.inf
+
+    def extend(self, values: np.ndarray) -> None:
+        values = np.asarray(values, dtype=np.float64).ravel()
+        n = int(values.size)
+        if n == 0:
+            return
+        self.seen += n
+        if self.limit == 0:
+            return
+        keys = self._rng.random(n)
+        if self._threshold < np.inf:
+            keep = keys < self._threshold
+            keys = keys[keep]
+            values = values[keep]
+            if keys.size == 0:
+                return
+        self._keys.append(keys)
+        self._values.append(values)
+        self._buffered += int(keys.size)
+        if self._buffered > 2 * self.limit:
+            self._compact()
+
+    def _compact(self) -> None:
+        if len(self._keys) > 1:
+            keys = np.concatenate(self._keys)
+            values = np.concatenate(self._values)
+        elif self._keys:
+            keys, values = self._keys[0], self._values[0]
+        else:
+            return
+        if keys.size > self.limit:
+            kept = np.argpartition(keys, self.limit - 1)[: self.limit]
+            keys = keys[kept]
+            values = values[kept]
+        if keys.size >= self.limit:
+            self._threshold = float(keys.max())
+        self._keys = [keys]
+        self._values = [values]
+        self._buffered = int(keys.size)
+
+    def sample(self) -> list[float]:
+        """The kept values, in key order (a deterministic random order)."""
+        self._compact()
+        if not self._keys:
+            return []
+        order = np.argsort(self._keys[0], kind="stable")
+        values: list[float] = self._values[0][order].tolist()
+        return values
+
+
+def window_row_bounds(
+    lower_min: int,
+    lower_max: int,
+    include_lower_min: bool,
+    left: int,
+    right: int,
+) -> tuple[int, int, bool]:
+    """Clip a partition's owned ``lo`` range to the window ``[left, right]``.
+
+    The window mask drops every row whose ``lo`` is outside ``[left, right]``,
+    so reading only the clipped ``lo`` range yields the same rows while
+    skipping the rest of the partition.
+    """
+    if left > lower_min:
+        lower_min, include_lower_min = left, True
+    return lower_min, min(lower_max, right), include_lower_min
 
 
 def chromosome_separation_samples(
@@ -149,12 +229,13 @@ def chromosome_separation_samples(
     seed: int = 1,
     chunk_rows: int = 1_000_000,
 ) -> SeparationSamples:
-    """Reservoir-sample r^2 values per category, aggregated across every
+    """Randomly sample r^2 values per category, aggregated across every
     boundary in *boundaries* (a chromosome's own computed breakpoints).
 
-    Reservoir sampling bounds memory for chromosomes with many breakpoints
-    and/or dense covariance data; each category's sample is an unbiased
-    random subset (capped at *sample_limit*) of every matching pair seen.
+    Sampling bounds memory for chromosomes with many breakpoints and/or dense
+    covariance data; each category's sample is a uniform random subset
+    (capped at *sample_limit*) of every matching pair seen, deterministic for
+    a given *seed*.
     """
     samples: SeparationSamples = {"left": [], "across": [], "right": []}
     if not boundaries:
@@ -165,51 +246,93 @@ def chromosome_separation_samples(
     if diag_pos.size == 0:
         raise RuntimeError(f"No diagonal rows found for {name} in {store.root}")
 
-    seen = {category: 0 for category in CATEGORY_ORDER}
-    rng = random.Random(seed)
+    rng = np.random.default_rng(seed)
+    samplers = {
+        category: BottomKSampler(sample_limit, rng) for category in CATEGORY_ORDER
+    }
 
     for boundary in boundaries:
-        left = boundary - window_bp
-        right = boundary + window_bp
+        for category, values in iter_boundary_r2(
+            boundary=boundary,
+            partitions=partitions,
+            store=store,
+            name=name,
+            window_bp=window_bp,
+            diag_pos=diag_pos,
+            diag_val=diag_val,
+            chunk_rows=chunk_rows,
+        ):
+            samplers[category].extend(values)
+    return {category: samplers[category].sample() for category in CATEGORY_ORDER}
 
-        for p_index, (start, end) in enumerate(partitions):
-            if end < left or start > right:
-                continue
-            lower_min, lower_max, include_lower_min = owned_bounds(
-                partitions, p_index, left, right
-            )
-            if lower_min > right or lower_max < left:
-                continue
-            path = store.partition_path(name, start, end)
-            with open_covariance_reader(path, start, end) as reader:
-                for chunk in reader.iter_owned_rows(
-                    lower_min,
-                    lower_max,
-                    left,
-                    right,
-                    chunk_rows,
-                    include_lower_min=include_lower_min,
+
+def iter_boundary_r2(
+    *,
+    boundary: int,
+    partitions: list[tuple[int, int]],
+    store: CovarianceStore,
+    name: str,
+    window_bp: int,
+    diag_pos: np.ndarray,
+    diag_val: np.ndarray,
+    chunk_rows: int = 1_000_000,
+) -> Iterator[tuple[str, np.ndarray]]:
+    """Yield ``(category, r2_values)`` batches for one boundary's window.
+
+    Each pair is read from the one partition that owns it, and only rows
+    whose ``lo`` falls inside ``[boundary - window_bp, boundary + window_bp]``
+    are read from disk.
+    """
+    left = boundary - window_bp
+    right = boundary + window_bp
+    # Every position looked up below lies in [left, right]; searching only
+    # that slice of the chromosome-wide diagonal keeps lookups cache-resident.
+    d0 = int(np.searchsorted(diag_pos, left, side="left"))
+    d1 = int(np.searchsorted(diag_pos, right, side="right"))
+    win_pos = diag_pos[d0:d1]
+    win_val = diag_val[d0:d1]
+
+    for p_index, (start, end) in enumerate(partitions):
+        if end < left or start > right:
+            continue
+        lower_min, lower_max, include_lower_min = owned_bounds(
+            partitions, p_index, left, right
+        )
+        if lower_min > right or lower_max < left:
+            continue
+        lower_min, lower_max, include_lower_min = window_row_bounds(
+            lower_min, lower_max, include_lower_min, left, right
+        )
+        path = store.partition_path(name, start, end)
+        with open_covariance_reader(path, start, end) as reader:
+            for chunk in reader.iter_owned_rows(
+                lower_min,
+                lower_max,
+                left,
+                right,
+                chunk_rows,
+                include_lower_min=include_lower_min,
+            ):
+                # r^2 once per chunk, then split by category (the same
+                # classification as category_masks).
+                lo, hi = chunk.lo, chunk.hi
+                pairs = (lo >= left) & (hi <= right) & (lo < hi)
+                if not np.any(pairs):
+                    continue
+                lo, hi = lo[pairs], hi[pairs]
+                values, valid = r2_with_mask(
+                    lo, hi, chunk.shrink_ld[pairs], win_pos, win_val
+                )
+                hi_left = hi < boundary
+                lo_right = lo >= boundary
+                for category, mask in (
+                    ("left", hi_left),
+                    ("across", ~hi_left & ~lo_right),
+                    ("right", lo_right),
                 ):
-                    masks = category_masks(chunk.lo, chunk.hi, boundary, left, right)
-                    for category, mask in masks.items():
-                        if not np.any(mask):
-                            continue
-                        values = r2_for_pairs(
-                            chunk.lo[mask],
-                            chunk.hi[mask],
-                            chunk.shrink_ld[mask],
-                            diag_pos,
-                            diag_val,
-                        )
-                        if values.size:
-                            seen[category] = reservoir_extend(
-                                samples[category],
-                                values.tolist(),
-                                seen=seen[category],
-                                limit=sample_limit,
-                                rng=rng,
-                            )
-    return samples
+                    selected = values[mask & valid]
+                    if selected.size:
+                        yield category, selected
 
 
 def _configure_matplotlib_cache(path: Path) -> None:
