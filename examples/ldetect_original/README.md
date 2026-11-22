@@ -540,7 +540,7 @@ uv run python scripts/plot_profile_timeline.py \
   --output results/profiling/EUR-chr21-timeline
 ```
 
-`profile_run.py` requires the `dev` dependency group (`uv sync --group dev`,
+`profile_run.py` requires the `dev` dependency group (`uv sync --group dev --compile-bytecode`,
 for `psutil`) and polls the wrapped command's whole process tree -- covering
 every `ProcessPoolExecutor` worker and `tabix` subprocess it spawns, not just
 the top-level process -- so the trace reflects real peak usage across

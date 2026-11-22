@@ -19,6 +19,12 @@ uv run python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
 uv run python scripts/benchmark_legacy_covariance.py --warmups 1 --repeats 2
 ```
 
+For timing, install with `uv sync --group dev --compile-bytecode` (or set
+`UV_COMPILE_BYTECODE=1`) first. Otherwise the first command in a fresh checkout
+also pays about 30 s of import-time bytecode compilation, which is how the
+EUR chr21 clean run varied between 113 s and 151 s in
+`notes/logs/benchmark-figures-bcf-2026-11.md`.
+
 `uv run snakemake --cores 1` must run first — it prepares `ref/` and `work/vcf/`
 (downloaded reference intermediates plus the matching 1000G VCF interval) that
 both benchmark scripts require, and it also regenerates the exactness figures

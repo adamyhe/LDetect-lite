@@ -39,6 +39,9 @@ details and measurements for each optimization are in
   BCF (previously a plain `-Ob` conversion).
 
 ### Documentation
+- Install and benchmark instructions use `--compile-bytecode` (uv skips
+  bytecode compilation by default, adding ~30 s to the first run in a fresh
+  environment).
 - BCF benchmark figures on the exclusive EPYC 7702 node: toy chr2
   `calc-covariance` 3.876 s on `.vcf.gz` vs 3.642 s on GT-only BCF; EUR chr21
   `ldetect run` Step 2 29 s vs 19 s and 56.7 s vs 46.4 s end to end, with
