@@ -445,6 +445,16 @@ Each Step 2 worker returns its fragment directly as its process-pool result; the
 
 **Saved fragments for cached reruns** (`_util/vector_fragments.py`, `_collect_vector_fragments` in `_cli/cmd_run.py`). Originally the fast path applied only when every partition was freshly computed in the same run, so any rerun that reused the covariance cache (for example to try other breakpoint settings) paid the full Step 3 re-read, about 11 s on EUR chr21 versus about 1 s fused. Each fragment is now also saved next to its partition as `<chrom>.<start>.<end>.vector.npz` (written to a temporary file, then renamed). A saved fragment is reused only if the partition `.h5` still has the size and modification time recorded at save time, and the plan fields that shape a fragment (`end`, the next partition's start, the center-locus lower bound and its inclusiveness, `snp_first`, `snp_last`) and the format version all match. Otherwise only that partition's fragment is recomputed from its `.h5` with the same per-partition function Step 3 uses, and re-saved. Fresh, saved and recomputed fragments are byte-identical for the same partition, so any mix of them gives the Step 3 vector. Partitions deleted by `--force-covariance` or as invalid take their fragment with them, and `--delete-covariance-cache` removes the whole directory. The fragments are deliberately separate files rather than a group inside each `.h5`: existing caches gain them on their first rerun without any cache file being modified in place.
 
+Measured on the EUR chr21 cache (103 partitions, 1.9 GB; Slurm jobs 4141983 and 4142009 on cbsubscb16, AMD EPYC 7763, shared node, 4 workers; relative numbers only), cached `ldetect run` without the LD-neighborhood plot:
+
+| Cached rerun | Step 3 | Whole run |
+|---|---:|---:|
+| `--no-fused-vector` (Step 3 re-read) | ~11 s | 33.6-33.8 s |
+| No saved fragments yet (all 103 recomputed and saved) | ~10 s | 34.8-35.2 s |
+| Saved fragments | ~1 s | 24.0-24.2 s (4 runs) |
+
+The 103 fragments take 4.5 MB in total. Decompressed vectors, breakpoint JSON and BEDs were byte-identical across all four paths.
+
 **Exactness:** `tests/test_cmd_run_fused_vector.py` verifies the fused fragment path produces byte-identical vector output to the post-hoc `MatrixAnalysis.calc_diag_lean` read on real bgzip/tabix-indexed data, and that tee-ing through the sidecar does not change the persisted HDF5 partition at all. It also checks that a first run, a full cached rerun, a partial rerun, a deleted fragment and a touched partition file all reproduce the post-hoc vector; `tests/test_vector_fragments.py` covers the save/load checks. `tests/test_covariance_sidecars.py` covers the accumulator's own lifecycle, including the invalid-marking safety net.
 
 **CLI:** `--fused-vector`/`--no-fused-vector` on `ldetect run` (default: enabled). Requires the compact covariance cache (the sidecar only tees the compact single-pass write path) and the default `--matrix-backend array`; with `--covariance-cache full` or `--matrix-backend legacy` the normal Step 3 read runs instead, rather than erroring. `--matrix-workers` only sets the worker count for recomputing missing or stale fragments.

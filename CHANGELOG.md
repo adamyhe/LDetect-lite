@@ -18,8 +18,9 @@ details and measurements for each optimization are in
   the same helpers; its per-boundary TSV is unchanged.
 - `ldetect run` saves each partition's fused matrix-to-vector fragment next to
   its covariance file (`<chrom>.<start>.<end>.vector.npz`), so reruns that
-  reuse the covariance cache skip Step 3's re-read (on EUR chr21 that re-read
-  took about 11 s at 4 workers, the fused merge about 1 s). A fragment is reused only if its partition file and partition
+  reuse the covariance cache skip Step 3's re-read. On EUR chr21 at 4 workers
+  a cached rerun went from 33.7 s to 24.1 s (Step 3 ~11 s to ~1 s), with
+  byte-identical output; the 103 fragments take 4.5 MB. A fragment is reused only if its partition file and partition
   plan are unchanged; otherwise just that partition is recomputed. Partial
   reruns now use the fused path too, instead of re-reading every partition.
   The vector is byte-identical to Step 3's.
