@@ -20,10 +20,11 @@ derived quantity is the per-locus diagonal (``shrinkage._diag_values_impl``),
 a closed-form vectorized formula, not a second nested-loop kernel pass, and is
 unit-tested against the persisted diagonal for exact equality.
 
-The fragment is never written to disk: it travels back from the covariance
-worker process as an ordinary return value (small -- per-locus sums, not
-per-pair covariance) and is merged directly into the vector output in the
-parent process. There is no on-disk sidecar file.
+The fragment travels back from the covariance worker process as an ordinary
+return value (small -- per-locus sums, not per-pair covariance) and is merged
+into the vector output in the parent process. The parent also saves it next to
+the partition (``_util/vector_fragments.py``) so later runs that reuse the
+covariance cache can skip Step 3's re-read.
 """
 
 from __future__ import annotations

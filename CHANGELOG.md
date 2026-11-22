@@ -16,8 +16,18 @@ details and measurements for each optimization are in
   subset for a fixed seed, but the drawn values differ from earlier releases.
   `examples/MacDonald2022/scripts/plot_ld_neighborhood_separation.py` uses
   the same helpers; its per-boundary TSV is unchanged.
+- `ldetect run` saves each partition's fused matrix-to-vector fragment next to
+  its covariance file (`<chrom>.<start>.<end>.vector.npz`), so reruns that
+  reuse the covariance cache skip Step 3's re-read (on EUR chr21 that re-read
+  took about 11 s at 4 workers, the fused merge about 1 s). A fragment is reused only if its partition file and partition
+  plan are unchanged; otherwise just that partition is recomputed. Partial
+  reruns now use the fused path too, instead of re-reading every partition.
+  The vector is byte-identical to Step 3's.
 
 ### Changed
+- The fused-vector path now applies only with the default `--matrix-backend
+  array`. `--matrix-backend legacy` previously was silently ignored whenever
+  every partition was freshly computed.
 - The reproduction workflows (`examples/ldetect_original`,
   `examples/MacDonald2022`, `examples/ldetect_example`) now write their
   filtered reference panels as GT-only BCF (`bcftools annotate -x

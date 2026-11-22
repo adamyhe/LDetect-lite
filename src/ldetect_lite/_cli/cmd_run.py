@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         _DiagVectorPartitionPlan,
         _DiagVectorPartitionResult,
     )
+    from ldetect_lite.io.partitions import CovarianceStore
 
 _VALID_SUBSETS = ("fourier", "fourier_ls", "uniform", "uniform_ls")
 
@@ -205,12 +206,14 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
             "Build the correlation-sum vector during covariance generation "
             "(Step 2) by tee-ing each partition's row stream, instead of "
             "re-reading persisted partitions afterward (Step 3). Bit-exact "
-            "with the post-hoc read; skips Step 3's partition re-read "
-            "entirely when every partition is freshly computed this run. "
-            "Falls back to the normal Step 3 read otherwise (e.g. a resumed "
-            "run with skipped/cached partitions). Use --no-fused-vector to "
-            "always use the post-hoc Step 3 read, e.g. for diagnostics "
-            "(default: enabled)."
+            "with the post-hoc read. Each partition's fragment is also saved "
+            "next to its covariance file (<chrom>.<start>.<end>.vector.npz), "
+            "so reruns that reuse cached covariance skip Step 3's re-read "
+            "too; a fragment that is missing or no longer matches its "
+            "partition file is recomputed from that partition alone. "
+            "Requires --covariance-cache compact and --matrix-backend array. "
+            "Use --no-fused-vector to always use the post-hoc Step 3 read, "
+            "e.g. for diagnostics (default: enabled)."
         ),
     )
     p.add_argument(
@@ -374,27 +377,96 @@ def _missing_thread_cap_env_vars() -> list[str]:
     return [name for name in _THREAD_CAP_ENV_VARS if not os.environ.get(name)]
 
 
-def _fused_vector_ready(
-    fused_vector_flag: bool,
-    pending: list[tuple[int, int]],
+def _collect_vector_fragments(
+    *,
+    chrom: str,
+    store: CovarianceStore,
     partitions: list[tuple[int, int]],
-    vector_fragments: Mapping[tuple[int, int], object],
-) -> bool:
-    """Whether Step 2's fused-vector fragments can replace Step 3 entirely.
+    plans_by_bounds: Mapping[tuple[int, int], _DiagVectorPartitionPlan],
+    fresh: Mapping[tuple[int, int], _DiagVectorPartitionResult],
+    snp_first: int,
+    snp_last: int,
+    workers: int,
+) -> tuple[dict[tuple[int, int], _DiagVectorPartitionResult], dict[str, int]]:
+    """Gather one vector fragment per partition for the fused Step 3 merge.
 
-    Only true when every partition was freshly (re)computed this run --
-    otherwise some partitions have no fragment (skipped as already-valid
-    from a prior run) and Step 3's post-hoc read is the only way to get a
-    complete vector. Also false for any partition whose sidecar was marked
-    invalid (single-pass write fell back partway through). Sidesteps "some
-    partitions have fragments, some don't" entirely rather than half-solving
-    it.
+    Fragments come from, in order of preference: this run's Step 2 (*fresh*,
+    saved to disk for later reruns), a saved fragment that still matches its
+    partition file and plan, or a recomputation from that partition's
+    ``.h5``. All three are byte-identical for the same partition, so mixing
+    them gives the same vector as a full Step 3 read. Saving is best-effort:
+    a failed save only means the next rerun recomputes that fragment.
     """
-    return (
-        fused_vector_flag
-        and pending == partitions
-        and len(vector_fragments) == len(partitions)
+    from ldetect_lite._util.logging import log_msg
+    from ldetect_lite._util.vector_array import (
+        _compute_diag_vector_partition_hdf5_worker,
     )
+    from ldetect_lite._util.vector_fragments import (
+        load_vector_fragment,
+        save_vector_fragment,
+    )
+
+    def save(bounds: tuple[int, int], result: _DiagVectorPartitionResult) -> None:
+        try:
+            save_vector_fragment(
+                store.partition_path(chrom, *bounds),
+                result,
+                plan=plans_by_bounds[bounds],
+                snp_first=snp_first,
+                snp_last=snp_last,
+            )
+        except OSError as e:
+            log_msg(f"  Warning: could not save vector fragment for {bounds}: {e}")
+
+    fragments: dict[tuple[int, int], _DiagVectorPartitionResult] = {}
+    counts = {"fresh": 0, "saved": 0, "recomputed": 0}
+    missing: list[tuple[int, int]] = []
+    for bounds in partitions:
+        if bounds in fresh:
+            fragments[bounds] = fresh[bounds]
+            save(bounds, fresh[bounds])
+            counts["fresh"] += 1
+            continue
+        loaded = load_vector_fragment(
+            store.partition_path(chrom, *bounds),
+            plan=plans_by_bounds[bounds],
+            snp_first=snp_first,
+            snp_last=snp_last,
+        )
+        if loaded is not None:
+            fragments[bounds] = loaded
+            counts["saved"] += 1
+        else:
+            missing.append(bounds)
+
+    if missing:
+        task_args = [
+            (
+                chrom,
+                store.root,
+                plan.start,
+                plan.end,
+                plan.next_start,
+                snp_first,
+                snp_last,
+                plan.center_lower_bound,
+                plan.center_lower_inclusive,
+                plan.checkpoint,
+            )
+            for plan in (plans_by_bounds[bounds] for bounds in missing)
+        ]
+        if workers > 1 and len(missing) > 1:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                results = list(
+                    pool.map(_compute_diag_vector_partition_hdf5_worker, task_args)
+                )
+        else:
+            results = [_compute_diag_vector_partition_hdf5_worker(a) for a in task_args]
+        for bounds, result in zip(missing, results, strict=True):
+            fragments[bounds] = result
+            save(bounds, result)
+        counts["recomputed"] = len(missing)
+    return fragments, counts
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -403,6 +475,7 @@ def _run(args: argparse.Namespace) -> int:
     import ldetect_lite
     from ldetect_lite._util.logging import log_msg
     from ldetect_lite._util.memory import log_memory_checkpoint
+    from ldetect_lite._util.vector_fragments import remove_vector_fragment
     from ldetect_lite.io.bed import write_bed
     from ldetect_lite.io.partitions import CovarianceStore, read_partitions
     from ldetect_lite.matrix_analysis import MatrixAnalysis
@@ -477,6 +550,7 @@ def _run(args: argparse.Namespace) -> int:
         partition_path = store.partition_path(chrom, start, end)
         if args.force_covariance and partition_path.exists():
             partition_path.unlink()
+            remove_vector_fragment(partition_path)
             forced += 1
             pending.append((start, end))
             continue
@@ -488,6 +562,7 @@ def _run(args: argparse.Namespace) -> int:
         ):
             invalid += 1
             partition_path.unlink()
+            remove_vector_fragment(partition_path)
             pending.append((start, end))
     skipped = len(partitions) - len(pending)
     if skipped:
@@ -509,7 +584,7 @@ def _run(args: argparse.Namespace) -> int:
     # tees the compact single-pass write path); silently unavailable
     # otherwise rather than erroring, since --fused-vector defaults to on.
     vector_plans_by_bounds: dict[tuple[int, int], _DiagVectorPartitionPlan] = {}
-    if args.fused_vector and compact_output:
+    if args.fused_vector and compact_output and args.matrix_backend == "array":
         from ldetect_lite._util.vector_array import _plan_diag_vector_partitions
 
         plans = _plan_diag_vector_partitions(partitions, snp_first, snp_last)
@@ -559,11 +634,23 @@ def _run(args: argparse.Namespace) -> int:
     # Step 3: Matrix → vector                                             #
     # ------------------------------------------------------------------ #
     vector_path = output_dir / f"vector-{chrom}.txt.gz"
-    if _fused_vector_ready(
-        bool(vector_plans_by_bounds), pending, partitions, vector_fragments
-    ):
-        log_msg("Step 3: Writing vector from fused direct-vector sidecar fragments")
+    if vector_plans_by_bounds:
         log_memory_checkpoint("step3_start")
+        fragments, counts = _collect_vector_fragments(
+            chrom=chrom,
+            store=store,
+            partitions=partitions,
+            plans_by_bounds=vector_plans_by_bounds,
+            fresh=vector_fragments,
+            snp_first=snp_first,
+            snp_last=snp_last,
+            workers=matrix_workers,
+        )
+        log_msg(
+            "Step 3: Writing vector from fused fragments "
+            f"(fresh={counts['fresh']}, saved={counts['saved']}, "
+            f"recomputed={counts['recomputed']})"
+        )
         from ldetect_lite._util.vector_array import _merge_diag_vector_partition_result
 
         vector_path.unlink(missing_ok=True)
@@ -577,7 +664,7 @@ def _run(args: argparse.Namespace) -> int:
         current_locus = snp_first
         for start, end in partitions:
             current_locus = _merge_diag_vector_partition_result(
-                result=vector_fragments[(start, end)],
+                result=fragments[(start, end)],
                 snp_first=snp_first,
                 snp_last=snp_last,
                 current_locus=current_locus,
@@ -585,17 +672,12 @@ def _run(args: argparse.Namespace) -> int:
                 out_path=vector_path,
                 parent_profile=parent_profile,
             )
-        if args.matrix_workers is not None:
-            log_msg(
-                "  --matrix-workers ignored (fused-vector path skips Step 3's "
-                "worker pool)"
-            )
         log_memory_checkpoint("step3_end")
     else:
         if args.fused_vector and compact_output:
             log_msg(
-                "  --fused-vector requested but not all partitions were freshly "
-                "computed this run; falling back to Step 3"
+                "  --fused-vector not used (requires --matrix-backend array "
+                "and a matching partition plan); running Step 3"
             )
         log_msg(
             "Step 3: Converting matrix to vector "
