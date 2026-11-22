@@ -20,6 +20,7 @@ Internal working notes — not the polished public documentation (that's `README
   - `bitpacked-ld-kernel.md` — raw bitpacked popcount LD kernel log (`--ld-kernel bitpacked`), toy-scale validation history, and genome-scale diagnostics.
   - `step2-covariance-profiling-2026-11.md` — dated log behind `findings/step2-covariance-profiling.md`: job-by-job measurements, A/B runs, cache prototype, scaling.
   - `step4-profiling-2026-11.md` — Step 4 phase timings and cProfile on EUR chr21, the crossing-first metric A/B (optimizations #21), remaining local-search/filter costs, and the node-scratch-wipe incident.
+  - `benchmark-figures-bcf-2026-11.md` — `.vcf.gz` vs GT-only BCF on the same node: toy chr2 covariance, EUR chr21 serialized runs with whole-process-tree memory sampling, the main workflow on BCF, and two harness bugs found along the way (concurrent Snakemake runs, `--forcerun` swallowing the target).
   - `benchmark-figures-0.5.3-2026-11.md` — v0.5.3 re-measurement of the original-LDetect vs ldetect-lite figures (toy chr2 + full EUR chr21) on an exclusive AMD EPYC 7702 node, with a shared-node comparison run, protocol notes and the chr21 legacy-downstream 2-boundary difference.
 
 The performance-optimization counterpart to this directory, `docs/optimizations.md`, lives outside `notes/` because it's human-facing reference documentation, not an internal working note.

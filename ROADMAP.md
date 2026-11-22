@@ -45,8 +45,8 @@ on all 22 autosomes, with CPU-seconds as the main metric.
 
 ### BCF benchmark figures
 
-- Re-measure the toy chr2 covariance and EUR chr21 figures with GT-only BCF
-  input, plus the one-time conversion cost (Slurm job 4124619, pending).
+- Done: toy chr2 covariance and EUR chr21 figures on GT-only BCF, plus the
+  one-time conversion cost (`notes/logs/benchmark-figures-bcf-2026-11.md`).
 - Rerun the replications genome-wide on BCF to confirm byte-identical blocks.
 
 ## Planned

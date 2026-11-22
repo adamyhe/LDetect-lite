@@ -43,6 +43,20 @@ Current measured command-level timings on the example interval (`ldetect-lite` v
 | `find-minima`      |                        21.036 |                       1.646 |  12.78x |
 | `extract-bpoints`  |                         0.916 |                       0.272 |   3.38x |
 
+`calc-covariance` with a GT-only BCF panel (`ldetect-lite` with BCF support from
+the `bcf-replications` branch, no `src/` changes since v0.5.3; same host and
+pinning, Slurm job 4128926; the tracked `timings-calc-covariance.svg` comes from
+this run):
+
+| Input                       | Original LDetect mean seconds | `ldetect-lite` mean seconds | Speedup |
+| --------------------------- | ----------------------------: | --------------------------: | ------: |
+| `.vcf.gz`                   |                       203.128 |                       3.876 |  52.40x |
+| GT-only `.bcf`              |                       203.128 |                       3.642 |  55.78x |
+| One-time `.bcf` conversion  |                               |                       0.142 |         |
+
+On this 100 kb interval BCF is only 1.06x faster than `.vcf.gz`, because fixed
+startup dominates. At chromosome scale the gain is larger (see below).
+
 The full EUR chr21 timing benchmark is generated from the
 `examples/ldetect_original/` reproduction workflow. It compares the vendored
 legacy downstream LDetect scripts against `ldetect-lite` on the same staged
@@ -73,6 +87,17 @@ outputs lived on node-local `/workdir` scratch. Original LDetect and
   covariance converted from `ldetect-lite`'s, so this ratio is conservative.
   With that covariance already cached, the same `ldetect run` took 99.12 s
   (91.0x).
+- **GT-only BCF on chr21** (Slurm jobs 4141431 and 4141689, same host and
+  pinning). Warm, alternating `.vcf.gz`/BCF `ldetect run`s at `workers=4`:
+  Step 2 went from 29 s to 19 s (1.5x) and the full run from 56.7 s to 46.4 s
+  (1.22x), with byte-identical BEDs. The main reproduction workflow, which now
+  writes GT-only BCF panels, took 99.07 s with covariance cached (v0.5.3:
+  99.12 s, since Step 2 is the only format-dependent step). Its clean-run
+  total depends on how warm the checkout is: 113.28 s when other commands had
+  already run in the checkout, 150.78 s as the first command in a fresh one
+  (about 32 s of first-import startup). The 136.06 s headline above is kept
+  for the v0.5.3 `.vcf.gz` run. Raw log:
+  `notes/logs/benchmark-figures-bcf-2026-11.md`.
 - The chr21 `ldetect-lite` BED is byte-identical to the published Berisa &
   Pickrell EUR `fourier_ls` blocks. The legacy downstream scripts, run on the
   same covariance, place 2 of the 23 boundaries differently (see
@@ -296,7 +321,7 @@ Because cyvcf2's region-fetch API is format-agnostic given the right index (`.tb
 
 This also fixed an untested gap: previously, a requested individual missing from the VCF header silently produced empty output (every row dropped, no error). `calc_covariance` now raises `ValueError` naming every missing individual up front.
 
-**Measured impact:** chr21, EUR panel, full `ldetect run` pipeline. VCF.gz and BCF input (identical content) produced byte-identical output (vector sha256, breakpoints, BED boundaries all exact — 23/23 loci match), confirming BCF correctness at real chromosome scale. BCF input was also faster and lower-memory than VCF.gz: 168.9s vs. 189.2s wall-clock (~11% faster) and 4.21 GB vs. 5.99 GB peak RSS (~30% less), consistent with skipping gzip decompression in favor of BCF's binary encoding. For large reference panels, prefer `.bcf`/`.csi` input over `.vcf.gz`/`.tbi` where practical. *(Superseded for memory: that peak-RSS gap came from the pre-streaming covariance path of the time. With the current streaming/packed Step 2, peak RSS is the same for both inputs: about 530-545 MB on EUR chr21 at 1-8 workers, see the worker-scaling table in §13 / `notes/logs/step2-covariance-profiling-2026-11.md` §6. BCF is now recommended for speed, not memory.)*
+**Measured impact:** chr21, EUR panel, full `ldetect run` pipeline. VCF.gz and BCF input (identical content) produced byte-identical output (vector sha256, breakpoints, BED boundaries all exact — 23/23 loci match), confirming BCF correctness at real chromosome scale. BCF input was also faster and lower-memory than VCF.gz: 168.9s vs. 189.2s wall-clock (~11% faster) and 4.21 GB vs. 5.99 GB peak RSS (~30% less), consistent with skipping gzip decompression in favor of BCF's binary encoding. For large reference panels, prefer `.bcf`/`.csi` input over `.vcf.gz`/`.tbi` where practical. *(Superseded for memory: that peak-RSS gap came from the pre-streaming covariance path of the time. With the current streaming/packed Step 2, peak RSS is the same for both inputs: about 530-545 MB on EUR chr21 at 1-8 workers, see the worker-scaling table in §13 / `notes/logs/step2-covariance-profiling-2026-11.md` §6. Re-measured on 2026-11-22 with whole-process-tree sampling at 4 workers: summed PSS peaked at about 1.37 GB for both formats (one BCF repeat 1.53 GB) and the largest single process at 535 vs 549-574 MiB; see `notes/logs/benchmark-figures-bcf-2026-11.md`. BCF is now recommended for speed, not memory.)*
 
 **CLI:** `ldetect calc-covariance --reference-panel PATH --region CHROM:START-END` (direct indexed file); `--reference-panel` omitted reads from stdin instead, unchanged from before.
 

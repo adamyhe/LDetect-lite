@@ -1,10 +1,12 @@
 # LDetect Example Benchmarks
 
-**Findings summary (current as of 2026-11-13).** Distilled for human review
+**Findings summary (current as of 2026-11-22).** Distilled for human review
 and manuscript drafting. Full process notes: `notes/logs/ldetect-example-benchmarking.md`
 (2026-07-12 methodology notes). The timings below were re-measured for v0.5.3 on
 2026-11-12 on an exclusive AMD EPYC 7702 node; raw log:
-`notes/logs/benchmark-figures-0.5.3-2026-11.md`.
+`notes/logs/benchmark-figures-0.5.3-2026-11.md`. GT-only BCF timings were added
+on 2026-11-21/22 on the same node; raw log:
+`notes/logs/benchmark-figures-bcf-2026-11.md`.
 
 ## Scope
 
@@ -64,6 +66,33 @@ writes the full schema), so the default CLI invocation and production
 `ldetect run` write the same compact schema. This corrects an earlier version
 of this finding, which reported an 18.21 MB full-schema LDetect-lite output
 from before that coupling existed.
+
+## GT-only BCF input
+
+Same host and pinning (Slurm jobs 4128926, 4141431, 4141689).
+
+| Measurement | `.vcf.gz` | GT-only BCF |
+|---|---:|---:|
+| Toy chr2 `calc-covariance`, mean s (original LDetect 203.128 s) | 3.876 (52.40x) | 3.642 (55.78x) |
+| EUR chr21 `ldetect run`, Step 2 s (`workers=4`, warm) | 29 | 19 |
+| EUR chr21 `ldetect run`, wall s (2 repeats each) | 56.7 | 46.4 |
+| EUR chr21 summed PSS peak, whole process tree | ~1.37 GB | ~1.37-1.53 GB |
+| EUR chr21 largest single process | 535 MiB | 549-574 MiB |
+| Filtered EUR chr21 panel size | 334 MB | 12 MB |
+
+- The one-time toy conversion took 0.142 s.
+- Outputs are identical: toy covariance to 2.78e-17 with exact positions;
+  chr21 vectors (sha256), breakpoints and BEDs byte-identical.
+- BCF speeds up only Step 2 (genotype decoding). On the toy interval startup
+  dominates, so the gain is 1.06x; on chr21 it is 1.5x for Step 2 and 1.22x
+  end to end.
+- Peak memory does not improve. The older "~30% less memory" BCF result
+  predates the streaming Step 2.
+- With covariance cached, the chr21 main workflow took 99.07 s, matching
+  v0.5.3's 99.12 s, as expected since only Step 2 reads the panel.
+- For manuscript use, quote the chr21 Step 2 and end-to-end figures, not the
+  main-workflow clean-run total, which varied from 113 s to 151 s with how warm
+  the checkout was (first-import startup).
 
 ## Exactness status
 

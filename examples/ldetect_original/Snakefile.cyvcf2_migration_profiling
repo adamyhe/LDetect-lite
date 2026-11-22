@@ -28,6 +28,11 @@ Usage:
     uv run snakemake -s Snakefile.cyvcf2_migration_profiling --cores 4
     uv run snakemake -s Snakefile.cyvcf2_migration_profiling --cores 8 \
         --config profiling_chromosomes='[21,22,20]'
+
+For timings, keep --cores equal to `workers` (default 4): the run rule uses
+`threads: workers`, so a larger --cores runs the vcf and bcf jobs at the same
+time and both timings are contended. The benchmark's max_rss is a coarse,
+summed-RSS sample; see notes/logs/benchmark-figures-bcf-2026-11.md.
 """
 
 from pathlib import Path
