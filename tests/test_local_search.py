@@ -22,6 +22,7 @@ from ldetect_lite.local_search import (
     _iter_hdf5_canonical_segment_rows,
     _materialize_canonical_row_stream,
     _open_hdf5_reader_pool,
+    _PositionIndex,
     _segment_rows_from_hdf5_partitions,
     local_search_hdf5_partition,
 )
@@ -514,6 +515,49 @@ def test_first_seen_pair_filter_matches_set_reference(
             )
             np.testing.assert_array_equal(pairs.mask(lo, hi), expected)
             reference.update(zip(lo.tolist(), hi.tolist(), strict=True))
+
+
+@pytest.mark.parametrize("offset", [0, 1 << 33])
+def test_first_seen_pair_filter_forget_below_drops_only_lower_pairs(
+    offset: int,
+) -> None:
+    pairs = _FirstSeenPairFilter()
+    lo = np.array([10, 20, 20, 30], dtype=np.int64) + offset
+    hi = np.array([15, 25, 40, 30], dtype=np.int64) + offset
+    pairs.mask(lo, hi)
+
+    pairs.forget_below(20 + offset)
+
+    # (10, 15) was forgotten, so it is kept again; the rest are still seen.
+    np.testing.assert_array_equal(
+        pairs.mask(lo, hi), np.array([True, False, False, False])
+    )
+    pairs.forget_below(np.iinfo(np.int64).max)
+    np.testing.assert_array_equal(pairs.mask(lo, hi), np.ones(4, dtype=bool))
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [
+        np.array([5, 9, 10, 40, 41], dtype=np.int32),  # dense table
+        np.array([5, 9, 1 << 30], dtype=np.int64),  # span too wide
+        np.array([5, 9, 9, 40], dtype=np.int64),  # not strictly increasing
+        np.array([], dtype=np.int64),
+    ],
+)
+def test_position_index_matches_searchsorted(positions: np.ndarray) -> None:
+    values = np.array([0, 5, 6, 9, 10, 39, 40, 41, 42, 1 << 30, -3], dtype=np.int64)
+    index, found = _PositionIndex(positions).lookup(values)
+
+    if positions.size:
+        expected_index = np.searchsorted(positions, values)
+        safe = np.minimum(expected_index, positions.size - 1)
+        expected_found = (expected_index < positions.size) & (positions[safe] == values)
+    else:
+        expected_index = np.zeros(values.size, dtype=np.int64)
+        expected_found = np.zeros(values.size, dtype=bool)
+    np.testing.assert_array_equal(found, expected_found)
+    np.testing.assert_array_equal(index[found], expected_index[expected_found])
 
 
 def test_dense_local_search_accumulator_sums_known_loci() -> None:
