@@ -535,6 +535,24 @@ A cProfile of serial `find-minima` on EUR chr21 (83.6 s) put 31 s in the two str
 
 **CLI:** no change.
 
+## 22. Vectorized LD-neighborhood sampling (`ld_neighborhood.py`)
+
+**Affected code:** `BottomKSampler`, `iter_boundary_r2`, `window_row_bounds`, `r2_with_mask` and `chromosome_separation_samples` in `src/ldetect_lite/ld_neighborhood.py`; `examples/MacDonald2022/scripts/plot_ld_neighborhood_separation.py` now uses the same helpers.
+
+**Problem:** `ldetect run --generate-ld-neighborhood-plot`, which the reproduction Snakefiles always request, spent about 62-71 s on EUR chr21, more than Steps 2 and 4 combined. The sampler converted every in-window r² value to a Python list and ran a per-value reservoir loop (~0.6 µs/value). Each boundary also read every owned row of each overlapping partition, not just the rows inside its window, and r² was looked up per category against the whole chromosome's diagonal.
+
+**Fix:**
+
+- **Bottom-k sampling.** Every value gets an independent uniform key and the 200,000 values with the smallest keys are kept, using `np.argpartition` on buffered batches. This is the same distribution as reservoir sampling (a uniform random subset without replacement) and is deterministic for a seed. Once the sample is full, values whose key is above the current cut-off are dropped before buffering.
+- **Window-clipped reads.** Each partition's owned `lo` range is clipped to `[boundary - window, boundary + window]` before reading, so rows the window mask would drop are never read or decompressed.
+- **One r² pass per chunk.** r² is computed once per chunk against the window's slice of the diagonal (which stays cache-resident), then split into left/across/right.
+
+**Measured impact** (Slurm job 4141936, cbsubscb16, AMD EPYC 7763, shared node, 8 slots; relative numbers only): `chromosome_separation_samples` on the EUR chr21 cache with its 23 `fourier_ls` breakpoints took 50.87 s and 53.69 s with the old code and 7.57 s twice with the new code (**~6.9x**). Inside `ldetect run` the plot step took 8 s with covariance cached and 14 s on the clean run, against ~62-71 s on cbsubscb17 before. On a synthetic 8 Mb cache the speedup was ~4.8x.
+
+**Exactness:** the sample is still a uniform random subset, but different values are drawn than before (different random number generator), so the plot changes slightly. r² quartiles per category on chr21 matched the old code's to the printed precision. The MacDonald2022 script's per-boundary TSV, which summarizes every in-window pair rather than a sample, was byte-identical between old and new code on the synthetic cache, confirming the clipped reads and single r² pass see exactly the same pairs. `tests/test_ld_neighborhood.py` adds sampler tests (cap, determinism, equal inclusion odds under uneven chunking) and a brute-force comparison over overlapping partitions.
+
+**CLI:** no change.
+
 ## 23. Vectorized local-search precompute (`local_search.py`)
 
 **Affected code:** `_FirstSeenPairFilter`, `_PositionIndex`, `_add_hdf5_segment_values`, `_add_row_chunk_values` and `DenseLocalSearchAccumulator.lookup` in `src/ldetect_lite/local_search.py`
@@ -563,21 +581,3 @@ Peak RSS per process rose by about 50 MB (`--workers 4`: 355 MB to 412 MB; seria
 **CLI:** no change.
 
 ---
-
-## 22. Vectorized LD-neighborhood sampling (`ld_neighborhood.py`)
-
-**Affected code:** `BottomKSampler`, `iter_boundary_r2`, `window_row_bounds`, `r2_with_mask` and `chromosome_separation_samples` in `src/ldetect_lite/ld_neighborhood.py`; `examples/MacDonald2022/scripts/plot_ld_neighborhood_separation.py` now uses the same helpers.
-
-**Problem:** `ldetect run --generate-ld-neighborhood-plot`, which the reproduction Snakefiles always request, spent about 62-71 s on EUR chr21, more than Steps 2 and 4 combined. The sampler converted every in-window r² value to a Python list and ran a per-value reservoir loop (~0.6 µs/value). Each boundary also read every owned row of each overlapping partition, not just the rows inside its window, and r² was looked up per category against the whole chromosome's diagonal.
-
-**Fix:**
-
-- **Bottom-k sampling.** Every value gets an independent uniform key and the 200,000 values with the smallest keys are kept, using `np.argpartition` on buffered batches. This is the same distribution as reservoir sampling (a uniform random subset without replacement) and is deterministic for a seed. Once the sample is full, values whose key is above the current cut-off are dropped before buffering.
-- **Window-clipped reads.** Each partition's owned `lo` range is clipped to `[boundary - window, boundary + window]` before reading, so rows the window mask would drop are never read or decompressed.
-- **One r² pass per chunk.** r² is computed once per chunk against the window's slice of the diagonal (which stays cache-resident), then split into left/across/right.
-
-**Measured impact** (Slurm job 4141936, cbsubscb16, AMD EPYC 7763, shared node, 8 slots; relative numbers only): `chromosome_separation_samples` on the EUR chr21 cache with its 23 `fourier_ls` breakpoints took 50.87 s and 53.69 s with the old code and 7.57 s twice with the new code (**~6.9x**). Inside `ldetect run` the plot step took 8 s with covariance cached and 14 s on the clean run, against ~62-71 s on cbsubscb17 before. On a synthetic 8 Mb cache the speedup was ~4.8x.
-
-**Exactness:** the sample is still a uniform random subset, but different values are drawn than before (different random number generator), so the plot changes slightly. r² quartiles per category on chr21 matched the old code's to the printed precision. The MacDonald2022 script's per-boundary TSV, which summarizes every in-window pair rather than a sample, was byte-identical between old and new code on the synthetic cache, confirming the clipped reads and single r² pass see exactly the same pairs. `tests/test_ld_neighborhood.py` adds sampler tests (cap, determinism, equal inclusion odds under uneven chunking) and a brute-force comparison over overlapping partitions.
-
-**CLI:** no change.
