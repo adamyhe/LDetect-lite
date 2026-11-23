@@ -517,6 +517,18 @@ def test_first_seen_pair_filter_matches_set_reference(
             reference.update(zip(lo.tolist(), hi.tolist(), strict=True))
 
 
+def test_first_seen_pair_filter_remember_from_skips_unreachable_pairs() -> None:
+    pairs = _FirstSeenPairFilter()
+    lo = np.array([10, 20, 30], dtype=np.int32)
+    hi = np.array([15, 25, 35], dtype=np.int32)
+
+    np.testing.assert_array_equal(
+        pairs.mask(lo, hi, remember_from=20), np.ones(3, dtype=bool)
+    )
+    # (10, 15) was below remember_from, so it was not remembered.
+    np.testing.assert_array_equal(pairs.mask(lo, hi), np.array([True, False, False]))
+
+
 @pytest.mark.parametrize("offset", [0, 1 << 33])
 def test_first_seen_pair_filter_forget_below_drops_only_lower_pairs(
     offset: int,

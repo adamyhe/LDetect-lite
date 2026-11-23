@@ -657,9 +657,10 @@ def _add_hdf5_segment_values(
     # A pair kept from one partition can only repeat in a later partition
     # whose rows reach that pair's ``lo``.  ``later_min_lo[j]`` is the smallest
     # ``lo`` of partitions j..end (``loci`` is each partition's sorted ``lo``
-    # index), so before reading partition j the filter forgets kept pairs
-    # below it.  Kept-pair memory then tracks partition overlaps, not the
-    # whole segment.
+    # index).  Partition j remembers only kept pairs at or above
+    # ``later_min_lo[j + 1]``, and the filter forgets pairs below
+    # ``later_min_lo[j]`` before reading it, so kept-pair memory tracks
+    # partition overlaps, not the whole segment.
     later_min_lo = [_NO_LATER_LO] * (len(active_partitions) + 1)
     for index in range(len(active_partitions) - 1, -1, -1):
         loci = active_partitions[index].loci
@@ -704,7 +705,9 @@ def _add_hdf5_segment_values(
             row_shrink = chunk.shrink_ld[eligible]
 
             dedup_start = time.perf_counter()
-            first_seen = first_seen_pairs.mask(row_lo, row_hi)
+            first_seen = first_seen_pairs.mask(
+                row_lo, row_hi, remember_from=later_min_lo[partition_index + 1]
+            )
             if stats is not None:
                 stats.dedup_seconds += time.perf_counter() - dedup_start
                 stats.duplicate_rows_skipped += int(
@@ -741,9 +744,12 @@ _NO_LATER_LO = np.iinfo(np.int64).max
 class _FirstSeenPairFilter:
     """First-seen-wins filter for physical ``(lo, hi)`` pairs across chunks.
 
-    A row is kept unless the same pair was kept from an earlier chunk.  Rows
-    within one chunk are assumed unique, as before: the HDF5 writer stores
-    canonical unique rows per partition and a chunk never spans partitions.
+    A row is kept unless the same pair was kept from an earlier chunk.  Every
+    HDF5 writer enforces rows sorted by ``(lo, hi)`` with no duplicates within
+    a partition (``_validate_canonical_sorted_unique``), so pairs only repeat
+    across partitions.  Callers therefore pass ``remember_from`` (the smallest
+    ``lo`` any later partition holds) and only pairs a later partition can
+    reach are remembered, which keeps the kept-pair set to partition overlaps.
 
     Kept pairs live in one sorted key array, so each chunk costs a vectorized
     range test plus a ``searchsorted`` over the rows that could repeat, instead
@@ -784,8 +790,14 @@ class _FirstSeenPairFilter:
             cut = np.searchsorted(seen, np.uint64(lo_bound) << np.uint64(32))
             self._seen = seen[cut:]
 
-    def mask(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
-        """Return the rows of this chunk to keep, and remember them."""
+    def mask(
+        self, lo: np.ndarray, hi: np.ndarray, *, remember_from: int | None = None
+    ) -> np.ndarray:
+        """Return the rows of this chunk to keep, and remember them.
+
+        With *remember_from*, only kept rows with ``lo >= remember_from`` are
+        remembered; ``None`` remembers every kept row.
+        """
         if lo.size == 0:
             return np.ones(0, dtype=bool)
         if not self._wide and (
@@ -807,10 +819,13 @@ class _FirstSeenPairFilter:
                 candidates = keys[maybe]
                 found = np.minimum(np.searchsorted(seen, candidates), seen.size - 1)
                 keep[maybe] = seen[found] != candidates
-            new_keys = keys[keep] if not keep.all() else keys
-            self._seen = np.sort(np.concatenate((seen, new_keys)), kind="stable")
-        else:
-            self._seen = np.sort(keys, kind="stable")
+        remember = keep if remember_from is None else keep & (lo >= remember_from)
+        if not remember.any():
+            return keep
+        new_keys = keys if remember.all() else keys[remember]
+        if seen.size:
+            new_keys = np.concatenate((seen, new_keys))
+        self._seen = np.sort(new_keys, kind="stable")
         return keep
 
 
