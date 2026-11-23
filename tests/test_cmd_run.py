@@ -68,6 +68,18 @@ def test_run_all_breakpoint_subsets_preserves_full_output() -> None:
     assert _breakpoint_subsets_for_run("fourier_ls", True) is None
 
 
+def test_run_all_breakpoint_subsets_keeps_requested_dp() -> None:
+    # `dp` is not in the historical four-subset output, so it must be
+    # requested explicitly or Step 5 cannot find it in the JSON.
+    assert _breakpoint_subsets_for_run("dp", True) == {
+        "fourier",
+        "fourier_ls",
+        "uniform",
+        "uniform_ls",
+        "dp",
+    }
+
+
 def _parse_run_args(extra: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers()

@@ -150,9 +150,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[ty
         "--all-breakpoint-subsets",
         action="store_true",
         help=(
-            "Compute all four breakpoint subsets in the JSON output. By default, "
-            "only the subset requested by --subset and its dependencies are "
-            "computed to avoid unused local-search work."
+            "Compute all four LDetect breakpoint subsets (fourier, fourier_ls, "
+            "uniform, uniform_ls) in the JSON output, plus dp if --subset=dp. "
+            "By default, only the subset requested by --subset and its "
+            "dependencies are computed to avoid unused local-search work."
         ),
     )
     p.add_argument(
@@ -926,11 +927,17 @@ def _breakpoint_subsets_for_run(
 ) -> set[str] | None:
     """Return the breakpoint subset request passed from ``run`` to the pipeline.
 
-    ``None`` intentionally preserves the full historical JSON output; otherwise
-    ``run`` asks the pipeline to compute only the final BED subset and its
-    dependencies.
+    ``None`` intentionally preserves the full historical JSON output (the four
+    LDetect subsets); otherwise ``run`` asks the pipeline to compute only the
+    final BED subset and its dependencies. ``dp`` is never part of the
+    historical output, so ``--subset dp --all-breakpoint-subsets`` requests it
+    explicitly on top of the four, or Step 5 would find it missing.
     """
-    return None if all_breakpoint_subsets else {subset}
+    if not all_breakpoint_subsets:
+        return {subset}
+    if subset == "dp":
+        return {"fourier", "fourier_ls", "uniform", "uniform_ls", "dp"}
+    return None
 
 
 def _is_valid_covariance_partition(

@@ -66,7 +66,7 @@ Options:
 - `--n-snps-bw-bpoints N` — target mean number of SNPs between consecutive breakpoints; controls block granularity (default: 10000, following Berisa & Pickrell 2016). The target breakpoint count is `ceil(n_snps / N - 1)`. Mutually exclusive with `--n-bpoints`.
 - `--n-bpoints N` — directly specify the number of breakpoints, bypassing the `--n-snps-bw-bpoints` formula; useful when replicating a published analysis with a known block count
 - `--subset {fourier,fourier_ls,uniform,uniform_ls}` — which of the four breakpoint sets to write to the BED file (default: `fourier_ls`; see `docs/pipeline-steps.md` step 4)
-- `--all-breakpoint-subsets` — compute all four breakpoint sets in the JSON output. By default, `run` computes only the requested `--subset` and its dependencies to avoid unused local-search work.
+- `--all-breakpoint-subsets` — compute all four LDetect breakpoint sets in the JSON output (plus `dp` when `--subset dp`). By default, `run` computes only the requested `--subset` and its dependencies to avoid unused local-search work.
 - `--workers N` — parallel workers for the pipeline (default: 1); set to the number of available cores to speed up covariance calculation (step 2) and, unless overridden below, matrix-to-vector, local search, and metric scoring as well
 - `--matrix-workers N` — override parallel workers for matrix-to-vector partition processing (default: inherit `--workers`)
 - `--local-search-workers N` — override parallel workers for local search (default: inherit `--workers`). Higher values can multiply RAM use because each worker loads its own covariance window.
