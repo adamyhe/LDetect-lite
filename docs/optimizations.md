@@ -531,7 +531,34 @@ A cProfile of serial `find-minima` on EUR chr21 (83.6 s) put 31 s in the two str
 
 **Speed:** each metric pass on chr21 drops from ~16 s to ~6 s serial. `find-minima` on the cached chr21 covariance (cbsubscb19, `-c 8` = 4 cores + HT, two reps after warm-up) went from 80.7 s to 59.7 s serial (-26%) and from 20.8 s to 16.6 s at `--workers 8` (-20%).
 
-**What remains in Step 4:** local search (~36 s serial, ~8 s at 8 workers) is now the largest piece, split between per-row lookups/accumulation, overlap de-duplication (`_first_seen_pair_mask`) and re-reading overlapping partitions for each window. A fix needs a redesign of window assembly and must respect the multi-partition exactness constraint, so it was not attempted. Filter-width search (~13 s serial, 46 direct convolutions) could use FFT convolution, but that changes floating-point rounding and so possibly breakpoints. It would only be acceptable as an opt-in, non-exact mode.
+**What remains in Step 4:** local search (~36 s serial, ~8 s at 8 workers) is now the largest piece, split between per-row lookups/accumulation, overlap de-duplication (`_first_seen_pair_mask`) and re-reading overlapping partitions for each window. The lookups and de-duplication were later vectorized (section 23); re-reading overlapping partitions would need a redesign of window assembly that respects the multi-partition exactness constraint, and was not attempted. Filter-width search (~13 s serial, 46 direct convolutions) could use FFT convolution, but that changes floating-point rounding and so possibly breakpoints. It would only be acceptable as an opt-in, non-exact mode.
+
+**CLI:** no change.
+
+## 23. Vectorized local-search precompute (`local_search.py`)
+
+**Affected code:** `_FirstSeenPairFilter`, `_PositionIndex`, `_add_hdf5_segment_values`, `_add_row_chunk_values` and `DenseLocalSearchAccumulator.lookup` in `src/ldetect_lite/local_search.py`
+
+Local search re-reads every covariance row in each breakpoint's window (505M rows for the 23 Fourier breakpoints on EUR chr21) and sums r2 per locus. With `-v debug` logging, serial `find-minima --subset fourier_ls` on the cached chr21 covariance spent 38 s in this precompute. Three parts were Python- or binary-search-bound:
+
+- **Overlap de-duplication (8.8 s).** Pairs in overlapping partitions appear in both, and the first one read wins (99M of the 505M rows are duplicates). The old `_first_seen_pair_mask` looped over each distinct `lo` in Python, with one `np.isin` and one `np.union1d` per locus. `_FirstSeenPairFilter` keeps the kept pairs as one sorted key array (`lo` and `hi` packed into a `uint64`, or 16-byte keys if a position needs more than 32 bits). Each chunk then costs a range test plus one `searchsorted`. HDF5 writers enforce sorted unique `(lo, hi)` rows within a partition, so pairs only repeat across partitions. The filter therefore keeps only the pairs some later partition can reach (`lo` at or past that partition's first locus) and drops the rest before reading each partition.
+- **Diagonal and accumulator lookups (9.2 s + 7.5 s).** Each kept row looked up both endpoints in the segment diagonal and in the accumulator's loci with `np.searchsorted`. The `hi` endpoints arrive in no particular order, so the binary search's cache misses dominate. `_PositionIndex` builds a dense `int32` position-to-index table over the positions' span, so each lookup becomes one gather. The table is used only up to 8M bp (32 MiB) and only when positions are strictly increasing; otherwise it falls back to `searchsorted`. The in-memory (cached) local-search path now shares `_add_row_chunk_values` instead of repeating it inline.
+
+**Exactness:** the same rows are kept, normalized and summed in the same order, so the breakpoint JSON is byte-identical. Unit tests check the filter against a Python `set` reference over random unsorted chunks, including positions past 32 bits. They also check `_PositionIndex` against `searchsorted` for dense, too-wide, non-increasing and empty inputs. Existing tests already compared duplicate pairs across partitions against the legacy path. On EUR chr21, the `fourier_ls` and all-subset JSONs were byte-identical to `main` in every run.
+
+**Speed:** cached EUR chr21 covariance on a shared AMD EPYC 7763 node (cbsubscb16, 4 cores + HT, `-v debug`, two alternating reps; relative numbers only):
+
+| `find-minima` | before | after |
+|---|---:|---:|
+| Local search precompute, 1 worker (sum over breakpoints) | 38.1 s | 21.0 s |
+| - de-duplication | 8.8 s | 4.1 s |
+| - diagonal normalize | 9.2 s | 4.0 s |
+| - accumulator lookup | 7.5 s | 1.4 s |
+| Local search, `--workers 4` | 13.1-13.2 s | 9.2-9.4 s |
+| `--subset fourier_ls`, `--workers 4`, whole run | 23.3 s | 19.4-19.7 s |
+| All subsets, `--workers 4`, whole run | 41.7 s | 33.3 s |
+
+Peak RSS per process rose by about 50 MB (`--workers 4`: 355 MB to 412 MB; serial: 475-482 MB to 526-529 MB), from the dense lookup tables and the kept-pair keys. HDF5 reads (~6 s serial) are now the largest single part of the precompute.
 
 **CLI:** no change.
 
