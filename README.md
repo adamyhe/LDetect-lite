@@ -17,8 +17,10 @@ pip install ldetect-lite
 Or, with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install ldetect-lite
+uv tool install --compile-bytecode ldetect-lite
 ```
+
+`--compile-bytecode` is optional but recommended: uv skips bytecode compilation by default, so without it the first `ldetect` run in a fresh environment spends extra time compiling NumPy, SciPy, Numba and matplotlib on import (about 30 s on a cluster node). `pip install` already compiles. In a uv-managed checkout, use `uv sync --compile-bytecode` or set `UV_COMPILE_BYTECODE=1`.
 
 This installs three equivalent CLI entry points — `ldetect-lite`, `ldetect`, and `ldl` — so pick whichever is most convenient; examples below use `ldetect`.
 

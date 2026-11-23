@@ -7,7 +7,35 @@ details and measurements for each optimization are in
 
 ## [Unreleased]
 
+### Performance
+- `--generate-ld-neighborhood-plot`: the r² sampler is vectorized (bottom-k
+  sampling with NumPy instead of a per-value Python reservoir loop), each
+  boundary reads only the covariance rows inside its window, and r² is
+  computed once per chunk against the window's slice of the diagonal. On the
+  EUR chr21 cache the sampling went from ~51-54 s to 7.6 s (~6.9x). The
+  sample is still a uniform random subset for a fixed seed, but the drawn
+  values differ from earlier releases.
+  `examples/MacDonald2022/scripts/plot_ld_neighborhood_separation.py` uses
+  the same helpers; its per-boundary TSV is unchanged.
+- `ldetect run` saves each partition's fused matrix-to-vector fragment next to
+  its covariance file (`<chrom>.<start>.<end>.vector.npz`), so reruns that
+  reuse the covariance cache skip Step 3's re-read. On EUR chr21 at 4 workers
+  a cached rerun went from 33.7 s to 24.1 s (Step 3 ~11 s to ~1 s); the 103
+  fragments take 4.5 MB. A fragment is reused only if its partition file and
+  partition plan are unchanged; otherwise just that partition is recomputed.
+  Partial reruns now use the fused path too, instead of re-reading every
+  partition. The vector is byte-identical to Step 3's.
+- Step 4 local search: vectorized de-duplication of pairs from overlapping
+  partitions and dense position-to-index lookups replace a per-locus Python
+  loop and binary searches. On the cached EUR chr21 covariance, serial local
+  search went from 38 s to 21 s and `--workers 4` local search from 13.2 s to
+  9.3 s, with byte-identical breakpoints; peak RSS rises about 50 MB per
+  process.
+
 ### Changed
+- The fused-vector path now applies only with the default `--matrix-backend
+  array`. `--matrix-backend legacy` previously was silently ignored whenever
+  every partition was freshly computed.
 - The reproduction workflows (`examples/ldetect_original`,
   `examples/MacDonald2022`, `examples/ldetect_example`) now write their
   filtered reference panels as GT-only BCF (`bcftools annotate -x
@@ -29,6 +57,9 @@ details and measurements for each optimization are in
   BCF (previously a plain `-Ob` conversion).
 
 ### Documentation
+- Install and benchmark instructions use `--compile-bytecode` (uv skips
+  bytecode compilation by default, adding ~30 s to the first run in a fresh
+  environment).
 - BCF benchmark figures on the exclusive EPYC 7702 node: toy chr2
   `calc-covariance` 3.876 s on `.vcf.gz` vs 3.642 s on GT-only BCF; EUR chr21
   `ldetect run` Step 2 29 s vs 19 s and 56.7 s vs 46.4 s end to end, with

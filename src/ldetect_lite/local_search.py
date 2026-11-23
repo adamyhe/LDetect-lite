@@ -139,6 +139,59 @@ class _LocalSearchSegment:
     active_partitions: tuple[LocalSearchPartition | LocalSearchHDF5Partition, ...]
 
 
+# Largest position span given a dense lookup table (int32, so 32 MiB).
+_DENSE_POSITION_INDEX_MAX_SPAN = 1 << 23
+
+
+class _PositionIndex:
+    """Exact position -> index lookup into a sorted array of unique positions.
+
+    Equivalent to ``np.searchsorted`` plus an equality check, but when the
+    positions span at most ``_DENSE_POSITION_INDEX_MAX_SPAN`` base pairs it
+    builds a dense ``int32`` table over that span, so each lookup is one gather
+    instead of a binary search.  Covariance rows look up ``hi`` positions in no
+    particular order, where the binary search's cache misses dominate.
+    Positions that are not strictly increasing, or span too far, use
+    ``searchsorted``.
+    """
+
+    def __init__(self, positions: np.ndarray) -> None:
+        self.positions = np.asarray(positions)
+        self._base = 0
+        self._table: np.ndarray | None = None
+        size = self.positions.size
+        if size == 0 or size > np.iinfo(np.int32).max:
+            return
+        base = int(self.positions[0])
+        span = int(self.positions[-1]) - base + 1
+        if span > _DENSE_POSITION_INDEX_MAX_SPAN:
+            return
+        if size > 1 and not bool(np.all(self.positions[1:] > self.positions[:-1])):
+            return
+        table = np.full(span, -1, dtype=np.int32)
+        table[self.positions.astype(np.int64) - base] = np.arange(size, dtype=np.int32)
+        self._base = base
+        self._table = table
+
+    def lookup(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return ``(index, found)``; ``index`` is meaningful only where found."""
+        values = np.asarray(values)
+        size = self.positions.size
+        if size == 0 or values.size == 0:
+            return (
+                np.zeros(values.size, dtype=np.int64),
+                np.zeros(values.size, dtype=bool),
+            )
+        table = self._table
+        if table is not None:
+            offset = values.astype(np.int64) - self._base
+            in_range = (offset >= 0) & (offset < table.size)
+            index = table[np.where(in_range, offset, 0)]
+            return index, in_range & (index >= 0)
+        index = np.minimum(np.searchsorted(self.positions, values), size - 1)
+        return index, self.positions[index] == values
+
+
 class DenseLocalSearchAccumulator:
     """Dense per-breakpoint local-search vertical/horizontal sum accumulator."""
 
@@ -148,6 +201,7 @@ class DenseLocalSearchAccumulator:
         stats: LocalSearchPrecomputeStats | None = None,
     ) -> None:
         self.loci = np.asarray(loci, dtype=np.int64)
+        self._index = _PositionIndex(self.loci)
         self.sum_vert = np.zeros(self.loci.size, dtype=np.float64)
         self.sum_horiz = np.zeros(self.loci.size, dtype=np.float64)
         self.stats = stats
@@ -155,15 +209,7 @@ class DenseLocalSearchAccumulator:
     def lookup(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Return dense indexes for values present in this accumulator's loci."""
         lookup_start = time.perf_counter()
-        values = np.asarray(values)
-        if values.size == 0 or self.loci.size == 0:
-            idx = np.array([], dtype=np.int64)
-            keep = np.zeros(values.size, dtype=bool)
-        else:
-            idx = np.searchsorted(self.loci, values)
-            in_bounds = idx < self.loci.size
-            safe_idx = np.minimum(idx, self.loci.size - 1)
-            keep = in_bounds & (self.loci[safe_idx] == values)
+        idx, keep = self._index.lookup(values)
         if self.stats is not None:
             self.stats.dense_lookup_seconds += time.perf_counter() - lookup_start
         return idx[keep], keep
@@ -554,6 +600,7 @@ def _add_array_segment_values(
     if eligible_idx.size == 0:
         return
 
+    diag_index = _PositionIndex(diag_pos)
     for chunk_start in range(0, eligible_idx.size, chunk_size):
         chunk = eligible_idx[chunk_start : chunk_start + chunk_size]
         row_lo = candidate_lo[chunk]
@@ -562,51 +609,15 @@ def _add_array_segment_values(
         if stats is not None:
             stats.chunks += 1
 
-        normalize_start = time.perf_counter()
-        diag_lo_idx = np.searchsorted(diag_pos, row_lo)
-        diag_hi_idx = np.searchsorted(diag_pos, row_hi)
-        has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
-        safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
-        safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
-        has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (
-            diag_pos[safe_hi_idx] == row_hi
+        _add_row_chunk_values(
+            row_lo,
+            row_hi,
+            row_shrink,
+            diag_index,
+            diag_val,
+            accumulator,
+            stats=stats,
         )
-        if not np.any(has_diag):
-            if stats is not None:
-                stats.normalize_seconds += time.perf_counter() - normalize_start
-            continue
-
-        row_lo = row_lo[has_diag]
-        row_hi = row_hi[has_diag]
-        row_shrink = row_shrink[has_diag]
-        diag_lo = diag_val[diag_lo_idx[has_diag]]
-        diag_hi = diag_val[diag_hi_idx[has_diag]]
-        positive = (diag_lo > 0.0) & (diag_hi > 0.0)
-        if not np.any(positive):
-            if stats is not None:
-                stats.normalize_seconds += time.perf_counter() - normalize_start
-            continue
-
-        row_lo = row_lo[positive]
-        row_hi = row_hi[positive]
-        r2 = (
-            row_shrink[positive]
-            * row_shrink[positive]
-            / (diag_lo[positive] * diag_hi[positive])
-        )
-        if stats is not None:
-            stats.normalized_rows += int(r2.size)
-            stats.normalize_seconds += time.perf_counter() - normalize_start
-
-        vertical_start = time.perf_counter()
-        accumulator.add_vertical(row_lo, r2)
-        if stats is not None:
-            stats.vertical_seconds += time.perf_counter() - vertical_start
-
-        horizontal_start = time.perf_counter()
-        accumulator.add_horizontal(row_hi, r2)
-        if stats is not None:
-            stats.horizontal_seconds += time.perf_counter() - horizontal_start
 
 
 def _add_hdf5_segment_values(
@@ -637,131 +648,205 @@ def _add_hdf5_segment_values(
 
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
-    seen_hi_by_lo: dict[int, np.ndarray] = {}
+    diag_index = _PositionIndex(diag_pos)
+    first_seen_pairs = _FirstSeenPairFilter()
     if stats is not None and readers_by_partition is not None:
         stats.hdf5_reader_reuse_count += len(active_partitions)
     if stats is not None:
         stats.hdf5_segment_partition_reads += len(active_partitions)
-    chunk_iter = _iter_hdf5_canonical_segment_rows(
-        active_partitions,
-        active_min_lo,
-        lo_min,
-        lo_max,
-        chunk_rows=chunk_rows,
-        readers_by_partition=readers_by_partition,
-    )
-    while True:
-        hdf5_start = time.perf_counter()
-        try:
-            chunk = next(chunk_iter)
-        except StopIteration:
-            break
-        if stats is not None:
-            stats.hdf5_read_seconds += time.perf_counter() - hdf5_start
-            stats.rows_read += int(chunk.lo.size)
-            stats.hdf5_read_calls += 1
-            stats.peak_chunk_rows = max(stats.peak_chunk_rows, int(chunk.lo.size))
+    # A pair kept from one partition can only repeat in a later partition
+    # whose rows reach that pair's ``lo``.  ``later_min_lo[j]`` is the smallest
+    # ``lo`` of partitions j..end (``loci`` is each partition's sorted ``lo``
+    # index).  Partition j remembers only kept pairs at or above
+    # ``later_min_lo[j + 1]``, and the filter forgets pairs below
+    # ``later_min_lo[j]`` before reading it, so kept-pair memory tracks
+    # partition overlaps, not the whole segment.
+    later_min_lo = [_NO_LATER_LO] * (len(active_partitions) + 1)
+    for index in range(len(active_partitions) - 1, -1, -1):
+        loci = active_partitions[index].loci
+        first = int(loci[0]) if loci.size else _NO_LATER_LO
+        later_min_lo[index] = min(first, later_min_lo[index + 1])
+    for partition_index, partition in enumerate(active_partitions):
+        first_seen_pairs.forget_below(later_min_lo[partition_index])
+        chunk_iter = _iter_hdf5_canonical_segment_rows(
+            [partition],
+            active_min_lo,
+            lo_min,
+            lo_max,
+            chunk_rows=chunk_rows,
+            readers_by_partition=readers_by_partition,
+        )
+        while True:
+            hdf5_start = time.perf_counter()
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            if stats is not None:
+                stats.hdf5_read_seconds += time.perf_counter() - hdf5_start
+                stats.rows_read += int(chunk.lo.size)
+                stats.hdf5_read_calls += 1
+                stats.peak_chunk_rows = max(stats.peak_chunk_rows, int(chunk.lo.size))
 
-        filter_start = time.perf_counter()
-        eligible = (chunk.lo <= snp_last) & (chunk.hi <= snp_top)
-        if include_snp_first:
-            eligible &= chunk.lo >= snp_first
-        else:
-            eligible &= chunk.lo > snp_first
-        if stats is not None:
-            stats.chunk_filter_seconds += time.perf_counter() - filter_start
-            stats.rows_after_filter += int(np.count_nonzero(eligible))
-        if not np.any(eligible):
-            continue
+            filter_start = time.perf_counter()
+            eligible = (chunk.lo <= snp_last) & (chunk.hi <= snp_top)
+            if include_snp_first:
+                eligible &= chunk.lo >= snp_first
+            else:
+                eligible &= chunk.lo > snp_first
+            if stats is not None:
+                stats.chunk_filter_seconds += time.perf_counter() - filter_start
+                stats.rows_after_filter += int(np.count_nonzero(eligible))
+            if not np.any(eligible):
+                continue
 
-        row_lo = chunk.lo[eligible]
-        row_hi = chunk.hi[eligible]
-        row_shrink = chunk.shrink_ld[eligible]
+            row_lo = chunk.lo[eligible]
+            row_hi = chunk.hi[eligible]
+            row_shrink = chunk.shrink_ld[eligible]
 
-        dedup_start = time.perf_counter()
-        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
-        if stats is not None:
-            stats.dedup_seconds += time.perf_counter() - dedup_start
-            stats.duplicate_rows_skipped += int(
-                row_lo.size - np.count_nonzero(first_seen)
+            dedup_start = time.perf_counter()
+            first_seen = first_seen_pairs.mask(
+                row_lo, row_hi, remember_from=later_min_lo[partition_index + 1]
             )
-        if not np.any(first_seen):
-            continue
+            if stats is not None:
+                stats.dedup_seconds += time.perf_counter() - dedup_start
+                stats.duplicate_rows_skipped += int(
+                    row_lo.size - np.count_nonzero(first_seen)
+                )
+            if not np.any(first_seen):
+                continue
 
-        row_lo = row_lo[first_seen]
-        row_hi = row_hi[first_seen]
-        row_shrink = row_shrink[first_seen]
-        if stats is not None:
-            kept = int(row_lo.size)
-            stats.candidate_rows += kept
-            stats.eligible_rows += kept
-            stats.rows_after_dedup += kept
-            stats.chunks += 1
+            row_lo = row_lo[first_seen]
+            row_hi = row_hi[first_seen]
+            row_shrink = row_shrink[first_seen]
+            if stats is not None:
+                kept = int(row_lo.size)
+                stats.candidate_rows += kept
+                stats.eligible_rows += kept
+                stats.rows_after_dedup += kept
+                stats.chunks += 1
 
-        _add_row_chunk_values(
-            row_lo,
-            row_hi,
-            row_shrink,
-            diag_pos,
-            diag_val,
-            accumulator,
-            stats=stats,
-        )
+            _add_row_chunk_values(
+                row_lo,
+                row_hi,
+                row_shrink,
+                diag_index,
+                diag_val,
+                accumulator,
+                stats=stats,
+            )
 
 
-def _first_seen_pair_mask(
-    row_lo: np.ndarray,
-    row_hi: np.ndarray,
-    seen_hi_by_lo: dict[int, np.ndarray],
-    stats: LocalSearchPrecomputeStats | None = None,
-) -> np.ndarray:
-    """Return rows whose physical pair has not appeared in earlier chunks."""
-    keep = np.ones(row_lo.size, dtype=bool)
-    if row_lo.size == 0:
+_PACKED_PAIR_LIMIT = 1 << 32
+_NO_LATER_LO = np.iinfo(np.int64).max
+
+
+class _FirstSeenPairFilter:
+    """First-seen-wins filter for physical ``(lo, hi)`` pairs across chunks.
+
+    A row is kept unless the same pair was kept from an earlier chunk.  Every
+    HDF5 writer enforces rows sorted by ``(lo, hi)`` with no duplicates within
+    a partition (``_validate_canonical_sorted_unique``), so pairs only repeat
+    across partitions.  Callers therefore pass ``remember_from`` (the smallest
+    ``lo`` any later partition holds) and only pairs a later partition can
+    reach are remembered, which keeps the kept-pair set to partition overlaps.
+
+    Kept pairs live in one sorted key array, so each chunk costs a vectorized
+    range test plus a ``searchsorted`` over the rows that could repeat, instead
+    of one ``isin``/``union1d`` pair per distinct ``lo``.  Keys pack ``lo`` and
+    ``hi`` into one ``uint64`` while both fit in 32 bits, and switch (once,
+    converting the kept keys) to 16-byte keys if a larger position shows up.
+    """
+
+    def __init__(self) -> None:
+        self._seen = np.empty(0, dtype=np.uint64)
+        self._wide = False
+
+    def _keys(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        if self._wide:
+            pairs = np.empty((lo.size, 2), dtype=np.int64)
+            pairs[:, 0] = lo
+            pairs[:, 1] = hi
+            return pairs.view("V16").ravel()
+        return (lo.astype(np.uint64) << np.uint64(32)) | hi.astype(np.uint64)
+
+    def _widen(self) -> None:
+        packed = self._seen
+        self._wide = True
+        lo = (packed >> np.uint64(32)).astype(np.int64)
+        hi = (packed & np.uint64(_PACKED_PAIR_LIMIT - 1)).astype(np.int64)
+        self._seen = np.sort(self._keys(lo, hi), kind="stable")
+
+    def forget_below(self, lo_bound: int) -> None:
+        """Drop kept pairs with ``lo < lo_bound``; no later row can repeat them."""
+        seen = self._seen
+        if seen.size == 0:
+            return
+        if self._wide:
+            self._seen = seen[seen.view(np.int64)[0::2] >= lo_bound]
+        elif lo_bound >= _PACKED_PAIR_LIMIT:
+            self._seen = seen[:0]
+        elif lo_bound > 0:
+            cut = np.searchsorted(seen, np.uint64(lo_bound) << np.uint64(32))
+            self._seen = seen[cut:]
+
+    def mask(
+        self, lo: np.ndarray, hi: np.ndarray, *, remember_from: int | None = None
+    ) -> np.ndarray:
+        """Return the rows of this chunk to keep, and remember them.
+
+        With *remember_from*, only kept rows with ``lo >= remember_from`` are
+        remembered; ``None`` remembers every kept row.
+        """
+        if lo.size == 0:
+            return np.ones(0, dtype=bool)
+        if not self._wide and (
+            int(min(lo.min(), hi.min())) < 0
+            or int(max(lo.max(), hi.max())) >= _PACKED_PAIR_LIMIT
+        ):
+            self._widen()
+        keys = self._keys(lo, hi)
+        keep = np.ones(lo.size, dtype=bool)
+        seen = self._seen
+        if seen.size:
+            if self._wide:
+                # Void keys have no ordering ufuncs; look every row up.
+                maybe = np.arange(keys.size)
+            else:
+                # Only rows inside the kept key range can repeat a pair.
+                maybe = np.flatnonzero((keys >= seen[0]) & (keys <= seen[-1]))
+            if maybe.size:
+                candidates = keys[maybe]
+                found = np.minimum(np.searchsorted(seen, candidates), seen.size - 1)
+                keep[maybe] = seen[found] != candidates
+        remember = keep if remember_from is None else keep & (lo >= remember_from)
+        if not remember.any():
+            return keep
+        new_keys = keys if remember.all() else keys[remember]
+        if seen.size:
+            new_keys = np.concatenate((seen, new_keys))
+        self._seen = np.sort(new_keys, kind="stable")
         return keep
-
-    group_starts = np.concatenate(
-        (
-            np.array([0], dtype=np.int64),
-            np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
-        )
-    )
-    group_ends = np.concatenate((group_starts[1:], np.array([row_lo.size])))
-    for start, end in zip(group_starts, group_ends):
-        locus = int(row_lo[start])
-        hi_values = row_hi[start:end]
-        seen = seen_hi_by_lo.get(locus)
-        if seen is None:
-            seen_hi_by_lo[locus] = hi_values.copy()
-            continue
-
-        duplicates = np.isin(hi_values, seen, assume_unique=True)
-        if np.any(duplicates):
-            keep[start:end] = ~duplicates
-        new_hi = hi_values[~duplicates]
-        if new_hi.size:
-            seen_hi_by_lo[locus] = np.union1d(seen, new_hi)
-    return keep
 
 
 def _add_row_chunk_values(
     row_lo: np.ndarray,
     row_hi: np.ndarray,
     row_shrink: np.ndarray,
-    diag_pos: np.ndarray,
+    diag_index: _PositionIndex,
     diag_val: np.ndarray,
     accumulator: DenseLocalSearchAccumulator,
     *,
     stats: LocalSearchPrecomputeStats | None = None,
 ) -> None:
-    """Normalize one canonical row chunk and add local-search sums."""
+    """Normalize one canonical row chunk and add local-search sums.
+
+    *diag_index* indexes the diagonal positions that *diag_val* holds values for.
+    """
     normalize_start = time.perf_counter()
-    diag_lo_idx = np.searchsorted(diag_pos, row_lo)
-    diag_hi_idx = np.searchsorted(diag_pos, row_hi)
-    has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)
-    safe_lo_idx = np.minimum(diag_lo_idx, diag_pos.size - 1)
-    safe_hi_idx = np.minimum(diag_hi_idx, diag_pos.size - 1)
-    has_diag &= (diag_pos[safe_lo_idx] == row_lo) & (diag_pos[safe_hi_idx] == row_hi)
+    diag_lo_idx, lo_found = diag_index.lookup(row_lo)
+    diag_hi_idx, hi_found = diag_index.lookup(row_hi)
+    has_diag = lo_found & hi_found
     if not np.any(has_diag):
         if stats is not None:
             stats.normalize_seconds += time.perf_counter() - normalize_start

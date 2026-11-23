@@ -7,10 +7,13 @@ Thanks for your interest in improving ldetect-lite.
 ```bash
 git clone https://github.com/adamyhe/ldetect-lite.git
 cd ldetect-lite
-uv sync --group dev
+uv sync --group dev --compile-bytecode
 ```
 
 Run CLI commands and tests through `uv run` so they use the managed environment.
+`--compile-bytecode` (or `UV_COMPILE_BYTECODE=1`) precompiles the dependencies;
+without it the first run in a fresh checkout pays about 30 s of import-time
+compilation, which also skews any timing taken from a fresh worktree.
 
 ## Development workflow
 

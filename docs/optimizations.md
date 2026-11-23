@@ -19,6 +19,12 @@ uv run python scripts/benchmark_legacy_pipeline.py --warmups 1 --repeats 5
 uv run python scripts/benchmark_legacy_covariance.py --warmups 1 --repeats 2
 ```
 
+For timing, install with `uv sync --group dev --compile-bytecode` (or set
+`UV_COMPILE_BYTECODE=1`) first. Otherwise the first command in a fresh checkout
+also pays about 30 s of import-time bytecode compilation, which is how the
+EUR chr21 clean run varied between 113 s and 151 s in
+`notes/logs/benchmark-figures-bcf-2026-11.md`.
+
 `uv run snakemake --cores 1` must run first — it prepares `ref/` and `work/vcf/`
 (downloaded reference intermediates plus the matching 1000G VCF interval) that
 both benchmark scripts require, and it also regenerates the exactness figures
@@ -435,11 +441,23 @@ The original `calc_diag_lean` read each covariance partition into nested Python 
 
 Step 3 (`MatrixAnalysis.calc_diag_lean`) rereads every persisted covariance partition from HDF5 to build the correlation-sum vector, even though that same row data was already fully in memory moments earlier while Step 2 generated it. `calc_covariance` now accepts an optional `sidecar` that tees the exact `CovarianceRowChunk` stream already being written to the HDF5 partition — the persisted output is byte-for-byte unchanged — and accumulates the partition's vector-sum fragment in memory via the existing `_accumulate_vector_chunk`/`_DiagVectorPartitionResult` machinery. The only independently-derived quantity is the per-locus diagonal, computed by the closed-form `_diag_values_impl` (the `i == j` branch of the pairwise kernel collapses to a pure function of `hap_sums`, verified bit-exact against the persisted diagonal) rather than a second kernel pass — avoiding the class of bug that left an unresolved vector residual in an earlier two-kernel-invocation prototype.
 
-Each Step 2 worker returns its fragment directly as its process-pool result — no sidecar file is ever written to disk; the fragment is small (per-locus sums, not per-pair covariance) so returning it through the pool is cheap relative to the Step 3 re-read it replaces. `_fused_vector_ready` gates the fast path: it's only used when every partition was freshly computed this run (no skipped/cached partitions) and none of their sidecars were marked invalid. A sidecar is marked invalid if `calc_covariance` falls off the single-pass write path partway through (a rare defensive fallback, not expected on well-formed data) — its buffered rows would otherwise be an incomplete, silently-wrong view of the partition. Any of these cases fall back to today's post-hoc Step 3 read unchanged, rather than half-solving "some partitions have fragments, some don't."
+Each Step 2 worker returns its fragment directly as its process-pool result; the fragment is small (per-locus sums, not per-pair covariance) so returning it through the pool is cheap relative to the Step 3 re-read it replaces. A sidecar is marked invalid if `calc_covariance` falls off the single-pass write path partway through (a rare defensive fallback, not expected on well-formed data) — its buffered rows would otherwise be an incomplete, silently-wrong view of the partition.
 
-**Exactness:** `tests/test_cmd_run_fused_vector.py` verifies the fused fragment path produces byte-identical vector output to the post-hoc `MatrixAnalysis.calc_diag_lean` read on real bgzip/tabix-indexed data, and that tee-ing through the sidecar does not change the persisted HDF5 partition at all. `tests/test_covariance_sidecars.py` covers the accumulator's own lifecycle, including the invalid-marking safety net.
+**Saved fragments for cached reruns** (`_util/vector_fragments.py`, `_collect_vector_fragments` in `_cli/cmd_run.py`). Originally the fast path applied only when every partition was freshly computed in the same run, so any rerun that reused the covariance cache (for example to try other breakpoint settings) paid the full Step 3 re-read, about 11 s on EUR chr21 versus about 1 s fused. Each fragment is now also saved next to its partition as `<chrom>.<start>.<end>.vector.npz` (written to a temporary file, then renamed). A saved fragment is reused only if the partition `.h5` still has the size and modification time recorded at save time, and the plan fields that shape a fragment (`end`, the next partition's start, the center-locus lower bound and its inclusiveness, `snp_first`, `snp_last`) and the format version all match. Otherwise only that partition's fragment is recomputed from its `.h5` with the same per-partition function Step 3 uses, and re-saved. Fresh, saved and recomputed fragments are byte-identical for the same partition, so any mix of them gives the Step 3 vector. Partitions deleted by `--force-covariance` or as invalid take their fragment with them, and `--delete-covariance-cache` removes the whole directory. The fragments are deliberately separate files rather than a group inside each `.h5`: existing caches gain them on their first rerun without any cache file being modified in place.
 
-**CLI:** `--fused-vector`/`--no-fused-vector` on `ldetect run` (default: enabled). Requires the compact covariance cache (the sidecar only tees the compact single-pass write path); silently unavailable with `--covariance-cache full` rather than erroring. `--matrix-workers` has no effect on the fused path, since it replaces Step 3's worker pool entirely.
+Measured on the EUR chr21 cache (103 partitions, 1.9 GB; Slurm jobs 4141983 and 4142009 on cbsubscb16, AMD EPYC 7763, shared node, 4 workers; relative numbers only), cached `ldetect run` without the LD-neighborhood plot:
+
+| Cached rerun | Step 3 | Whole run |
+|---|---:|---:|
+| `--no-fused-vector` (Step 3 re-read) | ~11 s | 33.6-33.8 s |
+| No saved fragments yet (all 103 recomputed and saved) | ~10 s | 34.8-35.2 s |
+| Saved fragments | ~1 s | 24.0-24.2 s (4 runs) |
+
+The 103 fragments take 4.5 MB in total. Decompressed vectors, breakpoint JSON and BEDs were byte-identical across all four paths.
+
+**Exactness:** `tests/test_cmd_run_fused_vector.py` verifies the fused fragment path produces byte-identical vector output to the post-hoc `MatrixAnalysis.calc_diag_lean` read on real bgzip/tabix-indexed data, and that tee-ing through the sidecar does not change the persisted HDF5 partition at all. It also checks that a first run, a full cached rerun, a partial rerun, a deleted fragment and a touched partition file all reproduce the post-hoc vector; `tests/test_vector_fragments.py` covers the save/load checks. `tests/test_covariance_sidecars.py` covers the accumulator's own lifecycle, including the invalid-marking safety net.
+
+**CLI:** `--fused-vector`/`--no-fused-vector` on `ldetect run` (default: enabled). Requires the compact covariance cache (the sidecar only tees the compact single-pass write path) and the default `--matrix-backend array`; with `--covariance-cache full` or `--matrix-backend legacy` the normal Step 3 read runs instead, rather than erroring. `--matrix-workers` only sets the worker count for recomputing missing or stale fragments.
 
 ---
 
@@ -513,6 +531,53 @@ A cProfile of serial `find-minima` on EUR chr21 (83.6 s) put 31 s in the two str
 
 **Speed:** each metric pass on chr21 drops from ~16 s to ~6 s serial. `find-minima` on the cached chr21 covariance (cbsubscb19, `-c 8` = 4 cores + HT, two reps after warm-up) went from 80.7 s to 59.7 s serial (-26%) and from 20.8 s to 16.6 s at `--workers 8` (-20%).
 
-**What remains in Step 4:** local search (~36 s serial, ~8 s at 8 workers) is now the largest piece, split between per-row lookups/accumulation, overlap de-duplication (`_first_seen_pair_mask`) and re-reading overlapping partitions for each window. A fix needs a redesign of window assembly and must respect the multi-partition exactness constraint, so it was not attempted. Filter-width search (~13 s serial, 46 direct convolutions) could use FFT convolution, but that changes floating-point rounding and so possibly breakpoints. It would only be acceptable as an opt-in, non-exact mode.
+**What remains in Step 4:** local search (~36 s serial, ~8 s at 8 workers) is now the largest piece, split between per-row lookups/accumulation, overlap de-duplication (`_first_seen_pair_mask`) and re-reading overlapping partitions for each window. The lookups and de-duplication were later vectorized (section 23); re-reading overlapping partitions would need a redesign of window assembly that respects the multi-partition exactness constraint, and was not attempted. Filter-width search (~13 s serial, 46 direct convolutions) could use FFT convolution, but that changes floating-point rounding and so possibly breakpoints. It would only be acceptable as an opt-in, non-exact mode.
 
 **CLI:** no change.
+
+## 22. Vectorized LD-neighborhood sampling (`ld_neighborhood.py`)
+
+**Affected code:** `BottomKSampler`, `iter_boundary_r2`, `window_row_bounds`, `r2_with_mask` and `chromosome_separation_samples` in `src/ldetect_lite/ld_neighborhood.py`; `examples/MacDonald2022/scripts/plot_ld_neighborhood_separation.py` now uses the same helpers.
+
+**Problem:** `ldetect run --generate-ld-neighborhood-plot`, which the reproduction Snakefiles always request, spent about 62-71 s on EUR chr21, more than Steps 2 and 4 combined. The sampler converted every in-window r² value to a Python list and ran a per-value reservoir loop (~0.6 µs/value). Each boundary also read every owned row of each overlapping partition, not just the rows inside its window, and r² was looked up per category against the whole chromosome's diagonal.
+
+**Fix:**
+
+- **Bottom-k sampling.** Every value gets an independent uniform key and the 200,000 values with the smallest keys are kept, using `np.argpartition` on buffered batches. This is the same distribution as reservoir sampling (a uniform random subset without replacement) and is deterministic for a seed. Once the sample is full, values whose key is above the current cut-off are dropped before buffering.
+- **Window-clipped reads.** Each partition's owned `lo` range is clipped to `[boundary - window, boundary + window]` before reading, so rows the window mask would drop are never read or decompressed.
+- **One r² pass per chunk.** r² is computed once per chunk against the window's slice of the diagonal (which stays cache-resident), then split into left/across/right.
+
+**Measured impact** (Slurm job 4141936, cbsubscb16, AMD EPYC 7763, shared node, 8 slots; relative numbers only): `chromosome_separation_samples` on the EUR chr21 cache with its 23 `fourier_ls` breakpoints took 50.87 s and 53.69 s with the old code and 7.57 s twice with the new code (**~6.9x**). Inside `ldetect run` the plot step took 8 s with covariance cached and 14 s on the clean run, against ~62-71 s on cbsubscb17 before. On a synthetic 8 Mb cache the speedup was ~4.8x.
+
+**Exactness:** the sample is still a uniform random subset, but different values are drawn than before (different random number generator), so the plot changes slightly. r² quartiles per category on chr21 matched the old code's to the printed precision. The MacDonald2022 script's per-boundary TSV, which summarizes every in-window pair rather than a sample, was byte-identical between old and new code on the synthetic cache, confirming the clipped reads and single r² pass see exactly the same pairs. `tests/test_ld_neighborhood.py` adds sampler tests (cap, determinism, equal inclusion odds under uneven chunking) and a brute-force comparison over overlapping partitions.
+
+**CLI:** no change.
+
+## 23. Vectorized local-search precompute (`local_search.py`)
+
+**Affected code:** `_FirstSeenPairFilter`, `_PositionIndex`, `_add_hdf5_segment_values`, `_add_row_chunk_values` and `DenseLocalSearchAccumulator.lookup` in `src/ldetect_lite/local_search.py`
+
+Local search re-reads every covariance row in each breakpoint's window (505M rows for the 23 Fourier breakpoints on EUR chr21) and sums r2 per locus. With `-v debug` logging, serial `find-minima --subset fourier_ls` on the cached chr21 covariance spent 38 s in this precompute. Three parts were Python- or binary-search-bound:
+
+- **Overlap de-duplication (8.8 s).** Pairs in overlapping partitions appear in both, and the first one read wins (99M of the 505M rows are duplicates). The old `_first_seen_pair_mask` looped over each distinct `lo` in Python, with one `np.isin` and one `np.union1d` per locus. `_FirstSeenPairFilter` keeps the kept pairs as one sorted key array (`lo` and `hi` packed into a `uint64`, or 16-byte keys if a position needs more than 32 bits). Each chunk then costs a range test plus one `searchsorted`. HDF5 writers enforce sorted unique `(lo, hi)` rows within a partition, so pairs only repeat across partitions. The filter therefore keeps only the pairs some later partition can reach (`lo` at or past that partition's first locus) and drops the rest before reading each partition.
+- **Diagonal and accumulator lookups (9.2 s + 7.5 s).** Each kept row looked up both endpoints in the segment diagonal and in the accumulator's loci with `np.searchsorted`. The `hi` endpoints arrive in no particular order, so the binary search's cache misses dominate. `_PositionIndex` builds a dense `int32` position-to-index table over the positions' span, so each lookup becomes one gather. The table is used only up to 8M bp (32 MiB) and only when positions are strictly increasing; otherwise it falls back to `searchsorted`. The in-memory (cached) local-search path now shares `_add_row_chunk_values` instead of repeating it inline.
+
+**Exactness:** the same rows are kept, normalized and summed in the same order, so the breakpoint JSON is byte-identical. Unit tests check the filter against a Python `set` reference over random unsorted chunks, including positions past 32 bits. They also check `_PositionIndex` against `searchsorted` for dense, too-wide, non-increasing and empty inputs. Existing tests already compared duplicate pairs across partitions against the legacy path. On EUR chr21, the `fourier_ls` and all-subset JSONs were byte-identical to `main` in every run.
+
+**Speed:** cached EUR chr21 covariance on a shared AMD EPYC 7763 node (cbsubscb16, 4 cores + HT, `-v debug`, two alternating reps; relative numbers only):
+
+| `find-minima` | before | after |
+|---|---:|---:|
+| Local search precompute, 1 worker (sum over breakpoints) | 38.1 s | 21.0 s |
+| - de-duplication | 8.8 s | 4.1 s |
+| - diagonal normalize | 9.2 s | 4.0 s |
+| - accumulator lookup | 7.5 s | 1.4 s |
+| Local search, `--workers 4` | 13.1-13.2 s | 9.2-9.4 s |
+| `--subset fourier_ls`, `--workers 4`, whole run | 23.3 s | 19.4-19.7 s |
+| All subsets, `--workers 4`, whole run | 41.7 s | 33.3 s |
+
+Peak RSS per process rose by about 50 MB (`--workers 4`: 355 MB to 412 MB; serial: 475-482 MB to 526-529 MB), from the dense lookup tables and the kept-pair keys. HDF5 reads (~6 s serial) are now the largest single part of the precompute.
+
+**CLI:** no change.
+
+---
