@@ -637,7 +637,7 @@ def _add_hdf5_segment_values(
 
     lo_min = int(segment_loci[0])
     lo_max = int(segment_loci[-1])
-    seen_hi_by_lo: dict[int, np.ndarray] = {}
+    first_seen_pairs = _FirstSeenPairFilter()
     if stats is not None and readers_by_partition is not None:
         stats.hdf5_reader_reuse_count += len(active_partitions)
     if stats is not None:
@@ -679,7 +679,7 @@ def _add_hdf5_segment_values(
         row_shrink = chunk.shrink_ld[eligible]
 
         dedup_start = time.perf_counter()
-        first_seen = _first_seen_pair_mask(row_lo, row_hi, seen_hi_by_lo, stats)
+        first_seen = first_seen_pairs.mask(row_lo, row_hi)
         if stats is not None:
             stats.dedup_seconds += time.perf_counter() - dedup_start
             stats.duplicate_rows_skipped += int(
@@ -709,39 +709,70 @@ def _add_hdf5_segment_values(
         )
 
 
-def _first_seen_pair_mask(
-    row_lo: np.ndarray,
-    row_hi: np.ndarray,
-    seen_hi_by_lo: dict[int, np.ndarray],
-    stats: LocalSearchPrecomputeStats | None = None,
-) -> np.ndarray:
-    """Return rows whose physical pair has not appeared in earlier chunks."""
-    keep = np.ones(row_lo.size, dtype=bool)
-    if row_lo.size == 0:
+_PACKED_PAIR_LIMIT = 1 << 32
+
+
+class _FirstSeenPairFilter:
+    """First-seen-wins filter for physical ``(lo, hi)`` pairs across chunks.
+
+    A row is kept unless the same pair was kept from an earlier chunk.  Rows
+    within one chunk are assumed unique, as before: the HDF5 writer stores
+    canonical unique rows per partition and a chunk never spans partitions.
+
+    Kept pairs live in one sorted key array, so each chunk costs a vectorized
+    range test plus a ``searchsorted`` over the rows that could repeat, instead
+    of one ``isin``/``union1d`` pair per distinct ``lo``.  Keys pack ``lo`` and
+    ``hi`` into one ``uint64`` while both fit in 32 bits, and switch (once,
+    converting the kept keys) to 16-byte keys if a larger position shows up.
+    """
+
+    def __init__(self) -> None:
+        self._seen = np.empty(0, dtype=np.uint64)
+        self._wide = False
+
+    def _keys(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        if self._wide:
+            pairs = np.empty((lo.size, 2), dtype=np.int64)
+            pairs[:, 0] = lo
+            pairs[:, 1] = hi
+            return pairs.view("V16").ravel()
+        return (lo.astype(np.uint64) << np.uint64(32)) | hi.astype(np.uint64)
+
+    def _widen(self) -> None:
+        packed = self._seen
+        self._wide = True
+        lo = (packed >> np.uint64(32)).astype(np.int64)
+        hi = (packed & np.uint64(_PACKED_PAIR_LIMIT - 1)).astype(np.int64)
+        self._seen = np.sort(self._keys(lo, hi), kind="stable")
+
+    def mask(self, lo: np.ndarray, hi: np.ndarray) -> np.ndarray:
+        """Return the rows of this chunk to keep, and remember them."""
+        if lo.size == 0:
+            return np.ones(0, dtype=bool)
+        if not self._wide and (
+            int(min(lo.min(), hi.min())) < 0
+            or int(max(lo.max(), hi.max())) >= _PACKED_PAIR_LIMIT
+        ):
+            self._widen()
+        keys = self._keys(lo, hi)
+        keep = np.ones(lo.size, dtype=bool)
+        seen = self._seen
+        if seen.size:
+            if self._wide:
+                # Void keys have no ordering ufuncs; look every row up.
+                maybe = np.arange(keys.size)
+            else:
+                # Only rows inside the kept key range can repeat a pair.
+                maybe = np.flatnonzero((keys >= seen[0]) & (keys <= seen[-1]))
+            if maybe.size:
+                candidates = keys[maybe]
+                found = np.minimum(np.searchsorted(seen, candidates), seen.size - 1)
+                keep[maybe] = seen[found] != candidates
+            new_keys = keys[keep] if not keep.all() else keys
+            self._seen = np.sort(np.concatenate((seen, new_keys)), kind="stable")
+        else:
+            self._seen = np.sort(keys, kind="stable")
         return keep
-
-    group_starts = np.concatenate(
-        (
-            np.array([0], dtype=np.int64),
-            np.flatnonzero(row_lo[1:] != row_lo[:-1]) + 1,
-        )
-    )
-    group_ends = np.concatenate((group_starts[1:], np.array([row_lo.size])))
-    for start, end in zip(group_starts, group_ends):
-        locus = int(row_lo[start])
-        hi_values = row_hi[start:end]
-        seen = seen_hi_by_lo.get(locus)
-        if seen is None:
-            seen_hi_by_lo[locus] = hi_values.copy()
-            continue
-
-        duplicates = np.isin(hi_values, seen, assume_unique=True)
-        if np.any(duplicates):
-            keep[start:end] = ~duplicates
-        new_hi = hi_values[~duplicates]
-        if new_hi.size:
-            seen_hi_by_lo[locus] = np.union1d(seen, new_hi)
-    return keep
 
 
 def _add_row_chunk_values(
@@ -756,6 +787,19 @@ def _add_row_chunk_values(
 ) -> None:
     """Normalize one canonical row chunk and add local-search sums."""
     normalize_start = time.perf_counter()
+    # Look rows up in just the diagonal span they can hit: a chunk covers a
+    # narrow window of the segment's diagonal, and searchsorted over the short
+    # slice is much cheaper than over the whole array.  Indices are shifted
+    # back afterwards, so the lookups are unchanged.
+    if row_lo.size and diag_pos.size:
+        offset = int(np.searchsorted(diag_pos, row_lo.min(), side="left"))
+        stop = int(np.searchsorted(diag_pos, row_hi.max(), side="right"))
+        diag_pos = diag_pos[offset:stop]
+        diag_val = diag_val[offset:stop]
+    if diag_pos.size == 0:
+        if stats is not None:
+            stats.normalize_seconds += time.perf_counter() - normalize_start
+        return
     diag_lo_idx = np.searchsorted(diag_pos, row_lo)
     diag_hi_idx = np.searchsorted(diag_pos, row_hi)
     has_diag = (diag_lo_idx < diag_pos.size) & (diag_hi_idx < diag_pos.size)

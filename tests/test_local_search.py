@@ -18,7 +18,7 @@ from ldetect_lite.io.partitions import CovarianceStore
 from ldetect_lite.local_search import (
     DenseLocalSearchAccumulator,
     LocalSearch,
-    _first_seen_pair_mask,
+    _FirstSeenPairFilter,
     _iter_hdf5_canonical_segment_rows,
     _materialize_canonical_row_stream,
     _open_hdf5_reader_pool,
@@ -459,29 +459,61 @@ def test_hdf5_segment_stream_matches_with_reader_pool_reuse(tmp_path: Path) -> N
         np.testing.assert_array_equal(pooled_values, baseline_values)
 
 
-def test_first_seen_pair_mask_uses_seen_rows_across_chunks() -> None:
-    seen_hi_by_lo: dict[int, np.ndarray] = {}
+def test_first_seen_pair_filter_uses_seen_rows_across_chunks() -> None:
+    pairs = _FirstSeenPairFilter()
     first_lo = np.array([100, 100, 100, 200], dtype=np.int32)
     first_hi = np.array([100, 200, 300, 200], dtype=np.int32)
     second_lo = np.array([100, 100, 100, 200, 200], dtype=np.int32)
     second_hi = np.array([200, 300, 400, 200, 500], dtype=np.int32)
 
     np.testing.assert_array_equal(
-        _first_seen_pair_mask(first_lo, first_hi, seen_hi_by_lo),
+        pairs.mask(first_lo, first_hi),
         np.array([True, True, True, True]),
     )
     np.testing.assert_array_equal(
-        _first_seen_pair_mask(second_lo, second_hi, seen_hi_by_lo),
+        pairs.mask(second_lo, second_hi),
         np.array([False, False, True, False, True]),
     )
+    # Pairs kept from the second chunk are remembered too.
     np.testing.assert_array_equal(
-        seen_hi_by_lo[100],
-        np.array([100, 200, 300, 400], dtype=np.int32),
+        pairs.mask(
+            np.array([100, 200, 300], dtype=np.int32),
+            np.array([400, 500, 300], dtype=np.int32),
+        ),
+        np.array([False, False, True]),
     )
-    np.testing.assert_array_equal(
-        seen_hi_by_lo[200],
-        np.array([200, 500], dtype=np.int32),
-    )
+
+
+@pytest.mark.parametrize("wide_chunk", [None, 0, 2])
+def test_first_seen_pair_filter_matches_set_reference(
+    wide_chunk: int | None,
+) -> None:
+    """Random unsorted chunks, optionally with positions past 32 bits."""
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        pairs = _FirstSeenPairFilter()
+        reference: set[tuple[int, int]] = set()
+        for chunk_index in range(5):
+            lo = rng.integers(0, 40, 150)
+            hi = lo + rng.integers(0, 40, 150)
+            if chunk_index == wide_chunk:
+                lo = lo + (1 << 33)
+                hi = hi + (1 << 33)
+            unique = np.unique(np.stack([lo, hi], axis=1), axis=0)
+            unique = unique[rng.permutation(unique.shape[0])]
+            lo, hi = unique[:, 0], unique[:, 1]
+            if wide_chunk is None:
+                lo, hi = lo.astype(np.int32), hi.astype(np.int32)
+
+            expected = np.array(
+                [
+                    (a, b) not in reference
+                    for a, b in zip(lo.tolist(), hi.tolist(), strict=True)
+                ],
+                dtype=bool,
+            )
+            np.testing.assert_array_equal(pairs.mask(lo, hi), expected)
+            reference.update(zip(lo.tolist(), hi.tolist(), strict=True))
 
 
 def test_dense_local_search_accumulator_sums_known_loci() -> None:
@@ -768,7 +800,14 @@ def test_local_search_left_tie_prefers_closest_candidate(tmp_path: Path) -> None
     results = {}
     for use_decimal in (False, True):
         search = LocalSearch(
-            "chr1", 100, 700, 0, breakpoints, total_sum, total_n, store,
+            "chr1",
+            100,
+            700,
+            0,
+            breakpoints,
+            total_sum,
+            total_n,
+            store,
             use_decimal=use_decimal,
         )
         search.init_search()
@@ -808,7 +847,14 @@ def test_local_search_skips_nonpositive_n_zero_candidates(tmp_path: Path) -> Non
 
     for use_decimal in (False, True):
         search = LocalSearch(
-            "chr1", 100, 700, 0, breakpoints, total_sum, total_n, store,
+            "chr1",
+            100,
+            700,
+            0,
+            breakpoints,
+            total_sum,
+            total_n,
+            store,
             use_decimal=use_decimal,
         )
         search.init_search()
