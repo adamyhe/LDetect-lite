@@ -48,6 +48,11 @@ details and measurements for each optimization are in
 - `docs/optimizations.md` notes that BCF no longer reduces peak RSS. With the
   current streaming Step 2, peak memory is the same for both formats; BCF is
   recommended for speed (3.5-4x faster genotype reading).
+- The VCF download rules (`examples/ldetect_original/Snakefile` and its
+  diagnostic Snakefiles, `examples/MacDonald2022/Snakefile`) check each
+  downloaded VCF and `.tbi` with `gzip -t` and retry up to 3 times. `wget`
+  exits 0 on a corrupted transfer, which previously surfaced only later as a
+  `filter_vcf` inflate error.
 
 ### Added
 - `examples/ldetect_example/scripts/benchmark_legacy_covariance.py` times

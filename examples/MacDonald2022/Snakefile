@@ -489,11 +489,24 @@ rule download_vcf:
     params:
         base_url=config["vcf_base_url"],
         fname=lambda wc: VCF_TMPL.format(chrom=wc.chrom),
+        attempts=3,
     shell:
+        # wget exits 0 on a silently truncated or corrupted transfer, so verify
+        # both bgzip files' per-block CRCs with gzip -t and retry a bad download
+        # (same check as examples/ldetect_original/Snakefile's download_vcf).
         """
         mkdir -p {RAW_DIR}
-        wget -q -O {output.vcf} {params.base_url}/{params.fname}
-        wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi
+        for attempt in $(seq 1 {params.attempts}); do
+            if wget -q -O {output.vcf} {params.base_url}/{params.fname} \
+                && wget -q -O {output.tbi} {params.base_url}/{params.fname}.tbi \
+                && gzip -t {output.vcf} && gzip -t {output.tbi}; then
+                exit 0
+            fi
+            echo "download_vcf chr{wildcards.chrom}: attempt $attempt of" \
+                "{params.attempts} failed (download or gzip -t)" >&2
+            sleep 60
+        done
+        exit 1
         """
 
 
